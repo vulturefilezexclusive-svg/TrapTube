@@ -59,7 +59,7 @@ private enum HTDemucsRuntime {
         var supplied = false
         var conversionError: NSError?
         let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-            guard !supplied else { inputStatus.pointee = .noDataNow; return nil }
+            guard !supplied else { inputStatus.pointee = .endOfStream; return nil }
             supplied = true
             inputStatus.pointee = .haveData
             return source
