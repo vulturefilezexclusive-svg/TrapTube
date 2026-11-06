@@ -28,11 +28,23 @@ jobs:
           unzip -oq ci/source.zip -d work
           test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
           test -f work/TrapTube/scripts/build-unsigned-ipa.sh
-      - name: Apply verified source fixes
+      - name: Apply BANDOTUBE revision overlays
         shell: bash
         run: |
           set -euo pipefail
           cp ci/patches/AudioEngineManager.swift work/TrapTube/TrapTube/Services/AudioEngineManager.swift
+          cp ci/patches/LibraryStore.swift work/TrapTube/TrapTube/Services/LibraryStore.swift
+          cp ci/patches/ThemeManager.swift work/TrapTube/TrapTube/Services/ThemeManager.swift
+          cp ci/patches/TypeTypeService.swift work/TrapTube/TrapTube/Services/TypeTypeService.swift
+          cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
+          cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("work/TrapTube/TrapTube/Views/Components.swift")
+          source = path.read_text()
+          source = source.replace('title: "YouTube"', 'title: "Videos"')
+          path.write_text(source)
+          PY
       - name: Build and package unsigned IPA
         shell: bash
         run: |
