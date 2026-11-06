@@ -12,7 +12,6 @@ final class AudioEngineManager: ObservableObject {
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var playbackError: String?
-    @Published private(set) var isUsingCompatibilityPlayer = false
     @Published private(set) var eqGains = Array(repeating: Float(0), count: 16)
     @Published private(set) var bassBoost: Float = 0
     @Published private(set) var masterGain: Float = 1
@@ -26,7 +25,6 @@ final class AudioEngineManager: ObservableObject {
     private let bassStage = AVAudioUnitEQ(numberOfBands: 1)
     private let masterStage = AVAudioUnitEQ(numberOfBands: 0)
     private var currentFile: AVAudioFile?
-    private var fallbackPlayer: AVPlayer?
     private var queue: [Track] = []
     private var queueIndex = 0
     private var engineConfigured = false
@@ -44,11 +42,6 @@ final class AudioEngineManager: ObservableObject {
 
     func togglePlayback() {
         guard currentTrack != nil else { return }
-        if let fallbackPlayer {
-            if isPlaying { fallbackPlayer.pause(); isPlaying = false }
-            else { fallbackPlayer.play(); isPlaying = true }
-            return
-        }
         if isPlaying {
             playerNode.pause()
             isPlaying = false
@@ -58,7 +51,7 @@ final class AudioEngineManager: ObservableObject {
                 playerNode.play()
                 isPlaying = true
             } catch {
-                if let track = currentTrack { startCompatibilityPlayer(for: track, at: currentTime, originalError: error) }
+                if let track = currentTrack { failPlayback(trackName: track.title, error: error) }
             }
         }
     }
@@ -91,26 +84,10 @@ final class AudioEngineManager: ObservableObject {
     func seek(to time: TimeInterval) {
         guard let track = currentTrack else { return }
         let target = min(max(0, time), max(duration, 0))
-        if let fallbackPlayer {
-            fallbackPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-            currentTime = target
-        } else {
-            start(track, at: target, autoplay: isPlaying)
-        }
+        start(track, at: target, autoplay: isPlaying)
     }
 
     func refreshProgress() {
-        if let fallbackPlayer {
-            let value = fallbackPlayer.currentTime().seconds
-            if value.isFinite { currentTime = value }
-            if let item = fallbackPlayer.currentItem, item.status == .failed {
-                let error = item.error ?? NSError(domain: "AVPlayerItem", code: -1, userInfo: [NSLocalizedDescriptionKey: "The media decoder rejected this file."])
-                failPlayback(trackName: currentTrack?.title ?? "Audio file", error: error)
-                return
-            }
-            if isPlaying, duration > 0, currentTime >= duration - 0.2 { isPlaying = false; next() }
-            return
-        }
         guard isPlaying, let renderTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: renderTime), playerTime.sampleRate > 0 else { return }
         currentTime = Double(playerTime.sampleTime) / playerTime.sampleRate
@@ -183,8 +160,6 @@ final class AudioEngineManager: ObservableObject {
     private func start(_ track: Track, at time: TimeInterval, autoplay: Bool) {
         playbackGeneration += 1
         let generation = playbackGeneration
-        fallbackPlayer?.pause(); fallbackPlayer = nil
-        isUsingCompatibilityPlayer = false
         playerNode.stop(); currentFile = nil
         currentTrack = track
         playbackError = nil
@@ -217,7 +192,7 @@ final class AudioEngineManager: ObservableObject {
             }
             if autoplay { playerNode.play(); isPlaying = true } else { isPlaying = false }
         } catch {
-            startCompatibilityPlayer(for: track, at: time, originalError: error)
+            failPlayback(trackName: track.title, error: error)
         }
     }
 
@@ -232,27 +207,6 @@ final class AudioEngineManager: ObservableObject {
         if !engine.isRunning { engine.prepare(); try engine.start() }
     }
 
-    private func startCompatibilityPlayer(for track: Track, at time: TimeInterval, originalError: Error) {
-        let url = LibraryStore.audioURL(for: track.fileName).standardizedFileURL
-        do {
-            try configureAudioSession()
-            let item = AVPlayerItem(url: url)
-            let player = AVPlayer(playerItem: item)
-            fallbackPlayer = player
-            currentFile = nil
-            isUsingCompatibilityPlayer = true
-            duration = track.duration
-            currentTime = max(0, time)
-            if time > 0 { player.seek(to: CMTime(seconds: time, preferredTimescale: 600)) }
-            player.play()
-            isPlaying = true
-            playbackError = nil
-        } catch {
-            let combined = NSError(domain: "TrapTube.Playback", code: (error as NSError).code, userInfo: [NSLocalizedDescriptionKey: "Audio engine failed: \(originalError.localizedDescription). Compatibility playback failed: \(error.localizedDescription)"])
-            failPlayback(trackName: track.title, error: combined)
-        }
-    }
-
     private func failPlayback(trackName: String, error: Error) {
         stopPlayback(clearTrack: true)
         let ns = error as NSError
@@ -262,10 +216,8 @@ final class AudioEngineManager: ObservableObject {
     private func stopPlayback(clearTrack: Bool) {
         playbackGeneration += 1
         playerNode.stop()
-        fallbackPlayer?.pause(); fallbackPlayer = nil
         currentFile = nil
         isPlaying = false
-        isUsingCompatibilityPlayer = false
         if clearTrack { currentTrack = nil; currentTime = 0; duration = 0 }
     }
 }
