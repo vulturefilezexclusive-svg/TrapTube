@@ -104,7 +104,7 @@ jobs:
           mkdir -p "$COMPILED_MODELS"
           xcrun coremlcompiler compile "$MODEL_PACKAGE" "$COMPILED_MODELS"
           COMPILED_MODEL="$COMPILED_MODELS/HTDemucs_SourceSeparation_F32.mlmodelc"
-          if [[ ! -d "$COMPILED_MODEL" || ! -s "$COMPILED_MODEL/Manifest.json" ]]; then
+          if [[ ! -d "$COMPILED_MODEL" || ! -s "$COMPILED_MODEL/model.mil" || ! -s "$COMPILED_MODEL/coremldata.bin" ]]; then
             echo "ERROR: coremlcompiler did not produce the expected compiled model." >&2
             find "$COMPILED_MODELS" -maxdepth 2 -print >&2 || true
             exit 4
@@ -129,7 +129,8 @@ jobs:
           verify_replacement = '''/usr/bin/unzip -tq "$IPA_PATH"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGING/Payload/TrapTube.app/Info.plist"
           /usr/bin/unzip -Z1 "$IPA_PATH" > "$BUILD_ROOT/ipa-files.txt"
-          grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/Manifest.json' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model missing from IPA." >&2; exit 5; }
+          grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/model.mil' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model program missing from IPA." >&2; exit 5; }
+          grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/coremldata.bin' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model weights missing from IPA." >&2; exit 5; }
           grep -qx 'Payload/TrapTube.app/HTDemucs-ATTRIBUTION.md' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: HTDemucs attribution missing from IPA." >&2; exit 5; }
           /usr/bin/shasum -a 256 "$IPA_PATH" > "$DIST_DIR/SHA256SUMS.txt"
           '''
