@@ -205,6 +205,9 @@ private enum HTDemucsRuntime {
             let spectralWave = try inverseSpectrogram(real: freq[base..<(base + plane)], imaginary: freq[(base + plane)..<(base + 2 * plane)])
             let timeBase = (source * 2 + channel) * segmentLength
             for i in 0..<segmentLength { stems[source][channel][i] = spectralWave[i] + time[timeBase + i] }
+            guard stems[source][channel].allSatisfy(\.isFinite) else {
+                throw DemucsError.processing("HTDemucs frequency/time reconstruction produced invalid samples for source \(source), channel \(channel). No WAV files were written.")
+            }
         } }
         return stems
     }
