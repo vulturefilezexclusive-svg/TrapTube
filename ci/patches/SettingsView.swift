@@ -34,7 +34,7 @@ struct SettingsView: View {
                             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color(hex: "5A1019").opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
                     }
-                    Text(player.isUsingCompatibilityPlayer ? "Compatibility playback is active for this file; the equalizer is bypassed for this track." : "Audio is processed locally through AVAudioEngine when the file format is supported.")
+                    Text("Local playback always uses the AVAudioEngine EQ path. If the engine cannot decode a track, TrapTube reports an error instead of playing it without equalization.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                 }
 
@@ -67,10 +67,7 @@ struct SettingsView: View {
                 }
 
                 settingsCard(title: "Streaming quality", icon: "slider.horizontal.3") {
-                    qualityRow(title: "Video quality", value: "Auto")
-                    Divider().overlay(.white.opacity(0.1))
-                    qualityRow(title: "Audio quality", value: "Auto")
-                    Text("TypeType selects supported stream renditions in its watch player. Exact quality choices vary by video; no unsupported quality levels are shown here.")
+                    Text("Quality choices are loaded from the active TypeType stream. Open a video and use the in-player Quality menu for available video renditions and the Audio menu for available audio tracks. TrapTube does not display fixed quality levels that the stream does not support.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                 }
 
@@ -138,14 +135,6 @@ struct SettingsView: View {
         VStack(spacing: 6) {
             HStack { Text(title).font(.subheadline.bold()).foregroundStyle(.white); Spacer(); Text("\(Int(value))\(suffix)").font(.subheadline.monospacedDigit()).foregroundStyle(Color(hex: "D2D0D2")) }
             Slider(value: Binding(get: { value }, set: onChange), in: range).tint(theme.accent)
-        }
-    }
-
-    private func qualityRow(title: String, value: String) -> some View {
-        HStack {
-            Text(title).font(.subheadline.bold()).foregroundStyle(.white)
-            Spacer()
-            Label(value, systemImage: "arrow.up.arrow.down.circle").font(.subheadline).foregroundStyle(theme.accent)
         }
     }
 
