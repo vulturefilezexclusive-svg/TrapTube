@@ -29,6 +29,7 @@ final class AudioEngineManager: ObservableObject {
     private var queueIndex = 0
     private var engineConfigured = false
     private var playbackGeneration = 0
+    private var scheduledStartTime: TimeInterval = 0
 
     init() { configureGraph() }
 
@@ -90,7 +91,7 @@ final class AudioEngineManager: ObservableObject {
     func refreshProgress() {
         guard isPlaying, let renderTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: renderTime), playerTime.sampleRate > 0 else { return }
-        currentTime = Double(playerTime.sampleTime) / playerTime.sampleRate
+        currentTime = scheduledStartTime + Double(playerTime.sampleTime) / playerTime.sampleRate
         if duration > 0, currentTime >= duration - 0.15 { isPlaying = false; next() }
     }
 
@@ -178,6 +179,7 @@ final class AudioEngineManager: ObservableObject {
             duration = Double(file.length) / file.processingFormat.sampleRate
             if duration <= 0 { duration = track.duration }
             currentTime = min(max(0, time), duration)
+            scheduledStartTime = currentTime
             try startEngineIfNeeded()
             let startFrame = AVAudioFramePosition(currentTime * file.processingFormat.sampleRate)
             let remainingFrames = max(0, file.length - startFrame)
@@ -218,6 +220,6 @@ final class AudioEngineManager: ObservableObject {
         playerNode.stop()
         currentFile = nil
         isPlaying = false
-        if clearTrack { currentTrack = nil; currentTime = 0; duration = 0 }
+        if clearTrack { currentTrack = nil; currentTime = 0; duration = 0; scheduledStartTime = 0 }
     }
 }
