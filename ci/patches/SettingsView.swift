@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var connectionStatus: String?
     @State private var checkingConnection = false
     @State private var showEqualizer = false
+    @StateObject private var stemService = StemSeparationService()
 
     private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
 
@@ -110,7 +111,7 @@ struct SettingsView: View {
                     Divider().overlay(.white.opacity(0.1))
                     infoRow("Supported formats", value: "MP3 · M4A · AAC · WAV · AIFF")
                     Divider().overlay(.white.opacity(0.1))
-                    infoRow("Stem separation", value: "Unavailable until a licensed Core ML model is bundled and validated")
+                    infoRow("Stem separation", value: stemService.availability.title)
                 }
 
                 Text("TrapTube · Local music stays on this device. Remote video discovery and playback are provided by TypeType.")
@@ -120,6 +121,7 @@ struct SettingsView: View {
             .padding(.top, 7).padding(.bottom, 20)
         }
         .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player).environmentObject(theme).presentationDetents([.large]) }
+        .onAppear { stemService.refresh() }
     }
 
     private func settingsCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
