@@ -3,7 +3,7 @@ name: Build TrapTube unsigned IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, feature/native-player-demucs-eq]
     paths:
       - 'ci/source.zip'
       - 'ci/patches/**'
