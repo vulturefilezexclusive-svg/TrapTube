@@ -479,6 +479,15 @@ private struct TypeTypeWebView: UIViewRepresentable {
           apply();
           post({type:"eqStatus", ready:true}); state();
         } catch (error) {
+          try {
+            if (directSource && context) {
+              directSource.disconnect();
+              filters.forEach(node => node.disconnect());
+              if (shelf) shelf.disconnect();
+              if (gain) gain.disconnect();
+              directSource.connect(context.destination);
+            }
+          } catch (_) {}
           post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: " + (error && error.message ? error.message : String(error))});
         }
       };
