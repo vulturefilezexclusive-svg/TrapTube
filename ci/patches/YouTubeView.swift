@@ -429,6 +429,8 @@ private struct TypeTypeWebView: UIViewRepresentable {
       const hz = [32,64,125,250,500,1000,2000,3000,4000,5000,6000,7000,8000,10000,12000,16000];
       let video = null, context = null, filters = [], shelf = null, gain = null, directSource = null;
       let settings = {gains:Array(16).fill(0), bass:0, master:1};
+      const bootstrapStartedAt = Date.now();
+      let missingVideoReported = false;
       const state = () => {
         if (video) post({type:"state", currentTime:video.currentTime || 0, duration:Number.isFinite(video.duration) ? video.duration : 0, paused:video.paused});
       };
@@ -436,13 +438,24 @@ private struct TypeTypeWebView: UIViewRepresentable {
         if (!filters.length || !shelf || !gain) return;
         hz.forEach((_, i) => filters[i].gain.value = Number(settings.gains[i] || 0));
         shelf.gain.value = Number(settings.bass || 0);
-        gain.gain.value = Math.max(0, Math.min(2, Number(settings.master ?? 1)));
+        const peakBoost = Math.max(0, ...settings.gains.map(value => Number(value) || 0)) + Number(settings.bass || 0);
+        const headroomDB = -Math.min(18, peakBoost * 0.5);
+        const master = Math.max(0, Math.min(2, Number(settings.master ?? 1)));
+        gain.gain.value = master * Math.pow(10, headroomDB / 20);
       };
       window.__traptubeSetEQ = value => { settings = Object.assign(settings, value || {}); apply(); };
       const attach = () => {
         const candidate = document.querySelector("main .vds-player video") || document.querySelector(".vds-player video") || document.querySelector("video");
-        if (!candidate || candidate === video) return;
+        if (!candidate) {
+          if (!missingVideoReported && Date.now() - bootstrapStartedAt > 12000) {
+            missingVideoReported = true;
+            post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: TypeType has not exposed a playable video element yet."});
+          }
+          return;
+        }
+        if (candidate === video) return;
         video = candidate;
+        missingVideoReported = false;
         try {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
           if (!AudioContextClass) throw new Error("Web Audio is unavailable in this WebKit runtime.");
