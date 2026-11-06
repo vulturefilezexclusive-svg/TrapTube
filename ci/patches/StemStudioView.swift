@@ -71,7 +71,7 @@ struct StemStudioView: View {
                         .background(theme.accent, in: Capsule())
                     }
                     .disabled(selectedTrack == nil || stemService.isProcessing || stemService.availability != .bundled)
-                    .opacity(selectedTrack == nil || stemService.isProcessing || stemService.availability != .ready ? 0.5 : 1)
+                    .opacity(selectedTrack == nil || stemService.isProcessing || stemService.availability != .bundled ? 0.5 : 1)
 
                     if stemService.isProcessing {
                         ProgressView(value: stemService.progress)
