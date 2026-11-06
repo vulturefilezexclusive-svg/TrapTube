@@ -42,7 +42,7 @@ jobs:
           cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
           cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
           cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/Views/StemStudioView.swift
-          cp ci/patches/HTDemucs-ATTRIBUTION.md work/TrapTube/HTDemucs-ATTRIBUTION.md
+          cp ci/patches/HTDemucs-ATTRIBUTION.md work/TrapTube/TrapTube/Models/HTDemucs-ATTRIBUTION.md
           python3 - <<'PY'
           from pathlib import Path
           path = Path("work/TrapTube/TrapTube/Views/Components.swift")
@@ -94,6 +94,22 @@ jobs:
               raise SystemExit("Could not find the TrapTube Sources build phase.")
           if build_id not in s[s.index(sources_phase):s.index("/* End PBXSourcesBuildPhase section */")]:
               s = s.replace(sources_phase, sources_phase + f'{build_id} /* HTDemucs_SourceSeparation_F32.mlpackage in Sources */, ')
+          attribution_file_id = "B10000000000000000000003"
+          attribution_build_id = "B10000000000000000000004"
+          if attribution_file_id not in s:
+              attribution_file = f'\t\t{attribution_file_id} /* HTDemucs-ATTRIBUTION.md */ = {{isa = PBXFileReference; lastKnownFileType = text; path = "HTDemucs-ATTRIBUTION.md"; sourceTree = "<group>"; }};\n'
+              s = s.replace("/* End PBXFileReference section */", attribution_file + "/* End PBXFileReference section */")
+          if attribution_build_id not in s:
+              attribution_build = f'\t\t{attribution_build_id} /* HTDemucs-ATTRIBUTION.md in Resources */ = {{isa = PBXBuildFile; fileRef = {attribution_file_id} /* HTDemucs-ATTRIBUTION.md */; }};\n'
+              s = s.replace("/* End PBXBuildFile section */", attribution_build + "/* End PBXBuildFile section */")
+          models_group_end = "/* End PBXGroup section */"
+          if attribution_file_id not in s[s.index(models_group):s.index(models_group_end)]:
+              s = s.replace(models_group, models_group + f'{attribution_file_id} /* HTDemucs-ATTRIBUTION.md */, ')
+          resources_phase = "86F6FE2DD6E869C1842A14B3 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ("
+          if resources_phase not in s:
+              raise SystemExit("Could not find the TrapTube Resources build phase.")
+          if attribution_build_id not in s[s.index(resources_phase):s.index("/* End PBXResourcesBuildPhase section */")]:
+              s = s.replace(resources_phase, resources_phase + f'{attribution_build_id} /* HTDemucs-ATTRIBUTION.md in Resources */, ')
           p.write_text(s)
           PY
 
