@@ -34,19 +34,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp ci/patches/AudioEngineManager.swift work/TrapTube/TrapTube/TrapTube/Services/AudioEngineManager.swift
-          cp ci/patches/LibraryStore.swift work/TrapTube/TrapTube/TrapTube/Services/LibraryStore.swift
-          cp ci/patches/ThemeManager.swift work/TrapTube/TrapTube/TrapTube/Services/ThemeManager.swift
-          cp ci/patches/TypeTypeService.swift work/TrapTube/TrapTube/TrapTube/Services/TypeTypeService.swift
-          cp ci/patches/StemSeparationService.swift work/TrapTube/TrapTube/TrapTube/Services/StemSeparationService.swift
-          cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/TrapTube/Views/SettingsView.swift
-          cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/TrapTube/Views/YouTubeView.swift
-          cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/TrapTube/Views/StemStudioView.swift
-          python3 ci/patches/KeepImportAction.py work/TrapTube/TrapTube
-          cp ci/patches/HTDemucs-ATTRIBUTION.md work/TrapTube/TrapTube/TrapTube/Models/HTDemucs-ATTRIBUTION.md
-          python3 - <<'PY'
+          SERVICE_SOURCE="$(find work/TrapTube -type f -name AudioEngineManager.swift -print -quit)"
+          VIEW_SOURCE="$(find work/TrapTube -type f -name HomeView.swift -print -quit)"
+          MODEL_SOURCE="$(find work/TrapTube -type f -name Track.swift -print -quit)"
+          COMPONENTS_FILE="$(find work/TrapTube -type f -name Components.swift -print -quit)"
+          test -n "$SERVICE_SOURCE" && test -n "$VIEW_SOURCE" && test -n "$MODEL_SOURCE" && test -n "$COMPONENTS_FILE"
+          SERVICES_DIR="$(dirname "$SERVICE_SOURCE")"
+          VIEWS_DIR="$(dirname "$VIEW_SOURCE")"
+          MODELS_DIR="$(dirname "$MODEL_SOURCE")"
+          cp ci/patches/AudioEngineManager.swift "$SERVICES_DIR/AudioEngineManager.swift"
+          cp ci/patches/LibraryStore.swift "$SERVICES_DIR/LibraryStore.swift"
+          cp ci/patches/ThemeManager.swift "$SERVICES_DIR/ThemeManager.swift"
+          cp ci/patches/TypeTypeService.swift "$SERVICES_DIR/TypeTypeService.swift"
+          cp ci/patches/StemSeparationService.swift "$SERVICES_DIR/StemSeparationService.swift"
+          cp ci/patches/SettingsView.swift "$VIEWS_DIR/SettingsView.swift"
+          cp ci/patches/YouTubeView.swift "$VIEWS_DIR/YouTubeView.swift"
+          cp ci/patches/StemStudioView.swift "$VIEWS_DIR/StemStudioView.swift"
+          python3 ci/patches/KeepImportAction.py work/TrapTube
+          cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
+          python3 - "$COMPONENTS_FILE" <<'PY'
           from pathlib import Path
-          path = Path("work/TrapTube/TrapTube/TrapTube/Views/Components.swift")
+          import sys
+          path = Path(sys.argv[1])
           source = path.read_text()
           source = source.replace('title: "YouTube"', 'title: "Videos"')
           path.write_text(source)
@@ -131,10 +140,13 @@ jobs:
               raise SystemExit("HTDemucs model I/O schema mismatch: inputs=%r outputs=%r" % (actual_inputs, actual_outputs))
           print("Verified HTDemucs Float16 I/O schema and tensor dimensions.")
           PYMODEL
-          grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' TrapTube/TrapTube/Services/StemSeparationService.swift
-          grep -q 'validateDSPRoundTrip' TrapTube/TrapTube/Services/StemSeparationService.swift
+          STEM_SOURCE="$(find "$PROJECT_ROOT" -type f -name StemSeparationService.swift -print -quit)"
+          TRACK_SOURCE="$(find "$PROJECT_ROOT" -type f -name Track.swift -print -quit)"
+          test -n "$STEM_SOURCE" && test -n "$TRACK_SOURCE"
+          grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' "$STEM_SOURCE"
+          grep -q 'validateDSPRoundTrip' "$STEM_SOURCE"
           ditto "$COMPILED_MODEL" "$APP_PATH/HTDemucs_SourceSeparation_F32.mlmodelc"
-          ATTRIBUTION="$PROJECT_ROOT/TrapTube/TrapTube/Models/HTDemucs-ATTRIBUTION.md"
+          ATTRIBUTION="$(dirname "$TRACK_SOURCE")/HTDemucs-ATTRIBUTION.md"
           if [[ ! -s "$ATTRIBUTION" ]]; then
             echo "ERROR: HTDemucs MIT license/attribution file is missing." >&2
             exit 4
