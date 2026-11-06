@@ -66,9 +66,28 @@ final class LibraryStore: ObservableObject {
                 let attributes = try fileManager.attributesOfItem(atPath: target.path)
                 let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0 else { throw ImportError.emptyFile }
+
+                // Validate the exported file with the same decoder used by local playback.
+                let playbackProbe = try AVAudioFile(forReading: target)
+                guard playbackProbe.length > 0,
+                      playbackProbe.processingFormat.sampleRate.isFinite,
+                      playbackProbe.processingFormat.sampleRate > 0,
+                      playbackProbe.processingFormat.channelCount > 0 else {
+                    throw ImportError.playbackValidationFailed
+                }
+                let probeFrames = AVAudioFrameCount(min(4_096, playbackProbe.length))
+                guard let probeBuffer = AVAudioPCMBuffer(pcmFormat: playbackProbe.processingFormat, frameCapacity: probeFrames) else {
+                    throw ImportError.playbackValidationFailed
+                }
+                try playbackProbe.read(into: probeBuffer, frameCount: probeFrames)
+                guard probeBuffer.frameLength > 0 else { throw ImportError.playbackValidationFailed }
+                let verifiedDuration = Double(playbackProbe.length) / playbackProbe.processingFormat.sampleRate
+                guard verifiedDuration.isFinite, verifiedDuration > 0 else {
+                    throw ImportError.playbackValidationFailed
+                }
                 let title = source.deletingPathExtension().lastPathComponent
                 tracks.insert(
-                    Track(title: title, artist: "Unknown artist", fileName: fileName, duration: duration, fileSizeBytes: size),
+                    Track(title: title, artist: "Unknown artist", fileName: fileName, duration: verifiedDuration, fileSizeBytes: size),
                     at: 0
                 )
             } catch {
@@ -82,13 +101,14 @@ final class LibraryStore: ObservableObject {
     }
 
     enum ImportError: LocalizedError {
-        case emptyFile, noAudioTrack, exportUnavailable, exportFailed
+        case emptyFile, noAudioTrack, exportUnavailable, exportFailed, playbackValidationFailed
         var errorDescription: String? {
             switch self {
             case .emptyFile: return "The selected file is empty."
             case .noAudioTrack: return "This file does not contain a playable audio track."
             case .exportUnavailable: return "iOS could not create an audio converter for this file. Try a different audio format."
             case .exportFailed: return "iOS could not convert this file to the app's playback format."
+            case .playbackValidationFailed: return "The converted audio could not be opened by TrapTube's playback decoder, so it was not added to your library."
             }
         }
     }

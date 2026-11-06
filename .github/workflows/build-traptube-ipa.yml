@@ -3,7 +3,7 @@ name: Build TrapTube unsigned IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, feature/native-player-demucs-eq]
     paths:
       - 'ci/source.zip'
       - 'ci/patches/**'
@@ -109,6 +109,30 @@ jobs:
             find "$COMPILED_MODELS" -maxdepth 2 -print >&2 || true
             exit 4
           fi
+          # Fail the build if the downloaded model contract diverges from the Swift adapter.
+          python3 - "$COMPILED_MODEL/metadata.json" <<'PYMODEL'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              metadata = json.load(handle)
+          if isinstance(metadata, list):
+              metadata = metadata[0]
+          def schema(key):
+              return {item["name"]: (item["dataType"], item["shape"]) for item in metadata[key]}
+          expected_inputs = {
+              "audio_waveform": ("Float16", "[1, 2, 343980]"),
+              "spectral_magnitude": ("Float16", "[1, 4, 2048, 336]"),
+          }
+          expected_outputs = {
+              "time_output": ("Float16", "[1, 8, 343980]"),
+              "freq_output": ("Float16", "[1, 16, 2048, 336]"),
+          }
+          actual_inputs, actual_outputs = schema("inputSchema"), schema("outputSchema")
+          if actual_inputs != expected_inputs or actual_outputs != expected_outputs:
+              raise SystemExit("HTDemucs model I/O schema mismatch: inputs=%r outputs=%r" % (actual_inputs, actual_outputs))
+          print("Verified HTDemucs Float16 I/O schema and tensor dimensions.")
+          PYMODEL
+          grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' work/TrapTube/TrapTube/Services/StemSeparationService.swift
+          grep -q 'validateDSPRoundTrip' work/TrapTube/TrapTube/Services/StemSeparationService.swift
           ditto "$COMPILED_MODEL" "$APP_PATH/HTDemucs_SourceSeparation_F32.mlmodelc"
           ATTRIBUTION="$PROJECT_ROOT/TrapTube/Models/HTDemucs-ATTRIBUTION.md"
           if [[ ! -s "$ATTRIBUTION" ]]; then

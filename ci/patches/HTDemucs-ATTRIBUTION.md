@@ -12,6 +12,21 @@ HTDemucs is by Simon Rouard, Francisco Massa, and Alexandre Défossez (Meta AI).
 The model is downloaded during the GitHub Actions build from:
 https://github.com/john-rocky/CoreML-Models/releases/download/demucs-v1/HTDemucs_SourceSeparation_F32.mlpackage.zip
 
+## Bundled model interface and host-side reconstruction
+
+The compiled model's verified Float16 tensor contract is:
+
+- Input `audio_waveform`: [1, 2, 343980]
+- Input `spectral_magnitude`: [1, 4, 2048, 336], with channel planes [left real, left imaginary, right real, right imaginary]
+- Output `time_output`: [1, 8, 343980]
+- Output `freq_output`: [1, 16, 2048, 336], with four source groups, each containing [left real, left imaginary, right real, right imaginary]
+
+The host reconstruction follows the upstream integration guide: 44.1 kHz stereo, periodic Hann window, 4096-point normalized STFT, 1024-sample hop, reflect padding, inverse STFT of the frequency branch, addition of the time branch, and 25% overlapping segment crossfades.
+
+Source order is **drums, bass, other, vocals**. TrapTube validates the compiled model's names, shapes, and Float16 types at build time and runtime. It also runs an STFT/iSTFT round-trip self-check before processing and rejects non-finite model output before writing WAV files.
+
+Upstream interface reference: https://github.com/john-rocky/CoreML-Models/blob/master/conversion_scripts/HTDemucs_SourceSeparation_README.swift
+
 ## MIT License
 
 Copyright (c) Meta Platforms, Inc. and affiliates.

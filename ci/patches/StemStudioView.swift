@@ -53,7 +53,7 @@ struct StemStudioView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Label(stemService.availability.title, systemImage: "cpu")
                         .font(.headline.bold())
-                        .foregroundStyle(stemService.availability == .ready ? Color.green : Color(hex: "FFB85C"))
+                        .foregroundStyle(stemService.availability == .bundled ? Color.green : Color(hex: "FFB85C"))
                     Text(stemService.availability.detail)
                         .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
 
@@ -70,8 +70,8 @@ struct StemStudioView: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 13)
                         .background(theme.accent, in: Capsule())
                     }
-                    .disabled(selectedTrack == nil || stemService.isProcessing || stemService.availability != .ready)
-                    .opacity(selectedTrack == nil || stemService.isProcessing || stemService.availability != .ready ? 0.5 : 1)
+                    .disabled(selectedTrack == nil || stemService.isProcessing || stemService.availability != .bundled)
+                    .opacity(selectedTrack == nil || stemService.isProcessing || stemService.availability != .bundled ? 0.5 : 1)
 
                     if stemService.isProcessing {
                         ProgressView(value: stemService.progress)
