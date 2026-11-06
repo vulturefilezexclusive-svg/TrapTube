@@ -493,7 +493,7 @@ private struct TypeTypeWebView: UIViewRepresentable {
         if (command === "seek" && Number.isFinite(Number(value)) && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, Number(value)));
       };
       const selectors = {video:".typetype-quality-menu", audio:".vds-audio-menu"};
-      window.__traptubeScanMenus = () => Object.entries(selectors).forEach(([kind, selector]) => {
+      window.__traptubeScanMenus = (onlyKind) => Object.entries(selectors).filter(([kind]) => !onlyKind || kind === onlyKind).forEach(([kind, selector]) => {
         const trigger = document.querySelector(selector + " button");
         if (!trigger) { post({type:kind === "video" ? "videoQualities" : "audioTracks",items:[]}); return; }
         trigger.click();
@@ -517,12 +517,16 @@ private struct TypeTypeWebView: UIViewRepresentable {
           setTimeout(window.__traptubeScanMenus, 150);
         }, 220);
       };
-      let menusScanned = false;
+      let videoMenuScanned = false, audioMenuScanned = false;
       new MutationObserver(() => {
         attach();
-        if (!menusScanned && (document.querySelector(".typetype-quality-menu") || document.querySelector(".vds-audio-menu"))) {
-          menusScanned = true;
-          setTimeout(window.__traptubeScanMenus, 350);
+        if (!videoMenuScanned && document.querySelector(".typetype-quality-menu")) {
+          videoMenuScanned = true;
+          setTimeout(() => window.__traptubeScanMenus("video"), 350);
+        }
+        if (!audioMenuScanned && document.querySelector(".vds-audio-menu")) {
+          audioMenuScanned = true;
+          setTimeout(() => window.__traptubeScanMenus("audio"), 350);
         }
       }).observe(document.documentElement,{childList:true,subtree:true});
       attach();
