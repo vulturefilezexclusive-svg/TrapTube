@@ -35,7 +35,8 @@ private enum HTDemucsRuntime {
 
     static func modelURL() throws -> URL {
         guard let url = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc"),
-              FileManager.default.fileExists(atPath: url.appendingPathComponent("Manifest.json").path) else {
+              FileManager.default.fileExists(atPath: url.appendingPathComponent("model.mil").path) &&
+              FileManager.default.fileExists(atPath: url.appendingPathComponent("coremldata.bin").path) else {
             throw DemucsError.modelMissing
         }
         return url
