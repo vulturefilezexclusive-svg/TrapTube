@@ -110,7 +110,7 @@ jobs:
             exit 4
           fi
           # Fail the build if the downloaded model contract diverges from the Swift adapter.
-          python3 - "$COMPILED_MODEL/metadata.json" <<'PY'
+          python3 - "$COMPILED_MODEL/metadata.json" <<'PYMODEL'
           import json, sys
           with open(sys.argv[1], encoding="utf-8") as handle:
               metadata = json.load(handle)
@@ -130,7 +130,7 @@ jobs:
           if actual_inputs != expected_inputs or actual_outputs != expected_outputs:
               raise SystemExit("HTDemucs model I/O schema mismatch: inputs=%r outputs=%r" % (actual_inputs, actual_outputs))
           print("Verified HTDemucs Float16 I/O schema and tensor dimensions.")
-          PY
+          PYMODEL
           grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' work/TrapTube/TrapTube/Services/StemSeparationService.swift
           grep -q 'validateDSPRoundTrip' work/TrapTube/TrapTube/Services/StemSeparationService.swift
           ditto "$COMPILED_MODEL" "$APP_PATH/HTDemucs_SourceSeparation_F32.mlmodelc"
