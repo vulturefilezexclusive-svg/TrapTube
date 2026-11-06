@@ -42,6 +42,7 @@ jobs:
           cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
           cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
           cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/Views/StemStudioView.swift
+          python3 ci/patches/KeepImportAction.py work/TrapTube
           cp ci/patches/HTDemucs-ATTRIBUTION.md work/TrapTube/TrapTube/Models/HTDemucs-ATTRIBUTION.md
           python3 - <<'PY'
           from pathlib import Path
@@ -51,65 +52,87 @@ jobs:
           path.write_text(source)
           PY
 
-      - name: Download licensed HTDemucs Core ML model
+      - name: Download and validate licensed HTDemucs model package
         shell: bash
         run: |
           set -euo pipefail
           MODEL_URL="https://github.com/john-rocky/CoreML-Models/releases/download/demucs-v1/HTDemucs_SourceSeparation_F32.mlpackage.zip"
-          curl --fail --location --retry 3 --retry-delay 2 "$MODEL_URL" -o /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip
-          unzip -tq /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip
-          mkdir -p /tmp/htdemucs-unpacked
-          unzip -oq /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip -d /tmp/htdemucs-unpacked
-          MODEL_DIR="$(find /tmp/htdemucs-unpacked -type d -name 'HTDemucs_SourceSeparation_F32.mlpackage' -print -quit)"
+          curl --fail --location --retry 3 --retry-delay 2 "$MODEL_URL" -o "$RUNNER_TEMP/HTDemucs_SourceSeparation_F32.mlpackage.zip"
+          unzip -tq "$RUNNER_TEMP/HTDemucs_SourceSeparation_F32.mlpackage.zip"
+          mkdir -p "$RUNNER_TEMP/htdemucs-unpacked"
+          unzip -oq "$RUNNER_TEMP/HTDemucs_SourceSeparation_F32.mlpackage.zip" -d "$RUNNER_TEMP/htdemucs-unpacked"
+          MODEL_DIR="$(find "$RUNNER_TEMP/htdemucs-unpacked" -type d -name 'HTDemucs_SourceSeparation_F32.mlpackage' -print -quit)"
           test -n "$MODEL_DIR"
-          mkdir -p work/TrapTube/TrapTube/Models
-          rm -rf work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
-          cp -R "$MODEL_DIR" work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
-          echo "Model package installed:"
-          du -sh work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
+          test -s "$MODEL_DIR/Manifest.json"
+          test -d "$MODEL_DIR/Data"
+          echo "HTDemucs package size: $(du -sh "$MODEL_DIR" | cut -f1)"
+          echo "HTDEMUCS_MODEL_PACKAGE=$MODEL_DIR" >> "$GITHUB_ENV"
 
-      - name: Register Core ML model in Xcode project
+      - name: Patch IPA packaging to compile and embed HTDemucs
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("work/TrapTube/TrapTube.xcodeproj/project.pbxproj")
+          p = Path("work/TrapTube/scripts/build-unsigned-ipa.sh")
           s = p.read_text()
-          build_id = "B10000000000000000000001"
-          file_id = "B10000000000000000000002"
-          if build_id not in s:
-              build_entry = f'\t\t{build_id} /* HTDemucs_SourceSeparation_F32.mlpackage in Sources */ = {{isa = PBXBuildFile; fileRef = {file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */; }};\n'
-              s = s.replace("/* End PBXBuildFile section */", build_entry + "/* End PBXBuildFile section */")
-          if file_id not in s:
-              file_entry = f'\t\t{file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */ = {{isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = HTDemucs_SourceSeparation_F32.mlpackage; sourceTree = "<group>"; }};\n'
-              s = s.replace("/* End PBXFileReference section */", file_entry + "/* End PBXFileReference section */")
-          models_group = "91EB64AA7329B36F8468A08D /* Models */ = {isa = PBXGroup; children = ("
-          if models_group not in s:
-              raise SystemExit("Could not find the Xcode Models group; refusing to guess project structure.")
-          if file_id not in s[s.index(models_group):s.index("/* End PBXGroup section */")]:
-              s = s.replace(models_group, models_group + f'{file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */, ')
-          sources_phase = "F612CD2E22E187AC48B5913C /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ("
-          if sources_phase not in s:
-              raise SystemExit("Could not find the TrapTube Sources build phase.")
-          if build_id not in s[s.index(sources_phase):s.index("/* End PBXSourcesBuildPhase section */")]:
-              s = s.replace(sources_phase, sources_phase + f'{build_id} /* HTDemucs_SourceSeparation_F32.mlpackage in Sources */, ')
-          attribution_file_id = "B10000000000000000000003"
-          attribution_build_id = "B10000000000000000000004"
-          if attribution_file_id not in s:
-              attribution_file = f'\t\t{attribution_file_id} /* HTDemucs-ATTRIBUTION.md */ = {{isa = PBXFileReference; lastKnownFileType = text; path = "HTDemucs-ATTRIBUTION.md"; sourceTree = "<group>"; }};\n'
-              s = s.replace("/* End PBXFileReference section */", attribution_file + "/* End PBXFileReference section */")
-          if attribution_build_id not in s:
-              attribution_build = f'\t\t{attribution_build_id} /* HTDemucs-ATTRIBUTION.md in Resources */ = {{isa = PBXBuildFile; fileRef = {attribution_file_id} /* HTDemucs-ATTRIBUTION.md */; }};\n'
-              s = s.replace("/* End PBXBuildFile section */", attribution_build + "/* End PBXBuildFile section */")
-          models_group_end = "/* End PBXGroup section */"
-          if attribution_file_id not in s[s.index(models_group):s.index(models_group_end)]:
-              s = s.replace(models_group, models_group + f'{attribution_file_id} /* HTDemucs-ATTRIBUTION.md */, ')
-          resources_phase = "86F6FE2DD6E869C1842A14B3 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ("
-          if resources_phase not in s:
-              raise SystemExit("Could not find the TrapTube Resources build phase.")
-          if attribution_build_id not in s[s.index(resources_phase):s.index("/* End PBXResourcesBuildPhase section */")]:
-              s = s.replace(resources_phase, resources_phase + f'{attribution_build_id} /* HTDemucs-ATTRIBUTION.md in Resources */, ')
+          anchor = '''EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")
+          if [[ ! -f "$APP_PATH/$EXECUTABLE" ]]; then
+            echo "ERROR: Compiled executable missing from app bundle: $EXECUTABLE" >&2
+            exit 3
+          fi
+
+          IPA_PATH="$DIST_DIR/TrapTube-unsigned.ipa"
+          '''
+          replacement = '''EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")
+          if [[ ! -f "$APP_PATH/$EXECUTABLE" ]]; then
+            echo "ERROR: Compiled executable missing from app bundle: $EXECUTABLE" >&2
+            exit 3
+          fi
+
+          MODEL_PACKAGE="${HTDEMUCS_MODEL_PACKAGE:-}"
+          if [[ -z "$MODEL_PACKAGE" || ! -d "$MODEL_PACKAGE" ]]; then
+            echo "ERROR: HTDEMUCS_MODEL_PACKAGE is not set to the downloaded .mlpackage." >&2
+            exit 4
+          fi
+          xcrun --find coremlcompiler >/dev/null
+          COMPILED_MODELS="$BUILD_ROOT/CompiledModels"
+          rm -rf "$COMPILED_MODELS"
+          mkdir -p "$COMPILED_MODELS"
+          xcrun coremlcompiler compile "$MODEL_PACKAGE" "$COMPILED_MODELS"
+          COMPILED_MODEL="$COMPILED_MODELS/HTDemucs_SourceSeparation_F32.mlmodelc"
+          if [[ ! -d "$COMPILED_MODEL" || ! -s "$COMPILED_MODEL/Manifest.json" ]]; then
+            echo "ERROR: coremlcompiler did not produce the expected compiled model." >&2
+            find "$COMPILED_MODELS" -maxdepth 2 -print >&2 || true
+            exit 4
+          fi
+          ditto "$COMPILED_MODEL" "$APP_PATH/HTDemucs_SourceSeparation_F32.mlmodelc"
+          ATTRIBUTION="$PROJECT_ROOT/TrapTube/Models/HTDemucs-ATTRIBUTION.md"
+          if [[ ! -s "$ATTRIBUTION" ]]; then
+            echo "ERROR: HTDemucs MIT license/attribution file is missing." >&2
+            exit 4
+          fi
+          cp "$ATTRIBUTION" "$APP_PATH/HTDemucs-ATTRIBUTION.md"
+
+          IPA_PATH="$DIST_DIR/TrapTube-unsigned.ipa"
+          '''
+          if anchor not in s:
+            raise SystemExit("Build script anchor not found; refusing to patch packaging blindly.")
+          s = s.replace(anchor, replacement, 1)
+          verify_anchor = '''/usr/bin/unzip -tq "$IPA_PATH"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGING/Payload/TrapTube.app/Info.plist"
+          /usr/bin/shasum -a 256 "$IPA_PATH" > "$DIST_DIR/SHA256SUMS.txt"
+          '''
+          verify_replacement = '''/usr/bin/unzip -tq "$IPA_PATH"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGING/Payload/TrapTube.app/Info.plist"
+          /usr/bin/unzip -Z1 "$IPA_PATH" > "$BUILD_ROOT/ipa-files.txt"
+          grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/Manifest.json' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model missing from IPA." >&2; exit 5; }
+          grep -qx 'Payload/TrapTube.app/HTDemucs-ATTRIBUTION.md' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: HTDemucs attribution missing from IPA." >&2; exit 5; }
+          /usr/bin/shasum -a 256 "$IPA_PATH" > "$DIST_DIR/SHA256SUMS.txt"
+          '''
+          if verify_anchor not in s:
+            raise SystemExit("IPA verification anchor not found; refusing to patch packaging blindly.")
+          s = s.replace(verify_anchor, verify_replacement, 1)
           p.write_text(s)
           PY
 
