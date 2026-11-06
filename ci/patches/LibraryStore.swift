@@ -75,6 +75,12 @@ final class LibraryStore: ObservableObject {
                       playbackProbe.processingFormat.channelCount > 0 else {
                     throw ImportError.playbackValidationFailed
                 }
+                let probeFrames = AVAudioFrameCount(min(4_096, playbackProbe.length))
+                guard let probeBuffer = AVAudioPCMBuffer(pcmFormat: playbackProbe.processingFormat, frameCapacity: probeFrames) else {
+                    throw ImportError.playbackValidationFailed
+                }
+                try playbackProbe.read(into: probeBuffer, frameCount: probeFrames)
+                guard probeBuffer.frameLength > 0 else { throw ImportError.playbackValidationFailed }
                 let verifiedDuration = Double(playbackProbe.length) / playbackProbe.processingFormat.sampleRate
                 guard verifiedDuration.isFinite, verifiedDuration > 0 else {
                     throw ImportError.playbackValidationFailed
