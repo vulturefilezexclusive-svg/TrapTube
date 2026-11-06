@@ -38,21 +38,34 @@ final class LibraryStore: ObservableObject {
             var destination: URL?
             do {
                 try fileManager.createDirectory(at: Self.tracksDirectory, withIntermediateDirectories: true)
-                let ext = source.pathExtension.isEmpty ? "audio" : source.pathExtension.lowercased()
-                let fileName = "\(UUID().uuidString).\(ext)"
-                let target = Self.audioURL(for: fileName)
-                destination = target
-                try fileManager.copyItem(at: source, to: target)
-
-                let attributes = try fileManager.attributesOfItem(atPath: target.path)
-                let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-                guard size > 0 else { throw ImportError.emptyFile }
-
-                let asset = AVURLAsset(url: target)
+                let asset = AVURLAsset(url: source)
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 guard !audioTracks.isEmpty else { throw ImportError.noAudioTrack }
                 let loadedDuration = try await asset.load(.duration).seconds
                 let duration = loadedDuration.isFinite && loadedDuration > 0 ? loadedDuration : 0
+
+                // Normalize imported formats/codecs to a known iOS-playable AAC/M4A file.
+                // This avoids handing AVAudioEngine files whose container extension or codec
+                // cannot be decoded by AVAudioFile on-device.
+                let fileName = "\(UUID().uuidString).m4a"
+                let target = Self.audioURL(for: fileName)
+                destination = target
+                guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+                    throw ImportError.exportUnavailable
+                }
+                exporter.outputURL = target
+                exporter.outputFileType = .m4a
+                exporter.shouldOptimizeForNetworkUse = false
+                await withCheckedContinuation { continuation in
+                    exporter.exportAsynchronously { continuation.resume() }
+                }
+                guard exporter.status == .completed else {
+                    throw exporter.error ?? ImportError.exportFailed
+                }
+
+                let attributes = try fileManager.attributesOfItem(atPath: target.path)
+                let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+                guard size > 0 else { throw ImportError.emptyFile }
                 let title = source.deletingPathExtension().lastPathComponent
                 tracks.insert(
                     Track(title: title, artist: "Unknown artist", fileName: fileName, duration: duration, fileSizeBytes: size),
@@ -69,11 +82,13 @@ final class LibraryStore: ObservableObject {
     }
 
     enum ImportError: LocalizedError {
-        case emptyFile, noAudioTrack
+        case emptyFile, noAudioTrack, exportUnavailable, exportFailed
         var errorDescription: String? {
             switch self {
             case .emptyFile: return "The selected file is empty."
             case .noAudioTrack: return "This file does not contain a playable audio track."
+            case .exportUnavailable: return "iOS could not create an audio converter for this file. Try a different audio format."
+            case .exportFailed: return "iOS could not convert this file to the app's playback format."
             }
         }
     }
