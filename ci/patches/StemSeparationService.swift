@@ -239,11 +239,11 @@ private enum HTDemucsRuntime {
 @MainActor
 final class StemSeparationService: ObservableObject {
     enum Availability: Equatable {
-        case ready, missingModel
-        var title: String { self == .ready ? "HTDemucs ready" : "Model not installed" }
+        case bundled, missingModel
+        var title: String { self == .bundled ? "HTDemucs model bundled" : "Model not installed" }
         var detail: String {
-            self == .ready
-                ? "HTDemucs is bundled for on-device separation into vocals, drums, bass and other."
+            self == .bundled
+                ? "Model files are present. The Float16 tensor schema and STFT/iSTFT reconstruction are checked when separation starts."
                 : "The licensed HTDemucs Core ML model is missing or incomplete in this installation."
         }
     }
@@ -260,13 +260,13 @@ final class StemSeparationService: ObservableObject {
     init() { refresh() }
 
     func refresh() {
-        do { _ = try HTDemucsRuntime.modelURL(); availability = .ready }
+        do { _ = try HTDemucsRuntime.modelURL(); availability = .bundled }
         catch { availability = .missingModel }
     }
 
     func separate(track: Track) {
         guard !isProcessing else { return }
-        guard availability == .ready else { errorMessage = DemucsError.modelMissing.localizedDescription; return }
+        guard availability == .bundled else { errorMessage = DemucsError.modelMissing.localizedDescription; return }
         isProcessing = true
         progress = 0
         errorMessage = nil
