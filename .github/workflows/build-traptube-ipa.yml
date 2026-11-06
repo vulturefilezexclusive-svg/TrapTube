@@ -30,7 +30,7 @@ jobs:
           test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
           test -f work/TrapTube/scripts/build-unsigned-ipa.sh
 
-      - name: Apply BANDOTUBE source overlays
+      - name: Apply TrapTube source overlays
         shell: bash
         run: |
           set -euo pipefail
@@ -65,6 +65,9 @@ jobs:
           test -n "$MODEL_DIR"
           test -s "$MODEL_DIR/Manifest.json"
           test -d "$MODEL_DIR/Data"
+          find "$MODEL_DIR/Data" -type f -size +1k -print -quit | grep -q .
+          MODEL_KB="$(du -sk "$MODEL_DIR" | awk '{print $1}')"
+          if [[ "$MODEL_KB" -lt 50000 ]]; then echo "ERROR: HTDemucs package is unexpectedly small ($MODEL_KB KB)."; exit 3; fi
           echo "HTDemucs package size: $(du -sh "$MODEL_DIR" | cut -f1)"
           echo "HTDEMUCS_MODEL_PACKAGE=$MODEL_DIR" >> "$GITHUB_ENV"
 
