@@ -15,20 +15,22 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Validate and extract uploaded Xcode project
+
+      - name: Validate and extract Xcode project
         shell: bash
         run: |
           set -euo pipefail
-          test -f ci/source.zip || { echo "Upload the build-ready archive to ci/source.zip"; exit 2; }
+          test -f ci/source.zip || { echo "Upload the base project archive to ci/source.zip"; exit 2; }
           unzip -tq ci/source.zip
           mkdir -p work
           unzip -oq ci/source.zip -d work
           test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
           test -f work/TrapTube/scripts/build-unsigned-ipa.sh
-      - name: Apply BANDOTUBE revision overlays
+
+      - name: Apply BANDOTUBE source overlays
         shell: bash
         run: |
           set -euo pipefail
@@ -36,8 +38,11 @@ jobs:
           cp ci/patches/LibraryStore.swift work/TrapTube/TrapTube/Services/LibraryStore.swift
           cp ci/patches/ThemeManager.swift work/TrapTube/TrapTube/Services/ThemeManager.swift
           cp ci/patches/TypeTypeService.swift work/TrapTube/TrapTube/Services/TypeTypeService.swift
+          cp ci/patches/StemSeparationService.swift work/TrapTube/TrapTube/Services/StemSeparationService.swift
           cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
           cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
+          cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/Views/StemStudioView.swift
+          cp ci/patches/HTDemucs-ATTRIBUTION.md work/TrapTube/HTDemucs-ATTRIBUTION.md
           python3 - <<'PY'
           from pathlib import Path
           path = Path("work/TrapTube/TrapTube/Views/Components.swift")
@@ -45,6 +50,53 @@ jobs:
           source = source.replace('title: "YouTube"', 'title: "Videos"')
           path.write_text(source)
           PY
+
+      - name: Download licensed HTDemucs Core ML model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL_URL="https://github.com/john-rocky/CoreML-Models/releases/download/demucs-v1/HTDemucs_SourceSeparation_F32.mlpackage.zip"
+          curl --fail --location --retry 3 --retry-delay 2 "$MODEL_URL" -o /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip
+          unzip -tq /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip
+          mkdir -p /tmp/htdemucs-unpacked
+          unzip -oq /tmp/HTDemucs_SourceSeparation_F32.mlpackage.zip -d /tmp/htdemucs-unpacked
+          MODEL_DIR="$(find /tmp/htdemucs-unpacked -type d -name 'HTDemucs_SourceSeparation_F32.mlpackage' -print -quit)"
+          test -n "$MODEL_DIR"
+          mkdir -p work/TrapTube/TrapTube/Models
+          rm -rf work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
+          cp -R "$MODEL_DIR" work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
+          echo "Model package installed:"
+          du -sh work/TrapTube/TrapTube/Models/HTDemucs_SourceSeparation_F32.mlpackage
+
+      - name: Register Core ML model in Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("work/TrapTube/TrapTube.xcodeproj/project.pbxproj")
+          s = p.read_text()
+          build_id = "B10000000000000000000001"
+          file_id = "B10000000000000000000002"
+          if build_id not in s:
+              build_entry = f'\t\t{build_id} /* HTDemucs_SourceSeparation_F32.mlpackage in Sources */ = {{isa = PBXBuildFile; fileRef = {file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */; }};\n'
+              s = s.replace("/* End PBXBuildFile section */", build_entry + "/* End PBXBuildFile section */")
+          if file_id not in s:
+              file_entry = f'\t\t{file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */ = {{isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = HTDemucs_SourceSeparation_F32.mlpackage; sourceTree = "<group>"; }};\n'
+              s = s.replace("/* End PBXFileReference section */", file_entry + "/* End PBXFileReference section */")
+          models_group = "91EB64AA7329B36F8468A08D /* Models */ = {isa = PBXGroup; children = ("
+          if models_group not in s:
+              raise SystemExit("Could not find the Xcode Models group; refusing to guess project structure.")
+          if file_id not in s[s.index(models_group):s.index("/* End PBXGroup section */")]:
+              s = s.replace(models_group, models_group + f'{file_id} /* HTDemucs_SourceSeparation_F32.mlpackage */, ')
+          sources_phase = "F612CD2E22E187AC48B5913C /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ("
+          if sources_phase not in s:
+              raise SystemExit("Could not find the TrapTube Sources build phase.")
+          if build_id not in s[s.index(sources_phase):s.index("/* End PBXSourcesBuildPhase section */")]:
+              s = s.replace(sources_phase, sources_phase + f'{build_id} /* HTDemucs_SourceSeparation_F32.mlpackage in Sources */, ')
+          p.write_text(s)
+          PY
+
       - name: Build and package unsigned IPA
         shell: bash
         run: |
@@ -52,6 +104,7 @@ jobs:
           cd work/TrapTube
           chmod +x scripts/build-unsigned-ipa.sh
           ./scripts/build-unsigned-ipa.sh
+
       - name: Upload IPA and build log
         if: always()
         uses: actions/upload-artifact@v4
