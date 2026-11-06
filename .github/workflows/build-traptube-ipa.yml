@@ -6,6 +6,8 @@ on:
     branches: [main, master]
     paths:
       - 'ci/source.zip'
+      - 'ci/patches/**'
+      - '.github/workflows/build-traptube-ipa.yml'
 
 permissions:
   contents: read
@@ -26,6 +28,11 @@ jobs:
           unzip -oq ci/source.zip -d work
           test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
           test -f work/TrapTube/scripts/build-unsigned-ipa.sh
+      - name: Apply verified source fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp ci/patches/AudioEngineManager.swift work/TrapTube/TrapTube/Services/AudioEngineManager.swift
       - name: Build and package unsigned IPA
         shell: bash
         run: |
