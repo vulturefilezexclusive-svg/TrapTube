@@ -38,7 +38,7 @@ jobs:
           cp ci/patches/LibraryStore.swift work/TrapTube/TrapTube/Services/LibraryStore.swift
           cp ci/patches/ThemeManager.swift work/TrapTube/TrapTube/Services/ThemeManager.swift
           cp ci/patches/TypeTypeService.swift work/TrapTube/TrapTube/Services/TypeTypeService.swift
-          cp ci/patches/StemSeparationService.swift TrapTube/Services/StemSeparationService.swift
+          cp ci/patches/StemSeparationService.swift work/TrapTube/TrapTube/Services/StemSeparationService.swift
           cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
           cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
           cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/Views/StemStudioView.swift
