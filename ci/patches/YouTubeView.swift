@@ -468,7 +468,7 @@ private struct TypeTypeWebView: UIViewRepresentable {
             node.type = "peaking"; node.frequency.value = frequency; node.Q.value = 1;
             return node;
           });
-          shelf = context.createBiquadFilter(); shelf.type = "lowshelf"; shelf.frequency.value = 90;
+          shelf = context.createBiquadFilter(); shelf.type = "lowshelf"; shelf.frequency.value = 90; shelf.Q.value = 0.7;
           gain = context.createGain();
           let node = directSource;
           filters.forEach(filter => { node.connect(filter); node = filter; });
@@ -517,7 +517,14 @@ private struct TypeTypeWebView: UIViewRepresentable {
           setTimeout(window.__traptubeScanMenus, 150);
         }, 220);
       };
-      new MutationObserver(attach).observe(document.documentElement,{childList:true,subtree:true});
+      let menusScanned = false;
+      new MutationObserver(() => {
+        attach();
+        if (!menusScanned && (document.querySelector(".typetype-quality-menu") || document.querySelector(".vds-audio-menu"))) {
+          menusScanned = true;
+          setTimeout(window.__traptubeScanMenus, 350);
+        }
+      }).observe(document.documentElement,{childList:true,subtree:true});
       attach();
       setInterval(() => { attach(); state(); }, 700);
     })();
