@@ -284,7 +284,7 @@ private struct TypeTypeWatchSheet: View {
                                 }
                             }
                         } label: {
-                            Label("Audio", systemImage: "waveform").font(.caption.bold()).foregroundStyle(.white)
+                            Label("Audio track", systemImage: "waveform").font(.caption.bold()).foregroundStyle(.white)
                                 .padding(.horizontal, 10).padding(.vertical, 9).background(.white.opacity(0.12), in: Capsule())
                         }
                     }
