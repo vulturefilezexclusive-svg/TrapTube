@@ -5,8 +5,7 @@ on:
   push:
     branches: [main, master]
     paths:
-      - 'ci/source.bundle.part*'
-      - '.github/workflows/build-traptube-ipa.yml'
+      - 'ci/source.zip'
 
 permissions:
   contents: read
@@ -17,25 +16,24 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Reassemble source bundle
+      - name: Validate and extract uploaded Xcode project
         shell: bash
         run: |
           set -euo pipefail
-          test -f ci/source.bundle.part00 || { echo "Source bundle chunks are missing."; exit 2; }
-          cat ci/source.bundle.part* > /tmp/source.bundle.zip.b64
-          base64 --decode /tmp/source.bundle.zip.b64 > /tmp/source.bundle.zip
-          unzip -tq /tmp/source.bundle.zip
+          test -f ci/source.zip || { echo "Upload the build-ready archive to ci/source.zip"; exit 2; }
+          unzip -tq ci/source.zip
           mkdir -p work
-          unzip -oq /tmp/source.bundle.zip -d work
+          unzip -oq ci/source.zip -d work
           test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
-      - name: Build iOS device app and package unsigned IPA
+          test -f work/TrapTube/scripts/build-unsigned-ipa.sh
+      - name: Build and package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
           cd work/TrapTube
           chmod +x scripts/build-unsigned-ipa.sh
           ./scripts/build-unsigned-ipa.sh
-      - name: Upload unsigned IPA and Xcode log
+      - name: Upload IPA and build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
