@@ -38,7 +38,7 @@ jobs:
           cp ci/patches/LibraryStore.swift work/TrapTube/TrapTube/Services/LibraryStore.swift
           cp ci/patches/ThemeManager.swift work/TrapTube/TrapTube/Services/ThemeManager.swift
           cp ci/patches/TypeTypeService.swift work/TrapTube/TrapTube/Services/TypeTypeService.swift
-          cp ci/patches/StemSeparationService.swift work/TrapTube/TrapTube/Services/StemSeparationService.swift
+          cp ci/patches/StemSeparationService.swift TrapTube/Services/StemSeparationService.swift
           cp ci/patches/SettingsView.swift work/TrapTube/TrapTube/Views/SettingsView.swift
           cp ci/patches/YouTubeView.swift work/TrapTube/TrapTube/Views/YouTubeView.swift
           cp ci/patches/StemStudioView.swift work/TrapTube/TrapTube/Views/StemStudioView.swift
@@ -131,8 +131,8 @@ jobs:
               raise SystemExit("HTDemucs model I/O schema mismatch: inputs=%r outputs=%r" % (actual_inputs, actual_outputs))
           print("Verified HTDemucs Float16 I/O schema and tensor dimensions.")
           PYMODEL
-          grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' work/TrapTube/TrapTube/Services/StemSeparationService.swift
-          grep -q 'validateDSPRoundTrip' work/TrapTube/TrapTube/Services/StemSeparationService.swift
+          grep -q 'sourceOrder: \[Stem\] = \[.drums, .bass, .other, .vocals\]' TrapTube/Services/StemSeparationService.swift
+          grep -q 'validateDSPRoundTrip' TrapTube/Services/StemSeparationService.swift
           ditto "$COMPILED_MODEL" "$APP_PATH/HTDemucs_SourceSeparation_F32.mlmodelc"
           ATTRIBUTION="$PROJECT_ROOT/TrapTube/Models/HTDemucs-ATTRIBUTION.md"
           if [[ ! -s "$ATTRIBUTION" ]]; then
