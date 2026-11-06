@@ -118,7 +118,7 @@ struct YouTubeView: View {
         .task { if feed.isEmpty { await loadFeed() } }
         .sheet(item: $selectedVideo) { video in
             if let url = TypeTypeService().watchURL(for: video) {
-                TypeTypeWatchSheet(url: url)
+                TypeTypeWatchSheet(url: url, title: video.title)
                     .ignoresSafeArea()
                     .preferredColorScheme(.dark)
             } else {
@@ -194,35 +194,319 @@ private struct TypeTypeVideoRow: View {
     }
 }
 
+private struct TypeTypePlayerOption: Identifiable {
+    let label: String
+    let selected: Bool
+    var id: String { label }
+}
+
 private struct TypeTypeWatchSheet: View {
     let url: URL
+    let title: String
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var theme: ThemeManager
+    @EnvironmentObject private var audio: AudioEngineManager
+    @State private var webView: WKWebView?
+    @State private var currentTime = 0.0
+    @State private var duration = 0.0
+    @State private var isPlaying = false
+    @State private var scrubbing = false
+    @State private var scrubValue = 0.0
+    @State private var eqReady = false
+    @State private var eqError: String?
+    @State private var videoQualities: [TypeTypePlayerOption] = []
+    @State private var audioTracks: [TypeTypePlayerOption] = []
+    @State private var showEQ = false
+
     var body: some View {
-        NavigationStack {
-            TypeTypeWebView(url: url)
-                .background(Color.black)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Close") { dismiss() }.foregroundStyle(.white)
+        ZStack {
+            Color.black.ignoresSafeArea()
+            TypeTypeWebView(url: url, gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain,
+                            onCreated: { webView = $0 }, onMessage: receive)
+            VStack(spacing: 0) {
+                HStack {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
+                            .frame(width: 38, height: 38).background(.black.opacity(0.7), in: Circle())
                     }
+                    Text(title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
+                    Spacer()
+                }.padding(14).background(LinearGradient(colors: [.black.opacity(0.85), .clear], startPoint: .top, endPoint: .bottom))
+                Spacer()
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        Button { command("toggle") } label: {
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title3.bold()).foregroundStyle(.white).frame(width: 42, height: 42)
+                                .background(theme.accent, in: Circle())
+                        }
+                        VStack(spacing: 3) {
+                            Slider(value: Binding(get: { scrubbing ? scrubValue : (duration > 0 ? currentTime / duration : 0) },
+                                                  set: { scrubValue = $0; scrubbing = true }),
+                                   in: 0...1, onEditingChanged: { editing in
+                                if !editing { command("seek", scrubValue * duration); scrubbing = false }
+                            }).tint(theme.accent)
+                            HStack {
+                                Text(timeText(scrubbing ? scrubValue * duration : currentTime))
+                                Spacer()
+                                Text(duration > 0 ? timeText(duration) : "LIVE")
+                            }.font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.75))
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Button { showEQ = true } label: {
+                            Label("EQ", systemImage: "slider.horizontal.3").font(.subheadline.bold())
+                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 9)
+                                .background(.white.opacity(0.12), in: Capsule())
+                        }
+                        if let eqError {
+                            Text(eqError).font(.caption2).foregroundStyle(Color(hex: "FF8A8A")).lineLimit(2)
+                        } else if !eqReady {
+                            Text("Connecting EQ…").font(.caption2).foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer(minLength: 0)
+                        Menu {
+                            if videoQualities.isEmpty { Text("No selectable video qualities for this stream") }
+                            ForEach(videoQualities) { option in
+                                Button { select(kind: "video", label: option.label) } label: {
+                                    if option.selected { Label(option.label, systemImage: "checkmark") } else { Text(option.label) }
+                                }
+                            }
+                        } label: {
+                            Label("Quality", systemImage: "4k.tv").font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 10).padding(.vertical, 9).background(.white.opacity(0.12), in: Capsule())
+                        }
+                        Menu {
+                            if audioTracks.isEmpty { Text("No alternate audio tracks for this stream") }
+                            ForEach(audioTracks) { option in
+                                Button { select(kind: "audio", label: option.label) } label: {
+                                    if option.selected { Label(option.label, systemImage: "checkmark") } else { Text(option.label) }
+                                }
+                            }
+                        } label: {
+                            Label("Audio", systemImage: "waveform").font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 10).padding(.vertical, 9).background(.white.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    Text("Choices are read from the active TypeType player; unsupported quality levels are not fabricated.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.55)).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .toolbarBackground(.black, for: .navigationBar)
+                .padding(13).background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 18))
+                .padding(.horizontal, 10).padding(.bottom, 12)
+            }
         }
+        .sheet(isPresented: $showEQ) {
+            EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
+        }
+        .onChange(of: audio.eqGains) { _, _ in applyEQ() }
+        .onChange(of: audio.bassBoost) { _, _ in applyEQ() }
+        .onChange(of: audio.masterGain) { _, _ in applyEQ() }
+    }
+
+    private func receive(_ body: [String: Any]) {
+        switch body["type"] as? String {
+        case "state":
+            if let value = body["currentTime"] as? Double { currentTime = value }
+            if let value = body["duration"] as? Double { duration = value }
+            if let value = body["paused"] as? Bool { isPlaying = !value }
+        case "eqStatus":
+            eqReady = body["ready"] as? Bool ?? false
+            eqError = body["error"] as? String
+        case "videoQualities": videoQualities = options(body["items"])
+        case "audioTracks": audioTracks = options(body["items"])
+        case "playerError": eqError = body["message"] as? String
+        default: break
+        }
+    }
+
+    private func options(_ raw: Any?) -> [TypeTypePlayerOption] {
+        guard let rows = raw as? [[String: Any]] else { return [] }
+        return rows.compactMap { row in
+            guard let label = row["label"] as? String, !label.isEmpty else { return nil }
+            return TypeTypePlayerOption(label: label, selected: row["selected"] as? Bool ?? false)
+        }
+    }
+
+    private func command(_ name: String, _ value: Double = 0) {
+        webView?.evaluateJavaScript("window.__traptubeControl && window.__traptubeControl('\(name)', \(value));")
+    }
+
+    private func select(kind: String, label: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: [kind, label]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.__traptubeSelectOption && window.__traptubeSelectOption(\(json));")
+    }
+
+    private func applyEQ() {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["gains": audio.eqGains, "bass": audio.bassBoost, "master": audio.masterGain]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.__traptubeSetEQ && window.__traptubeSetEQ(\(json));")
+    }
+
+    private func timeText(_ value: Double) -> String {
+        let seconds = value.isFinite ? max(0, Int(value)) : 0
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }
 
 private struct TypeTypeWebView: UIViewRepresentable {
     let url: URL
+    let gains: [Float]
+    let bass: Float
+    let master: Float
+    let onCreated: (WKWebView) -> Void
+    let onMessage: ([String: Any]) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onMessage: onMessage, gains: gains, bass: bass, master: master) }
+
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero)
+        let content = WKUserContentController()
+        content.add(context.coordinator, name: "trapPlayer")
+        content.addUserScript(WKUserScript(source: Self.bootstrap, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = content
+        let view = WKWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false
         view.backgroundColor = .black
         view.scrollView.backgroundColor = .black
-        view.allowsBackForwardNavigationGestures = true
+        view.navigationDelegate = context.coordinator
+        context.coordinator.webView = view
+        onCreated(view)
         view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
         return view
     }
+
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        if uiView.url != url { uiView.load(URLRequest(url: url)) }
+        context.coordinator.onMessage = onMessage
+        context.coordinator.setEQ(gains: gains, bass: bass, master: master)
+        if uiView.url != url && !uiView.isLoading { uiView.load(URLRequest(url: url)) }
     }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        var onMessage: ([String: Any]) -> Void
+        weak var webView: WKWebView?
+        private var gains: [Float]
+        private var bass: Float
+        private var master: Float
+
+        init(onMessage: @escaping ([String: Any]) -> Void, gains: [Float], bass: Float, master: Float) {
+            self.onMessage = onMessage
+            self.gains = gains
+            self.bass = bass
+            self.master = master
+        }
+
+        func setEQ(gains: [Float], bass: Float, master: Float) {
+            self.gains = gains; self.bass = bass; self.master = master
+            applyEQ()
+        }
+
+        private func applyEQ() {
+            guard let webView,
+                  let data = try? JSONSerialization.data(withJSONObject: ["gains": gains, "bass": bass, "master": master]),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.__traptubeSetEQ && window.__traptubeSetEQ(\(json));")
+        }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any] else { return }
+            DispatchQueue.main.async { self.onMessage(body) }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            applyEQ()
+            webView.evaluateJavaScript("window.__traptubeScanMenus && window.__traptubeScanMenus();")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onMessage(["type": "playerError", "message": "TypeType playback failed: \(error.localizedDescription)"])
+        }
+    }
+
+    private static let bootstrap = #"""
+    (() => {
+      const post = value => { try { window.webkit.messageHandlers.trapPlayer.postMessage(value); } catch (_) {} };
+      const hz = [32,64,125,250,500,1000,2000,3000,4000,5000,6000,7000,8000,10000,12000,16000];
+      let video = null, context = null, filters = [], shelf = null, gain = null, directSource = null;
+      let settings = {gains:Array(16).fill(0), bass:0, master:1};
+      const state = () => {
+        if (video) post({type:"state", currentTime:video.currentTime || 0, duration:Number.isFinite(video.duration) ? video.duration : 0, paused:video.paused});
+      };
+      const apply = () => {
+        if (!filters.length || !shelf || !gain) return;
+        hz.forEach((_, i) => filters[i].gain.value = Number(settings.gains[i] || 0));
+        shelf.gain.value = Number(settings.bass || 0);
+        gain.gain.value = Math.max(0, Math.min(2, Number(settings.master ?? 1)));
+      };
+      window.__traptubeSetEQ = value => { settings = Object.assign(settings, value || {}); apply(); };
+      const attach = () => {
+        const candidate = document.querySelector("main .vds-player video") || document.querySelector(".vds-player video") || document.querySelector("video");
+        if (!candidate || candidate === video) return;
+        video = candidate;
+        try {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextClass) throw new Error("Web Audio is unavailable in this WebKit runtime.");
+          context = new AudioContextClass();
+          directSource = context.createMediaElementSource(video);
+          // Keep the stream audible if filter construction fails; EQ status reports the failure.
+          directSource.connect(context.destination);
+          filters = hz.map(frequency => {
+            const node = context.createBiquadFilter();
+            node.type = "peaking"; node.frequency.value = frequency; node.Q.value = 1;
+            return node;
+          });
+          shelf = context.createBiquadFilter(); shelf.type = "lowshelf"; shelf.frequency.value = 90;
+          gain = context.createGain();
+          let node = directSource;
+          filters.forEach(filter => { node.connect(filter); node = filter; });
+          node.connect(shelf); shelf.connect(gain); gain.connect(context.destination);
+          directSource.disconnect(context.destination);
+          video.addEventListener("play", () => { if (context.state === "suspended") context.resume(); state(); });
+          ["timeupdate","durationchange","play","pause","ended"].forEach(event => video.addEventListener(event, state));
+          apply();
+          post({type:"eqStatus", ready:true}); state();
+        } catch (error) {
+          post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: " + (error && error.message ? error.message : String(error))});
+        }
+      };
+      window.__traptubeControl = (command, value) => {
+        if (!video) return;
+        if (command === "toggle") {
+          if (video.paused) { if (context && context.state === "suspended") context.resume(); video.play().catch(e => post({type:"playerError",message:e.message})); }
+          else video.pause();
+        }
+        if (command === "play") { if (context && context.state === "suspended") context.resume(); video.play().catch(e => post({type:"playerError",message:e.message})); }
+        if (command === "pause") video.pause();
+        if (command === "seek" && Number.isFinite(Number(value)) && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, Number(value)));
+      };
+      const selectors = {video:".typetype-quality-menu", audio:".vds-audio-menu"};
+      window.__traptubeScanMenus = () => Object.entries(selectors).forEach(([kind, selector]) => {
+        const trigger = document.querySelector(selector + " button");
+        if (!trigger) { post({type:kind === "video" ? "videoQualities" : "audioTracks",items:[]}); return; }
+        trigger.click();
+        setTimeout(() => {
+          const items = Array.from(document.querySelectorAll(".vds-menu-items [role=radio], .vds-menu-items button"))
+            .map(node => ({label:(node.innerText || node.textContent || "").trim(),selected:node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true"}))
+            .filter(item => item.label.length);
+          trigger.click();
+          post({type:kind === "video" ? "videoQualities" : "audioTracks",items});
+        }, 220);
+      });
+      window.__traptubeSelectOption = ([kind,label]) => {
+        const trigger = document.querySelector((selectors[kind] || "") + " button");
+        if (!trigger) return;
+        trigger.click();
+        setTimeout(() => {
+          const wanted = String(label).trim();
+          const option = Array.from(document.querySelectorAll(".vds-menu-items [role=radio], .vds-menu-items button"))
+            .find(node => (node.innerText || node.textContent || "").trim() === wanted);
+          if (option) option.click(); else trigger.click();
+          setTimeout(window.__traptubeScanMenus, 150);
+        }, 220);
+      };
+      new MutationObserver(attach).observe(document.documentElement,{childList:true,subtree:true});
+      attach();
+      setInterval(() => { attach(); state(); }, 700);
+    })();
+    """#
 }
