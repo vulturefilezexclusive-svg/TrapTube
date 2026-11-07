@@ -16,7 +16,7 @@ enum Stem: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum DemucsError: LocalizedError, Sendable {
+enum StemProcessingError: LocalizedError, Sendable {
     case unreadableAudio, invalidSampleRate, modelDownload, outputWrite(String)
     var errorDescription: String? {
         switch self {
@@ -107,7 +107,7 @@ final class StemSeparationService: ObservableObject {
     func separate(track: Track) {
         guard !isProcessing else { return }
         guard availability == .bundled else {
-            errorMessage = DemucsError.modelDownload.localizedDescription
+            errorMessage = StemProcessingError.modelDownload.localizedDescription
             return
         }
         isProcessing = true
@@ -145,7 +145,7 @@ final class StemSeparationService: ObservableObject {
                     result[kind] = outputURL
                 }
                 guard result.count == Stem.allCases.count else {
-                    throw DemucsError.outputWrite("The enhanced model did not return all four expected stems.")
+                    throw StemProcessingError.outputWrite("The enhanced model did not return all four expected stems.")
                 }
                 await self.finish(result: result)
             } catch {
@@ -178,17 +178,17 @@ final class StemSeparationService: ObservableObject {
         guard sourceFormat.sampleRate.isFinite, sourceFormat.sampleRate > 0,
               sourceFormat.channelCount > 0, file.length > 0,
               let source = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
-            throw DemucsError.unreadableAudio
+            throw StemProcessingError.unreadableAudio
         }
         try file.read(into: source)
         guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sourceFormat.sampleRate,
                                          channels: 2, interleaved: false),
               let converter = AVAudioConverter(from: sourceFormat, to: target) else {
-            throw DemucsError.unreadableAudio
+            throw StemProcessingError.unreadableAudio
         }
         let capacity = AVAudioFrameCount(ceil(Double(source.frameLength) * target.sampleRate / sourceFormat.sampleRate) + 1024)
         guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
-            throw DemucsError.unreadableAudio
+            throw StemProcessingError.unreadableAudio
         }
         var supplied = false
         var conversionError: NSError?
@@ -200,7 +200,7 @@ final class StemSeparationService: ObservableObject {
         }
         if let conversionError { throw conversionError }
         guard status != .error, converted.frameLength > 0,
-              let channels = converted.floatChannelData else { throw DemucsError.unreadableAudio }
+              let channels = converted.floatChannelData else { throw StemProcessingError.unreadableAudio }
         let count = Int(converted.frameLength)
         return (
             Array(UnsafeBufferPointer(start: channels[0], count: count)),
@@ -214,7 +214,7 @@ final class StemSeparationService: ObservableObject {
               let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 2, interleaved: false),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(left.count)),
               let channels = buffer.floatChannelData else {
-            throw DemucsError.outputWrite("Could not allocate a stereo WAV for a separated stem.")
+            throw StemProcessingError.outputWrite("Could not allocate a stereo WAV for a separated stem.")
         }
         buffer.frameLength = AVAudioFrameCount(left.count)
         left.withUnsafeBufferPointer { channels[0].update(from: $0.baseAddress!, count: left.count) }
