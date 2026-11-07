@@ -4,8 +4,6 @@ import UIKit
 struct SettingsView: View {
     @EnvironmentObject private var player: AudioEngineManager
     @EnvironmentObject private var theme: ThemeManager
-    @State private var connectionStatus: String?
-    @State private var checkingConnection = false
     @State private var showEqualizer = false
     @State private var showCustomization = false
     @StateObject private var stemService = StemSeparationService()
