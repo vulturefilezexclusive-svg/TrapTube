@@ -276,6 +276,36 @@ jobs:
           chmod +x scripts/build-unsigned-ipa.sh
           ./scripts/build-unsigned-ipa.sh
 
+      - name: Enable iOS background audio playback
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA="work/TrapTube/dist/TrapTube-unsigned.ipa"
+          STAGING="$RUNNER_TEMP/traptube-background-audio"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          ditto -x -k "$IPA" "$STAGING"
+          APP_PATH="$STAGING/Payload/TrapTube.app"
+          python3 - "$APP_PATH/Info.plist" <<'PYBG'
+          import plistlib, sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          with path.open("rb") as handle:
+              info = plistlib.load(handle)
+          modes = info.get("UIBackgroundModes", [])
+          if not isinstance(modes, list):
+              modes = []
+          if "audio" not in modes:
+              modes.append("audio")
+          info["UIBackgroundModes"] = modes
+          with path.open("wb") as handle:
+              plistlib.dump(info, handle, sort_keys=False)
+          print("Configured UIBackgroundModes:", ", ".join(modes))
+          PYBG
+          REPACK="$RUNNER_TEMP/TrapTube-background-audio.ipa"
+          (cd "$STAGING" && /usr/bin/zip -qry "$REPACK" Payload)
+          mv "$REPACK" "$IPA"
+          /usr/bin/unzip -tq "$IPA"
       - name: Add third-party notices to app bundle
         shell: bash
         run: |
