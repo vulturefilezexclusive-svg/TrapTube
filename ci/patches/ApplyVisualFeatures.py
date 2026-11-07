@@ -240,3 +240,267 @@ root_source = root_source.replace("case .youtube: YouTubeView()", "case .youtube
 root_view.write_text(root_source)
 
 print("Applied splash, glass surfaces, and audio-reactive visualizer patches.")
+
+
+# Home feed: replace the external Safari launch with an embedded, persistent
+# YouTube Home experience. The existing RootView tab bar is intentionally untouched.
+yt_path = find("YouTubeView.swift")
+yt_source = yt_path.read_text()
+start_marker = "struct YouTubeView: View {"
+end_marker = "private struct TypeTypeVideoRow"
+if start_marker not in yt_source or end_marker not in yt_source:
+    raise SystemExit("YouTube Home replacement anchors missing")
+start = yt_source.index(start_marker)
+end = yt_source.index(end_marker, start)
+replacement = r'''struct YouTubeView: View {
+    @EnvironmentObject private var theme: ThemeManager
+    @State private var webView: WKWebView?
+    @State private var searchText = ""
+    @State private var selectedCategory = "All"
+    @State private var isLoading = true
+    @FocusState private var searchFocused: Bool
+
+    private let homeURL = URL(string: "https://www.youtube.com/feed/recommended")!
+    private let categories = ["All", "Louisiana Hip Hop", "Documentaries", "Studio Sessions"]
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.025, green: 0.025, blue: 0.035).ignoresSafeArea()
+            RadialGradient(colors: [Color(hex: "A90012").opacity(0.22), .clear],
+                           center: .top, startRadius: 8, endRadius: 430)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                header
+                searchBar
+                categoryBar
+
+                ZStack(alignment: .top) {
+                    YouTubeHomeWebView(
+                        url: homeURL,
+                        onCreated: { webView = $0 },
+                        onLoading: { isLoading = $0 }
+                    )
+                    .background(Color.black)
+
+                    if isLoading {
+                        HStack(spacing: 9) {
+                            ProgressView().tint(.white)
+                            Text("Loading your YouTube feed…")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(.horizontal, 15).padding(.vertical, 11)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
+                        .padding(.top, 16)
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(uiImage: UIImage(named: "TrapTubeIcon") ?? UIImage(systemName: "play.rectangle.fill")!)
+                .resizable().scaledToFill()
+                .frame(width: 34, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(.white.opacity(0.24), lineWidth: 1))
+                .shadow(color: Color(hex: "F01D2D").opacity(0.34), radius: 10, y: 3)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text("TrapTube").font(.system(size: 18, weight: .black, design: .rounded))
+                        .tracking(-0.5).foregroundStyle(.white)
+                    Text("HOME").font(.system(size: 8, weight: .black, design: .rounded))
+                        .tracking(1).foregroundStyle(Color(hex: "FF6570"))
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(Color(hex: "E50920").opacity(0.18), in: Capsule())
+                }
+                Text("Your YouTube feed").font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.48))
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                load(URL(string: "https://www.youtube.com/signin?next=%2Ffeed%2Frecommended")!)
+            } label: {
+                Label("Sign in", systemImage: "person.crop.circle")
+                    .font(.caption.weight(.bold)).foregroundStyle(.white)
+                    .padding(.horizontal, 11).padding(.vertical, 9)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+            }
+            .accessibilityLabel("Sign in to YouTube")
+
+            Button { webView?.reload() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 36, height: 36)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 1))
+            }
+            .accessibilityLabel("Refresh YouTube feed")
+        }
+        .padding(.horizontal, 15).padding(.top, 8).padding(.bottom, 11)
+        .background(.ultraThinMaterial.opacity(0.72))
+        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.white.opacity(0.52))
+            TextField("Search videos, audio, creators…", text: $searchText)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .tint(Color(hex: "FF3948"))
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .onSubmit { submitSearch() }
+                .autocorrectionDisabled()
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.45))
+                }
+                .accessibilityLabel("Clear search")
+            }
+            Button { submitSearch() } label: {
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 12, weight: .black)).foregroundStyle(.white)
+                    .frame(width: 29, height: 29)
+                    .background(LinearGradient(colors: [Color(hex: "FF303B"), Color(hex: "A90012")],
+                                               startPoint: .topLeading, endPoint: .bottomTrailing),
+                                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .accessibilityLabel("Search YouTube")
+        }
+        .padding(.horizontal, 13).padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(.white.opacity(0.13), lineWidth: 1))
+        .shadow(color: .black.opacity(0.2), radius: 12, y: 5)
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+
+    private var categoryBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(categories, id: \.self) { category in
+                    let active = selectedCategory == category
+                    Button { selectCategory(category) } label: {
+                        Text(category)
+                            .font(.system(size: 11, weight: active ? .bold : .semibold))
+                            .foregroundStyle(active ? .white : .white.opacity(0.72))
+                            .padding(.horizontal, 13).padding(.vertical, 8)
+                            .background {
+                                if active {
+                                    LinearGradient(colors: [Color(hex: "FF303B"), Color(hex: "A90012")],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                                } else {
+                                    Color.white.opacity(0.055)
+                                }
+                            }
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(.white.opacity(active ? 0.24 : 0.12), lineWidth: 1))
+                            .shadow(color: active ? Color(hex: "E50920").opacity(0.22) : .clear, radius: 9, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 3)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func selectCategory(_ category: String) {
+        selectedCategory = category
+        searchFocused = false
+        if category == "All" {
+            load(homeURL)
+        } else {
+            searchText = category
+            submitSearch()
+        }
+    }
+
+    private func submitSearch() {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty,
+              var components = URLComponents(string: "https://www.youtube.com/results") else { return }
+        components.queryItems = [URLQueryItem(name: "search_query", value: query)]
+        if let url = components.url { load(url) }
+        searchFocused = false
+    }
+
+    private func load(_ url: URL) {
+        guard url.host == "www.youtube.com" || url.host == "m.youtube.com" else { return }
+        webView?.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+    }
+}
+
+private struct YouTubeHomeWebView: UIViewRepresentable {
+    let url: URL
+    let onCreated: (WKWebView) -> Void
+    let onLoading: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onLoading: onLoading) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.isOpaque = false
+        view.backgroundColor = .black
+        view.scrollView.backgroundColor = .black
+        view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.allowsBackForwardNavigationGestures = true
+        view.navigationDelegate = context.coordinator
+        context.coordinator.webView = view
+        onCreated(view)
+        view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        return view
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onLoading = onLoading
+        if uiView.url == nil { uiView.load(URLRequest(url: url)) }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var onLoading: (Bool) -> Void
+        weak var webView: WKWebView?
+
+        init(onLoading: @escaping (Bool) -> Void) { self.onLoading = onLoading }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(true) }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(.allow)
+        }
+    }
+}
+
+'''
+yt_path.write_text(yt_source[:start] + replacement + yt_source[end:])
