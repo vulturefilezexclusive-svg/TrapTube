@@ -18,6 +18,9 @@ required = {
     "signatureExtension": service,
     "availableAudioBitrates": service,
     "selectedVideoBitrate": service,
+    "outputFormat": service,
+    "workerTokens": service,
+    "bestVideoAsset": service,
     "downloadSegmented": service,
     "parseHLSMediaPlaylist": service,
     "TrapTubeWebCookieBridge": service,
@@ -31,6 +34,7 @@ required = {
     "TrapTubeHuePicker": settings,
     "AngularGradient": settings,
     "availableAudioBitrates": player,
+    "WAV · PCM": player,
 }
 missing = [name for name, source in required.items() if name not in source]
 if missing:
