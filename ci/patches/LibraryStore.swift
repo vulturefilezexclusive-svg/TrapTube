@@ -38,43 +38,42 @@ final class LibraryStore: ObservableObject {
             var destination: URL?
             do {
                 try fileManager.createDirectory(at: Self.tracksDirectory, withIntermediateDirectories: true)
-                let asset = AVURLAsset(url: source)
-                let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-                guard !audioTracks.isEmpty else { throw ImportError.noAudioTrack }
-                // Normalize imported formats/codecs to a known iOS-playable AAC/M4A file.
-                // This avoids handing AVAudioEngine files whose container extension or codec
-                // cannot be decoded by AVAudioFile on-device.
+                // Decode and normalize the source with FFmpeg to a conventional AAC/M4A
+                // stream. This handles source codecs/containers that AVAudioFile cannot read
+                // directly and produces the exact format used by the native EQ playback graph.
                 let fileName = "\(UUID().uuidString).m4a"
                 let target = Self.audioURL(for: fileName)
                 destination = target
-                guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
-                    throw ImportError.exportUnavailable
-                }
-                exporter.outputURL = target
-                exporter.outputFileType = .m4a
-                exporter.shouldOptimizeForNetworkUse = false
-                await withCheckedContinuation { continuation in
-                    exporter.exportAsynchronously { continuation.resume() }
-                }
-                guard exporter.status == .completed else {
-                    throw exporter.error ?? ImportError.exportFailed
-                }
+                try await TrapTubeFFmpegProcessor.execute([
+                    "-y", "-i", source.path,
+                    "-map", "0:a:0", "-vn",
+                    "-c:a", "aac", "-b:a", "256k",
+                    "-ar", "44100", "-ac", "2",
+                    "-movflags", "+faststart",
+                    target.path
+                ])
 
                 let attributes = try fileManager.attributesOfItem(atPath: target.path)
                 let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0 else { throw ImportError.emptyFile }
 
-                // Validate with AVAudioPlayer, the compatibility decoder used if the
-                // equalizer's AVAudioEngine graph cannot decode/schedule this container.
-                // Requiring AVAudioFile here would reject files the fallback player can play.
-                let playbackProbe = try AVAudioPlayer(contentsOf: target)
-                guard playbackProbe.duration.isFinite,
-                      playbackProbe.duration > 0,
-                      playbackProbe.numberOfChannels > 0,
-                      playbackProbe.prepareToPlay() else {
+                // Validate using the same AVAudioFile decoder and PCM read path that
+                // AudioEngineManager schedules through its equalizer graph.
+                let playbackProbe = try AVAudioFile(forReading: target)
+                guard playbackProbe.length > 0,
+                      playbackProbe.processingFormat.sampleRate.isFinite,
+                      playbackProbe.processingFormat.sampleRate > 0,
+                      playbackProbe.processingFormat.channelCount > 0 else {
                     throw ImportError.playbackValidationFailed
                 }
-                let verifiedDuration = playbackProbe.duration
+                let probeFrames = AVAudioFrameCount(min(4_096, playbackProbe.length))
+                guard let probeBuffer = AVAudioPCMBuffer(
+                    pcmFormat: playbackProbe.processingFormat,
+                    frameCapacity: probeFrames
+                ) else { throw ImportError.playbackValidationFailed }
+                try playbackProbe.read(into: probeBuffer, frameCount: probeFrames)
+                guard probeBuffer.frameLength > 0 else { throw ImportError.playbackValidationFailed }
+                let verifiedDuration = Double(playbackProbe.length) / playbackProbe.processingFormat.sampleRate
                 guard verifiedDuration.isFinite, verifiedDuration > 0 else {
                     throw ImportError.playbackValidationFailed
                 }
