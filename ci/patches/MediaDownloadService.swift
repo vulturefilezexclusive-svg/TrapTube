@@ -152,9 +152,18 @@ struct TrapTubeStreamResolver {
         let headResponse = try? await URLSession.shared.data(for: head)
         let http = headResponse?.1 as? HTTPURLResponse
         let mime = (http?.mimeType ?? "").lowercased()
-        if mime.hasPrefix("video/") || mime.hasPrefix("audio/") ||
-            ["mp4","m4v","mov","webm","m4a","mp3","aac","wav","flac"].contains(ext) {
-            let kind: TrapTubeAssetKind = mime.hasPrefix("audio/") || ["m4a","mp3","aac","wav","flac"].contains(ext) ? .audio : .muxed
+        let disposition = http?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        let filenameExtension: String = {
+            guard let match = disposition.range(of: #"filename\*?=(?:UTF-8'')?[\"']?([^;\"']+)"#,
+                                                options: .regularExpression) else { return "" }
+            let value = String(disposition[match]).split(separator: "=", maxSplits: 1).last.map(String.init) ?? ""
+            return URL(fileURLWithPath: value.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))).pathExtension.lowercased()
+        }()
+        let mediaExtension = ext.isEmpty ? filenameExtension : ext
+        let audioExtensions = ["m4a","mp3","aac","wav","flac","ogg","opus"]
+        let mediaExtensions = ["mp4","m4v","mov","webm","mkv","avi","ts"] + audioExtensions
+        if mime.hasPrefix("video/") || mime.hasPrefix("audio/") || mediaExtensions.contains(mediaExtension) {
+            let kind: TrapTubeAssetKind = mime.hasPrefix("audio/") || audioExtensions.contains(mediaExtension) ? .audio : .muxed
             let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: mime, height: nil, bitrate: nil,
                 label: kind == .audio ? "Original audio" : "Original media", isManifest: false, headers: providerHeaders)
             return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
