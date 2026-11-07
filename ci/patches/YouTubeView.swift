@@ -9,7 +9,14 @@ struct YouTubeView: View {
     @State private var showYouTube = false
     @AppStorage("discovery.sourceURL") private var discoverySourceURL = ""
 
-    private var homeURL: URL {\n        let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)\n        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else {\n            return URL(string: "https://www.youtube.com/")!\n        }\n        return url\n    }\n
+    private var homeURL: URL {
+        let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else {
+            return URL(string: "https://www.youtube.com/")!
+        }
+        return url
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
