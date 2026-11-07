@@ -215,10 +215,12 @@ struct TrapTubeStreamResolver {
         var streamIndex = 0
         let adaptationSets = xml.components(separatedBy: "<AdaptationSet").dropFirst()
         for adaptation in adaptationSets {
-            guard let adaptationTagEnd = adaptation.firstIndex(of: ">") else { continue }
+            guard let adaptationEnd = adaptation.range(of: "</AdaptationSet>"),
+                  let adaptationTagEnd = adaptation.firstIndex(of: ">") else { continue }
+            let adaptationBody = String(adaptation[..<adaptationEnd.lowerBound])
             let adaptationAttributes = parseAttributes(String(adaptation[..<adaptationTagEnd]))
             let inheritedType = (adaptationAttributes["mimeType"] ?? adaptationAttributes["contentType"] ?? "").lowercased()
-            let representations = adaptation.components(separatedBy: "<Representation").dropFirst()
+            let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
             for block in representations {
                 guard let end = block.range(of: "</Representation>") else { continue }
                 let segment = String(block[..<end.lowerBound])
