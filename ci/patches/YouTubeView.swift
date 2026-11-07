@@ -663,6 +663,7 @@ private struct TrapTubeDownloadsSheet: View {
     @State private var mode = "video"
     @State private var quality = "best"
     @State private var format = "mp4"
+    @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
     @State private var selectedVideo: TrapTubeDownloadedMedia?
 
     private var modeTitle: String {
@@ -689,7 +690,8 @@ private struct TrapTubeDownloadsSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: mode) { _, newMode in
-                            quality = "best"
+                            quality = newMode == "video" && preferredVideoQuality != "auto"
+                                ? "\(preferredVideoQuality)p" : "best"
                             format = newMode == "audio" ? "m4a" : "mp4"
                         }
 
@@ -697,6 +699,8 @@ private struct TrapTubeDownloadsSheet: View {
                             Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
                                 Text("Best available").tag("best")
                                 if mode == "video" {
+                                    Text("2160p").tag("2160p")
+                                    Text("1440p").tag("1440p")
                                     Text("1080p").tag("1080p")
                                     Text("720p").tag("720p")
                                     Text("480p").tag("480p")
@@ -821,6 +825,11 @@ private struct TrapTubeDownloadsSheet: View {
         .sheet(item: $selectedVideo) { item in
             TrapTubeDownloadedVideoPlayer(item: item)
                 .preferredColorScheme(.dark)
+        }
+        .onAppear {
+            if preferredVideoQuality != "auto" {
+                quality = "\(preferredVideoQuality)p"
+            }
         }
     }
 
