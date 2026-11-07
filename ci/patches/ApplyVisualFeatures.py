@@ -236,8 +236,8 @@ p.write_text(s)
 root_view = find("RootView.swift")
 root_source = root_view.read_text()
 import re
-root_source, home_count = re.subn(r"case \.home:\s*(?:HomeView|YouTubeView)\(\)", "case .home: HomeView()", root_source, count=1)
-root_source, discovery_count = re.subn(r"case \.youtube:\s*(?:HomeView|YouTubeView)\(\)", "case .youtube: YouTubeView()", root_source, count=1)
+root_source, home_count = re.subn(r"case \.home:\s*(?:HomeView|YouTubeView)(?:\(\)|\(discoveryMode:\s*(?:true|false)\))", "case .home: YouTubeView(discoveryMode: false)", root_source, count=1)
+root_source, discovery_count = re.subn(r"case \.youtube:\s*(?:HomeView|YouTubeView)(?:\(\)|\(discoveryMode:\s*(?:true|false)\))", "case .youtube: YouTubeView(discoveryMode: true)", root_source, count=1)
 if home_count != 1 or discovery_count != 1:
     raise SystemExit("Could not enforce Home and TrapTube tab destinations")
 root_view.write_text(root_source)
