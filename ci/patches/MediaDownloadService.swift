@@ -607,7 +607,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
             muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: mime, height: height,
                 bitrate: bitrate, label: row["qualityLabel"] as? String ?? "Muxed", isManifest: false,
-                headers: headers))
+                headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
         }
         for row in adaptiveRows {
             guard let rawURL = row["url"] as? String, let url = URL(string: rawURL) else { continue }
@@ -619,11 +619,11 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             if mime.lowercased().hasPrefix("audio/") {
                 audios.append(TrapTubeFlatAsset(url: url, kind: .audio, mimeType: mime, height: nil,
                     bitrate: bitrate, label: row["audioQuality"] as? String ?? "Audio", isManifest: false,
-                    headers: headers))
+                    headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
             } else if mime.lowercased().hasPrefix("video/") {
                 videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: mime, height: height,
                     bitrate: bitrate, label: row["qualityLabel"] as? String ?? height.map { "\($0)p" } ?? "Video",
-                    isManifest: false, headers: headers))
+                    isManifest: false, headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
             }
         }
         if videos.isEmpty || audios.isEmpty {
