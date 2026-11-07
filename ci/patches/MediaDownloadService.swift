@@ -182,6 +182,34 @@ struct TrapTubeStreamResolver {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
+        let responseMime = (manifestResponse.mimeType ?? "").lowercased()
+        let responseDisposition = manifestResponse.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        let responseFilenameExtension: String = {
+            guard let match = responseDisposition.range(of: #"filename\*?=(?:UTF-8'')?[\"']?([^;\"']+)"#,
+                                                        options: .regularExpression) else { return "" }
+            let value = String(responseDisposition[match]).split(separator: "=", maxSplits: 1).last.map(String.init) ?? ""
+            return URL(fileURLWithPath: value.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))).pathExtension.lowercased()
+        }()
+        let signatureExtension: String = {
+            if data.count >= 8, String(data: data[4..<8], encoding: .ascii) == "ftyp" { return "mp4" }
+            if data.count >= 4, data.prefix(4) == Data([0x1A, 0x45, 0xDF, 0xA3]) { return "webm" }
+            if data.count >= 4, data.prefix(4) == Data("fLaC".utf8) { return "flac" }
+            if data.count >= 12, data.prefix(4) == Data("RIFF".utf8), String(data: data[8..<12], encoding: .ascii) == "WAVE" { return "wav" }
+            if data.count >= 3, data.prefix(3) == Data("ID3".utf8) { return "mp3" }
+            if data.count >= 2, data[0] == 0xFF, data[1] & 0xF6 == 0xF0 { return "aac" }
+            return ""
+        }()
+        let responseExtension = responseFilenameExtension.isEmpty ? signatureExtension : responseFilenameExtension
+        let responseAudioExtensions = ["m4a","mp3","aac","wav","flac","ogg","opus"]
+        let responseMediaExtensions = ["mp4","m4v","mov","webm","mkv","avi","ts"] + responseAudioExtensions
+        if responseMime.hasPrefix("video/") || responseMime.hasPrefix("audio/") || responseMediaExtensions.contains(responseExtension) {
+            let kind: TrapTubeAssetKind = responseMime.hasPrefix("audio/") || responseAudioExtensions.contains(responseExtension) ? .audio : .muxed
+            let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: responseMime, height: nil, bitrate: nil,
+                label: kind == .audio ? "Original audio" : "Original media", isManifest: false, headers: providerHeaders)
+            return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
+                audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
+                supportsSeparateAudioVideo: false)
+        }
         if isHLS { return try await parseHLS(data: data, source: source, title: title, headers: providerHeaders) }
         if isDASH { return try parseDASH(data: data, source: source, title: title, headers: providerHeaders) }
         let responseMime = ((response as? HTTPURLResponse)?.mimeType ?? mime).lowercased()
