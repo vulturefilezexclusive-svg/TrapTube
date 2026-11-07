@@ -13,6 +13,8 @@ required = {
     "TrapTubeDownloadManager": service,
     "SegmentTemplate": service,
     "SegmentTimeline": service,
+    "BYTERANGE=": service,
+    "rangeAttempt": service,
     "Content-Range": service,
     "Content-Disposition": service,
     "signatureExtension": service,
