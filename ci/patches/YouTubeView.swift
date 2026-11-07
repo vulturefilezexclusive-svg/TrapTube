@@ -234,7 +234,7 @@ private struct TypeTypeWatchSheet: View {
                     Text(title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
                     Spacer(minLength: 4)
                     Button { showTrapTubeMenu = true } label: {
-                        Image("AppIcon").resizable().scaledToFill().frame(width: 38, height: 38)
+                        Image("TrapTubeIcon").resizable().scaledToFill().frame(width: 38, height: 38)
                             .clipShape(RoundedRectangle(cornerRadius: 11))
                             .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.25), lineWidth: 1))
                     }.accessibilityLabel("Open TrapTube player menu")
@@ -578,7 +578,7 @@ private struct TrapTubePlayerMenu: View {
                 .padding(.top, 10).padding(.bottom, 18)
 
             HStack(spacing: 12) {
-                Image("AppIcon").resizable().scaledToFill().frame(width: 54, height: 54)
+                Image("TrapTubeIcon").resizable().scaledToFill().frame(width: 54, height: 54)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title).font(.headline.bold()).foregroundStyle(.white).lineLimit(1)
