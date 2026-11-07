@@ -13,6 +13,7 @@ def find(name):
 p = find("RootView.swift")
 s = p.read_text()
 if "TrapTubeSplashView" not in s:
+    s = s.replace('            .padding(.bottom, 4)\n        }\n        .preferredColorScheme(.dark)', '            .padding(.bottom, 4)\n            .trapGlass(radius: 24, accent: theme.accent)\n        }\n        .preferredColorScheme(.dark)')
     s = s.replace('@State private var showPlayer = false',
                   '@State private var showPlayer = false\n    @State private var showSplash = true')
     anchor = '        .preferredColorScheme(.dark)\n        .tint(theme.accent)'
