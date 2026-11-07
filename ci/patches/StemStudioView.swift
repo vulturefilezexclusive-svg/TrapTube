@@ -17,7 +17,7 @@ struct StemStudioView: View {
 
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Stem Studio").font(.largeTitle.bold()).foregroundStyle(.white)
-                    Text("Separate an imported song into four individual audio tracks using HTDemucs on your iPhone.")
+                    Text("Separate a song into drums, bass, other and vocals with the fine-tuned HTDemucs FT model running locally on Metal.")
                         .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
                 }.padding(.horizontal, 18)
 
@@ -56,6 +56,26 @@ struct StemStudioView: View {
                         .foregroundStyle(stemService.availability == .bundled ? Color.green : Color(hex: "FFB85C"))
                     Text(stemService.availability.detail)
                         .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
+
+                    if stemService.availability != .bundled {
+                        Button {
+                            stemService.downloadModel()
+                        } label: {
+                            HStack(spacing: 9) {
+                                if stemService.isDownloading { ProgressView().tint(.white) }
+                                else { Image(systemName: "arrow.down.circle.fill") }
+                                Text(stemService.isDownloading ? stemService.statusMessage : "Download enhanced model · 333 MB")
+                            }
+                            .font(.headline.bold()).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 13)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(theme.accent.opacity(0.55), lineWidth: 1))
+                        }
+                        .disabled(stemService.isDownloading)
+                        if stemService.isDownloading {
+                            ProgressView(value: stemService.downloadProgress).tint(theme.accent)
+                        }
+                    }
 
                     Button {
                         guard let selectedTrack else { return }
@@ -122,7 +142,7 @@ struct StemStudioView: View {
                 .padding(16).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 20))
                 .padding(.horizontal, 16)
 
-                Text("Processing runs on-device. The model uses CPU inference and can require substantial free memory; longer tracks take longer to process.")
+                Text("HTDemucs FT runs locally using Metal GPU acceleration. Its 333 MB weights download once and stay cached on this device; imported audio and separated WAV files remain local.")
                     .font(.caption).foregroundStyle(Color(hex: "858185")).padding(.horizontal, 20)
             }
             .padding(.top, 8).padding(.bottom, 22)
