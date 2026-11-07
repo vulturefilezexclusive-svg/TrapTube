@@ -72,6 +72,10 @@ struct TrapTubeDownloadTask: Codable, Identifiable {
     var selectedAudioStreamIndex: Int? = nil
     var selectedVideoRepresentationID: String? = nil
     var selectedAudioRepresentationID: String? = nil
+    var selectedVideoHeight: Int? = nil
+    var selectedAudioBitrate: Int? = nil
+    var selectedVideoMimeType: String? = nil
+    var selectedAudioMimeType: String? = nil
     var partialFileName: String?
     var outputFileName: String?
     var resumeOffset: Int64
@@ -1027,6 +1031,8 @@ final class TrapTubeDownloadManager: ObservableObject {
                 sourceURL: videoURL, selectedVideoURL: selectedVideo?.url, selectedAudioURL: selectedAudio?.url,
                 selectedVideoStreamIndex: selectedVideo?.streamIndex, selectedAudioStreamIndex: selectedAudio?.streamIndex,
                 selectedVideoRepresentationID: selectedVideo?.representationID, selectedAudioRepresentationID: selectedAudio?.representationID,
+                selectedVideoHeight: selectedVideo?.height, selectedAudioBitrate: selectedAudio?.bitrate,
+                selectedVideoMimeType: selectedVideo?.mimeType, selectedAudioMimeType: selectedAudio?.mimeType,
                 partialFileName: nil, outputFileName: nil, resumeOffset: 0)
             jobs.insert(job, at: 0)
             persistQueue()
@@ -1182,12 +1188,16 @@ final class TrapTubeDownloadManager: ObservableObject {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
                 let selectedVideo = media.videoAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
+                    ?? media.videoAssets.first(where: { $0.height == job.selectedVideoHeight && $0.mimeType == job.selectedVideoMimeType })
                     ?? media.videoAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
                     ?? media.muxedAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
+                    ?? media.muxedAssets.first(where: { $0.height == job.selectedVideoHeight && $0.mimeType == job.selectedVideoMimeType })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
                 let selectedAudio = media.audioAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
+                    ?? media.audioAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType })
                     ?? media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
                     ?? media.muxedAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
+                    ?? media.muxedAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
                 let video = job.mode == "audio" ? nil : selectedVideo
                 let audio = job.mode == "audio"
