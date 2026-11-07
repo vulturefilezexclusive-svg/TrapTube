@@ -608,6 +608,7 @@ final class TrapTubeDownloadManager: ObservableObject {
     static let shared = TrapTubeDownloadManager()
     @Published private(set) var jobs: [TrapTubeDownloadTask] = []
     @Published private(set) var completed: [TrapTubeDownloadedMedia] = []
+    @Published private(set) var availableVideoHeights: [Int] = []
     @Published var lastError: String?
     private let resolver = TrapTubeStreamResolver()
     private var workers: [String: Task<Void, Never>] = [:]
@@ -615,6 +616,18 @@ final class TrapTubeDownloadManager: ObservableObject {
     private var queueURL: URL { TrapTubeDownloadPaths.appDirectory.appendingPathComponent("queue.json") }
 
     private init() { restore() }
+
+    func inspect(videoURL: URL, title: String) async {
+        do {
+            let media = try await resolver.resolve(videoURL, title: title)
+            availableVideoHeights = Array(Set((media.videoAssets + media.muxedAssets).compactMap(\.height).filter { $0 > 0 })).sorted(by: >)
+            if availableVideoHeights.isEmpty { availableVideoHeights = [] }
+            lastError = nil
+        } catch {
+            availableVideoHeights = []
+            lastError = error.localizedDescription
+        }
+    }
 
     func enqueue(videoURL: URL, title: String, mode: String, quality: String,
                  format: String, bitrate: Int?, height: Int?) async {
