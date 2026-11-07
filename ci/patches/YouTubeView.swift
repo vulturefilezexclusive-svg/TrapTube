@@ -504,10 +504,20 @@ private struct TypeTypeWebView: UIViewRepresentable {
           node.connect(shelf);
           shelf.connect(gain);
           gain.connect(context.destination);
+          const reportAudioState = () => {
+            const running = !!context && context.state === "running";
+            post({
+              type:"eqStatus",
+              ready:running,
+              error:running ? null : "Streaming EQ is waiting for iOS audio activation. Press Play in the player to start the processed audio path."
+            });
+          };
+          context.addEventListener("statechange", reportAudioState);
           const resumeAudio = () => {
-            if (context && context.state !== "running") {
-              context.resume().catch(error => post({type:"eqStatus",ready:false,error:"Tap Play to activate streaming audio processing: " + error.message}));
-            }
+            if (!context || context.state === "running") { reportAudioState(); return; }
+            context.resume().then(reportAudioState).catch(error => {
+              post({type:"eqStatus",ready:false,error:"Tap Play to activate streaming audio processing: " + error.message});
+            });
           };
           video.addEventListener("play", () => { resumeAudio(); state(); });
           video.addEventListener("playing", resumeAudio);
@@ -517,7 +527,7 @@ private struct TypeTypeWebView: UIViewRepresentable {
           // The video may already be playing by the time the MutationObserver finds it.
           // Resume immediately as well as on subsequent user-initiated playback events.
           resumeAudio();
-          post({type:"eqStatus", ready:true});
+          reportAudioState();
           state();
         } catch (error) {
           try {
