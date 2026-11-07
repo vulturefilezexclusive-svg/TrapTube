@@ -50,6 +50,7 @@ jobs:
           cp ci/patches/LibraryStore.swift "$SERVICES_DIR/LibraryStore.swift"
           cp ci/patches/ThemeManager.swift "$SERVICES_DIR/ThemeManager.swift"
           cp ci/patches/TypeTypeService.swift "$SERVICES_DIR/TypeTypeService.swift"
+          cp ci/patches/GoogleYouTubeAuth.swift "$SERVICES_DIR/GoogleYouTubeAuth.swift"
           cp ci/patches/StemSeparationService.swift "$SERVICES_DIR/StemSeparationService.swift"
           cp ci/patches/SettingsView.swift "$VIEWS_DIR/SettingsView.swift"
           cp ci/patches/YouTubeView.swift "$VIEWS_DIR/YouTubeView.swift"
