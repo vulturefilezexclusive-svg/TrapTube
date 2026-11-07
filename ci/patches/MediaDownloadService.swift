@@ -593,6 +593,13 @@ enum TrapTubeFlatTransfer {
         if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
+        if http.statusCode == 416, offset > 0,
+           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+           let totalText = contentRange.split(separator: "/").last,
+           let total = Int64(totalText), total == offset {
+            progress(offset, total, 0)
+            return destination
+        }
         guard http.statusCode == 200 || http.statusCode == 206 else {
             throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
         }
@@ -640,9 +647,14 @@ enum TrapTubeFlatTransfer {
         var aggregateTotal: Int64 = 0
         var aggregateSpeed: Int64 = 0
 
-        func fetch(_ url: URL, name: String, index: Int) async throws {
+        func fetch(_ url: URL, name: String) async throws {
             let partial = workDirectory.appendingPathComponent(name)
+            let marker = workDirectory.appendingPathComponent(name + ".complete")
             let offset = (try? FileManager.default.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
+            if FileManager.default.fileExists(atPath: marker.path) {
+                completedBytes += offset; aggregateTotal += offset; pieces.append(partial)
+                return
+            }
             let descriptor = TrapTubeFlatAsset(url: url, kind: asset.kind, mimeType: asset.mimeType,
                 height: asset.height, bitrate: asset.bitrate, label: asset.label, isManifest: false,
                 headers: asset.headers)
@@ -653,17 +665,18 @@ enum TrapTubeFlatTransfer {
                 progress(completedBytes + bytes, aggregateTotal + total, speed)
             }
             let size = (try? FileManager.default.attributesOfItem(atPath: result.path)[.size] as? NSNumber)?.int64Value ?? 0
+            try Data().write(to: marker, options: .atomic)
             completedBytes += size
             aggregateTotal += max(lastTotal, size)
             pieces.append(result)
         }
 
         if let initializationURL = asset.initializationURL {
-            try await fetch(initializationURL, name: "init.partial", index: -1)
+            try await fetch(initializationURL, name: "init.partial")
         }
         for (index, segmentURL) in asset.segmentURLs.enumerated() {
             try Task.checkCancellation()
-            try await fetch(segmentURL, name: String(format: "segment-%06d.partial", index), index: index)
+            try await fetch(segmentURL, name: String(format: "segment-%06d.partial", index))
         }
 
         let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.mp4")
@@ -897,6 +910,22 @@ final class TrapTubeDownloadManager: ObservableObject {
             let assets = [video, audio].compactMap { $0 }
             for (assetIndex, asset) in assets.enumerated() {
                 let ext = asset.isManifest ? (asset.mimeType.contains("mpegurl") ? "m3u8" : "mpd") : (asset.url.pathExtension.isEmpty ? "media" : asset.url.pathExtension)
+                if !asset.segmentURLs.isEmpty {
+                    jobs[index].partialFileName = "\(jobID)-\(assetIndex)-segments"; jobs[index].resumeOffset = 0; persistQueue()
+                    let segmented = try await TrapTubeFlatTransfer.downloadSegmented(asset, jobID: jobID, assetIndex: assetIndex, directory: dir) { [weak self] bytes, total, speed in
+                        Task { @MainActor in
+                            guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                            self.jobs[i].stage = "Downloading DASH segments"
+                            self.jobs[i].downloadedBytes = bytes
+                            self.jobs[i].totalBytes = total
+                            self.jobs[i].speedBytesPerSecond = speed
+                            self.jobs[i].progress = total > 0 ? min(0.98, Double(bytes) / Double(total)) : 0
+                            self.persistQueue()
+                        }
+                    }
+                    inputURLs.append(segmented)
+                    continue
+                }
                 let partialName = "\(jobID)-\(assetIndex).partial.\(ext)"
                 let partialURL = dir.appendingPathComponent(partialName)
                 let offset = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? NSNumber)?.int64Value ?? 0
@@ -938,10 +967,12 @@ final class TrapTubeDownloadManager: ObservableObject {
             }
             if modeFor(jobID) == "audio" {
                 try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt,
-                    streamIndex: audio?.streamIndex ?? video?.streamIndex, headers: audio?.headers ?? video?.headers ?? [:], progress: stats)
+                    streamIndex: (audio?.segmentURLs.isEmpty == false || video?.segmentURLs.isEmpty == false) ? nil : (audio?.streamIndex ?? video?.streamIndex),
+                    headers: audio?.headers ?? video?.headers ?? [:], progress: stats)
             } else {
                 try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL,
-                    videoStreamIndex: video?.streamIndex, audioStreamIndex: audio?.streamIndex,
+                    videoStreamIndex: video?.segmentURLs.isEmpty == false ? nil : video?.streamIndex,
+                    audioStreamIndex: audio?.segmentURLs.isEmpty == false ? nil : audio?.streamIndex,
                     videoHeaders: video?.headers ?? [:], audioHeaders: audio?.headers ?? [:], progress: stats)
             }
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
