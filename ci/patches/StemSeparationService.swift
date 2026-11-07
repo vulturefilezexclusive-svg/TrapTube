@@ -139,26 +139,43 @@ private enum HTDemucsRuntime {
     }
 
     static func inverseSpectrogram(real: ArraySlice<Float>, imaginary: ArraySlice<Float>) throws -> [Float] {
-        guard real.count == bins * frames, imaginary.count == bins * frames else { throw DemucsError.processing("Invalid HTDemucs frequency tensor size.") }
-        let fft = try vDSP.DiscreteFourierTransform(count: nFFT, direction: .inverse, transformType: .complexComplex, ofType: Float.self)
-        var inReal = [Float](repeating: 0, count: nFFT), inImaginary = [Float](repeating: 0, count: nFFT)
-        var outReal = inReal, outImaginary = inReal
-        let origin = nFFT / 2 + pad
-        var output = [Float](repeating: 0, count: segmentLength)
-        let scale = 1 / Float(nFFT).squareRoot()
-        for f in 0..<frames {
+        guard real.count == bins * frames, imaginary.count == bins * frames else {
+            throw DemucsError.processing("Invalid HTDemucs frequency tensor size.")
+        }
+        let olaLength = (frames + 3) * hop + nFFT
+        var overlapAdd = [Float](repeating: 0, count: olaLength)
+        var spectrumReal = [Float](repeating: 0, count: bins)
+        var spectrumImaginary = [Float](repeating: 0, count: bins)
+        var frame = [Float](repeating: 0, count: nFFT)
+
+        for frameIndex in 0..<frames {
             for bin in 0..<bins {
-                inReal[bin] = real[real.startIndex + bin * frames + f]
-                inImaginary[bin] = imaginary[imaginary.startIndex + bin * frames + f]
+                spectrumReal[bin] = real[real.startIndex + bin * frames + frameIndex]
+                spectrumImaginary[bin] = imaginary[imaginary.startIndex + bin * frames + frameIndex]
             }
-            fft.transform(inputReal: inReal, inputImaginary: inImaginary, outputReal: &outReal, outputImaginary: &outImaginary)
-            let frameStart = (f + 2) * hop - origin
-            let lower = max(0, -frameStart), upper = min(nFFT, segmentLength - frameStart)
-            if lower < upper {
-                for k in lower..<upper { output[frameStart + k] += (2 * outReal[k] - inReal[0]) * scale * window[k] }
+            spectrumImaginary[0] = 0
+            spectrumReal.withUnsafeMutableBufferPointer { realPointer in
+                spectrumImaginary.withUnsafeMutableBufferPointer { imaginaryPointer in
+                    var split = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imaginaryPointer.baseAddress!)
+                    vDSP_fft_zrip(fftSetup, &split, 1, 12, FFTDirection(FFT_INVERSE))
+                    frame.withUnsafeMutableBytes { bytes in
+                        vDSP_ztoc(&split, 1, bytes.baseAddress!.assumingMemoryBound(to: DSPComplex.self), 2, vDSP_Length(bins))
+                    }
+                }
+            }
+            vDSP_vmul(frame, 1, window, 1, &frame, 1, vDSP_Length(nFFT))
+            let offset = (frameIndex + 2) * hop
+            overlapAdd.withUnsafeMutableBufferPointer { output in
+                vDSP_vadd(output.baseAddress! + offset, 1, frame, 1, output.baseAddress! + offset, 1, vDSP_Length(nFFT))
             }
         }
-        return vDSP.multiply(output, inverseEnvelope)
+
+        var output = [Float](repeating: 0, count: segmentLength)
+        var scale = inverseScale / olaEnvelope
+        overlapAdd.withUnsafeBufferPointer { source in
+            vDSP_vsmul(source.baseAddress! + (nFFT / 2 + pad), 1, &scale, &output, 1, vDSP_Length(segmentLength))
+        }
+        return output
     }
 
     static func validateDSPRoundTrip() throws {
