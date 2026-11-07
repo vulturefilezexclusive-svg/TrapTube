@@ -342,7 +342,8 @@ struct TrapTubeStreamResolver {
         for periodBody in periodBodies {
             let periodTagEnd = periodBody.firstIndex(of: ">")
             let periodAttributes = periodTagEnd.map { parseAttributes(String(periodBody[..<$0])) } ?? [:]
-            let durationSeconds = mpdDuration > 0 ? mpdDuration : parseISODuration(periodAttributes["duration"] ?? "")
+            let periodDuration = parseISODuration(periodAttributes["duration"] ?? "")
+            let durationSeconds = periodDuration > 0 ? periodDuration : mpdDuration
             let periodHeaderEnd = periodBody.range(of: "<AdaptationSet")?.lowerBound ?? periodBody.endIndex
             let periodHeader = String(periodBody[..<periodHeaderEnd])
             let periodTemplate = element("SegmentTemplate", in: periodHeader) ?? mpdTemplate
