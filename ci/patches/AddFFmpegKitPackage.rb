@@ -30,7 +30,7 @@ unless dependency
   dependency.product_name = "ffmpegkit"
   target.package_product_dependencies << dependency
 
-  frameworks_phase = target.frameworks_build_phases.first
+  frameworks_phase = target.frameworks_build_phases
   unless frameworks_phase
     frameworks_phase = project.new(Xcodeproj::Project::Object::PBXFrameworksBuildPhase)
     target.build_phases << frameworks_phase
