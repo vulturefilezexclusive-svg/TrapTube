@@ -356,19 +356,17 @@ enum TrapTubeFlatTransfer {
         if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
-        if offset > 0 && http.statusCode == 200 {
-            return try await download(asset, to: destination, startingAt: 0, progress: progress)
-        }
         guard http.statusCode == 200 || http.statusCode == 206 else {
             throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
         }
-        let total = http.expectedContentLength > 0 ? http.expectedContentLength + offset : 0
+        let effectiveOffset: Int64 = http.statusCode == 206 ? offset : 0
+        let total = http.expectedContentLength > 0 ? http.expectedContentLength + effectiveOffset : 0
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: destination.path) {
             FileManager.default.createFile(atPath: destination.path, contents: nil)
         }
         let handle = try FileHandle(forWritingTo: destination)
-        if offset == 0 { try handle.truncate(atOffset: 0) } else { try handle.seekToEnd() }
+        if effectiveOffset == 0 { try handle.truncate(atOffset: 0) } else { try handle.seekToEnd() }
         var received: Int64 = 0, windowBytes: Int64 = 0, windowStart = Date()
         var buffer = Data()
         do {
@@ -380,7 +378,7 @@ enum TrapTubeFlatTransfer {
                 }
                 if received % 262144 == 0 {
                     let elapsed = max(0.1, Date().timeIntervalSince(windowStart))
-                    progress(offset + received, total, Int64(Double(windowBytes) / elapsed))
+                    progress(effectiveOffset + received, total, Int64(Double(windowBytes) / elapsed))
                     windowBytes = 0; windowStart = Date()
                 }
             }
@@ -390,7 +388,7 @@ enum TrapTubeFlatTransfer {
             try? handle.close()
             throw error
         }
-        progress(offset + received, total, 0)
+        progress(effectiveOffset + received, total, 0)
         return destination
     }
 }
