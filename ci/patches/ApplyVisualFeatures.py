@@ -114,7 +114,7 @@ if "AudioReactiveVisualizer" not in s:
                             CoverArt(title: track.title, size: 220)
                                 .frame(maxWidth: .infinity)
                                 .shadow(color: theme.accent.opacity(0.18), radius: 24, y: 8)
-                            AudioReactiveVisualizer(levels: player.visualizerLevels, style: $visualizerStyle, tint: theme.accent)
+                            AudioReactiveVisualizer(levels: player.visualizerLevels, waveform: player.visualizerWaveform, style: $visualizerStyle, tint: theme.accent)
                                 .frame(height: 112)
                         }
                         .padding(14)
@@ -138,6 +138,7 @@ private enum VisualizerStyle: String, CaseIterable, Identifiable {
 
 private struct AudioReactiveVisualizer: View {
     let levels: [Float]
+    let waveform: [Float]
     @Binding var style: VisualizerStyle
     let tint: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -191,15 +192,16 @@ private struct AudioReactiveVisualizer: View {
                     let ring = Path(ellipseIn: CGRect(x: center.x - base, y: center.y - base, width: base * 2, height: base * 2))
                     context.stroke(ring, with: .color(.white.opacity(0.18)), lineWidth: 1)
                 case .waveform:
+                    let waveValues = waveform.isEmpty ? values : waveform
                     var path = Path()
                     let mid = size.height / 2
                     path.move(to: CGPoint(x: 0, y: mid))
-                    for (index, value) in values.enumerated() {
-                        let x = CGFloat(index) / CGFloat(max(1, values.count - 1)) * size.width
+                    for (index, value) in waveValues.enumerated() {
+                        let x = CGFloat(index) / CGFloat(max(1, waveValues.count - 1)) * size.width
                         path.addLine(to: CGPoint(x: x, y: mid - CGFloat(value) * size.height * 0.46))
                     }
-                    for (index, value) in values.enumerated().reversed() {
-                        let x = CGFloat(index) / CGFloat(max(1, values.count - 1)) * size.width
+                    for (index, value) in waveValues.enumerated().reversed() {
+                        let x = CGFloat(index) / CGFloat(max(1, waveValues.count - 1)) * size.width
                         path.addLine(to: CGPoint(x: x, y: mid + CGFloat(value) * size.height * 0.46))
                     }
                     path.closeSubpath()
