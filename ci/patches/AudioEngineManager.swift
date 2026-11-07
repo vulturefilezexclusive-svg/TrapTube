@@ -3,13 +3,16 @@ import Foundation
 import Combine
 import Accelerate
 
+private enum TrapTubeVisualizerDSP {
+    static let fftSize = 1024
+    static let window: [Float] = (0..<1024).map { 0.5 * (1 - cos(2 * Float.pi * Float($0) / 1024)) }
+    nonisolated(unsafe) static let setup: FFTSetup = vDSP_create_fftsetup(10, FFTRadix(kFFTRadix2))!
+}
+
 @MainActor
 final class AudioEngineManager: ObservableObject {
     static let frequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 10_000, 12_000, 16_000]
     static let presetNames = ["Hip Hop Boost", "Bass Heavy", "Vocal Clarity", "Flat"]
-    private static let visualizerFFTSize = 1024
-    private static let visualizerFFTSetup: FFTSetup = vDSP_create_fftsetup(10, FFTRadix(kFFTRadix2))!
-    private static let visualizerWindow: [Float] = (0..<1024).map { 0.5 * (1 - cos(2 * Float.pi * Float($0) / 1024)) }
 
     @Published private(set) var currentTrack: Track?
     @Published private(set) var isPlaying = false
@@ -203,7 +206,7 @@ final class AudioEngineManager: ObservableObject {
         masterStage.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
             guard let channels = buffer.floatChannelData else { return }
             let frameCount = Int(buffer.frameLength)
-            guard frameCount >= Self.visualizerFFTSize else { return }
+            guard frameCount >= TrapTubeVisualizerDSP.fftSize else { return }
             let channelCount = Int(buffer.format.channelCount)
             let fftSize = Self.visualizerFFTSize
             var mono = [Float](repeating: 0, count: fftSize)
@@ -219,7 +222,7 @@ final class AudioEngineManager: ObservableObject {
             }
 
             var windowed = [Float](repeating: 0, count: fftSize)
-            vDSP_vmul(mono, 1, Self.visualizerWindow, 1, &windowed, 1, vDSP_Length(fftSize))
+            vDSP_vmul(mono, 1, TrapTubeVisualizerDSP.window, 1, &windowed, 1, vDSP_Length(fftSize))
             var real = [Float](repeating: 0, count: fftSize / 2)
             var imaginary = [Float](repeating: 0, count: fftSize / 2)
             real.withUnsafeMutableBufferPointer { realPointer in
@@ -228,7 +231,7 @@ final class AudioEngineManager: ObservableObject {
                     windowed.withUnsafeBytes { bytes in
                         vDSP_ctoz(bytes.baseAddress!.assumingMemoryBound(to: DSPComplex.self), 2, &split, 1, vDSP_Length(fftSize / 2))
                     }
-                    vDSP_fft_zrip(Self.visualizerFFTSetup, &split, 1, 10, FFTDirection(FFT_FORWARD))
+                    vDSP_fft_zrip(TrapTubeVisualizerDSP.setup, &split, 1, 10, FFTDirection(FFT_FORWARD))
                 }
             }
 
