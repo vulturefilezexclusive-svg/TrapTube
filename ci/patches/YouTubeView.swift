@@ -750,12 +750,9 @@ private struct TrapTubeDownloadsSheet: View {
                             Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
                                 Text("Best available").tag("best")
                                 if mode == "video" {
-                                    Text("2160p").tag("2160p")
-                                    Text("1440p").tag("1440p")
-                                    Text("1080p").tag("1080p")
-                                    Text("720p").tag("720p")
-                                    Text("480p").tag("480p")
-                                    Text("360p").tag("360p")
+                                    ForEach(manager.availableVideoHeights, id: \.self) { height in
+                                        Text("\(height)p").tag("\(height)p")
+                                    }
                                 } else {
                                     Text("Best available source").tag("best")
                                 }
@@ -793,9 +790,8 @@ private struct TrapTubeDownloadsSheet: View {
                                     quality: quality,
                                     format: format,
                                     bitrate: nil,
-                                    height: mode == "video"
-                                        ? (quality == "best" ? 2160 : Int(quality.replacingOccurrences(of: "p", with: "")))
-                                        : nil
+                                    height: mode == "video" && quality != "best"
+                                        ? Int(quality.replacingOccurrences(of: "p", with: "")) : nil
                                 )
                             }
                         } label: {
@@ -891,6 +887,7 @@ private struct TrapTubeDownloadsSheet: View {
             if preferredVideoQuality != "auto" {
                 quality = "\(preferredVideoQuality)p"
             }
+            Task { await manager.inspect(videoURL: videoURL, title: title) }
         }
     }
 
