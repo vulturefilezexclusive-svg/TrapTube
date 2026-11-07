@@ -274,14 +274,29 @@ jobs:
           fi
           echo "Corrected $FIXED_COREMEDIA bundled binary/binaries to use Apple's CoreMedia framework."
           # Verify the incorrect provider is gone and the system CoreMedia dependency is present.
-          if find "$APP_PATH/Frameworks" -type f -print0 | while IFS= read -r -d '' BINARY; do
-            /usr/bin/otool -L "$BINARY" 2>/dev/null | grep -Fq '@rpath/libswiftCoreMedia.dylib' && exit 1 || true
-          done; then
-            :
-          else
-            echo "ERROR: A bundled binary still references the incorrect Swift CoreMedia provider." >&2
-            exit 7
-          fi
+          python3 - "$APP_PATH/Frameworks" <<'PYCOREMEDIA'
+          from pathlib import Path
+          import subprocess, sys
+          root = Path(sys.argv[1])
+          stale = []
+          corrected = []
+          for binary in root.rglob("*"):
+              if not binary.is_file():
+                  continue
+              try:
+                  deps = subprocess.check_output(["/usr/bin/otool", "-L", str(binary)], text=True, stderr=subprocess.DEVNULL)
+              except (subprocess.CalledProcessError, OSError):
+                  continue
+              if "@rpath/libswiftCoreMedia.dylib" in deps:
+                  stale.append(str(binary))
+              if "/System/Library/Frameworks/CoreMedia.framework/CoreMedia" in deps:
+                  corrected.append(str(binary))
+          if stale:
+              raise SystemExit("Incorrect Swift CoreMedia dependency remains:\\n" + "\\n".join(stale))
+          if not corrected:
+              raise SystemExit("No binary contains the corrected system CoreMedia dependency.")
+          print("Verified corrected CoreMedia dependency in: " + ", ".join(corrected))
+          PYCOREMEDIA
           test -s "$APP_PATH/$EXECUTABLE"
           SWIFT_STDLIB_TOOL="$(xcrun --find swift-stdlib-tool)"
           echo "Embedding Swift runtime libraries referenced by the app and bundled frameworks."
