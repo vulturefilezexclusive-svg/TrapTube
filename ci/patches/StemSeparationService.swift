@@ -104,19 +104,35 @@ private enum HTDemucsRuntime {
 
     static func spectrogram(_ x: [Float]) throws -> (real: [Float], imaginary: [Float]) {
         guard x.count == segmentLength else { throw DemucsError.processing("Invalid HTDemucs segment length.") }
-        let padded = reflectPad(reflectPad(x, left: pad, right: pad + frames * hop - x.count), left: nFFT / 2, right: nFFT / 2)
-        let fft = try vDSP.DiscreteFourierTransform(count: nFFT, direction: .forward, transformType: .complexComplex, ofType: Float.self)
-        let zeros = [Float](repeating: 0, count: nFFT)
-        var frame = zeros, re = zeros, im = zeros
-        var real = [Float](repeating: 0, count: bins * frames), imaginary = real
-        let scale = 1 / Float(nFFT).squareRoot()
-        for f in 0..<frames {
-            let start = (f + 2) * hop
-            vDSP.multiply(padded[start..<(start + nFFT)], window, result: &frame)
-            fft.transform(inputReal: frame, inputImaginary: zeros, outputReal: &re, outputImaginary: &im)
-            for bin in 0..<bins {
-                real[bin * frames + f] = re[bin] * scale
-                imaginary[bin * frames + f] = im[bin] * scale
+        var padded = [Float](repeating: 0, count: paddedLength)
+        for i in 0..<pad { padded[i] = x[pad - i] }
+        padded.replaceSubrange(pad..<(pad + segmentLength), with: x)
+        for i in 0..<padRight { padded[pad + segmentLength + i] = x[segmentLength - 2 - i] }
+
+        var real = [Float](repeating: 0, count: bins * frames)
+        var imaginary = [Float](repeating: 0, count: bins * frames)
+        var frameReal = [Float](repeating: 0, count: bins)
+        var frameImaginary = [Float](repeating: 0, count: bins)
+        var windowed = [Float](repeating: 0, count: nFFT)
+        for frameIndex in 0..<frames {
+            let start = frameIndex * hop
+            padded.withUnsafeBufferPointer { source in
+                vDSP_vmul(source.baseAddress! + start, 1, window, 1, &windowed, 1, vDSP_Length(nFFT))
+            }
+            frameReal.withUnsafeMutableBufferPointer { realPointer in
+                frameImaginary.withUnsafeMutableBufferPointer { imaginaryPointer in
+                    var split = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imaginaryPointer.baseAddress!)
+                    windowed.withUnsafeBytes { bytes in
+                        vDSP_ctoz(bytes.baseAddress!.assumingMemoryBound(to: DSPComplex.self), 2, &split, 1, vDSP_Length(bins))
+                    }
+                    vDSP_fft_zrip(fftSetup, &split, 1, 12, FFTDirection(FFT_FORWARD))
+                    real[frameIndex] = realPointer[0] * forwardScale
+                    imaginary[frameIndex] = 0
+                    for bin in 1..<bins {
+                        real[bin * frames + frameIndex] = realPointer[bin] * forwardScale
+                        imaginary[bin * frames + frameIndex] = imaginaryPointer[bin] * forwardScale
+                    }
+                }
             }
         }
         return (real, imaginary)
