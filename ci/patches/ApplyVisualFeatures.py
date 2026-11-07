@@ -198,11 +198,11 @@ private struct AudioReactiveVisualizer: View {
                     path.move(to: CGPoint(x: 0, y: mid))
                     for (index, value) in waveValues.enumerated() {
                         let x = CGFloat(index) / CGFloat(max(1, waveValues.count - 1)) * size.width
-                        path.addLine(to: CGPoint(x: x, y: mid - CGFloat(value) * size.height * 0.46))
+                        path.addLine(to: CGPoint(x: x, y: mid - CGFloat(max(-1, min(1, value * 4.5))) * size.height * 0.46))
                     }
                     for (index, value) in waveValues.enumerated().reversed() {
                         let x = CGFloat(index) / CGFloat(max(1, waveValues.count - 1)) * size.width
-                        path.addLine(to: CGPoint(x: x, y: mid + CGFloat(value) * size.height * 0.46))
+                        path.addLine(to: CGPoint(x: x, y: mid + CGFloat(max(-1, min(1, value * 4.5))) * size.height * 0.46))
                     }
                     path.closeSubpath()
                     context.fill(path, with: .linearGradient(Gradient(colors: [tint.opacity(0.05), tint.opacity(0.65), tint.opacity(0.08)]),
