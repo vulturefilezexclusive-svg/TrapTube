@@ -106,6 +106,16 @@ enum TrapTubeWebCookieBridge {
         if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
         return headers
     }
+
+    static func forwarding(_ existing: [String: String], from source: URL, to destination: URL) async -> [String: String] {
+        guard source.host?.lowercased() != destination.host?.lowercased() else { return existing }
+        var safe = existing.filter {
+            let key = $0.key.lowercased()
+            return key != "cookie" && key != "authorization" && !key.hasPrefix("x-api-key")
+        }
+        if let cookie = await cookieHeader(for: destination) { safe["Cookie"] = cookie }
+        return safe
+    }
 }
 
 protocol TrapTubeStreamProviderAdapter {
@@ -247,7 +257,8 @@ struct TrapTubeStreamResolver {
     private func loadHLSVariant(_ url: URL, headers: [String: String]) async -> (initializationURL: URL?, segmentURLs: [URL]) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
-        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        let requestHeaders = await TrapTubeWebCookieBridge.forwarding(headers, from: url, to: url)
+        requestHeaders.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else {
@@ -726,9 +737,10 @@ enum TrapTubeFlatTransfer {
                 completedBytes += offset; aggregateTotal += offset; pieces.append(partial)
                 return
             }
+            let requestHeaders = await TrapTubeWebCookieBridge.forwarding(asset.headers, from: asset.url, to: url)
             let descriptor = TrapTubeFlatAsset(url: url, kind: asset.kind, mimeType: asset.mimeType,
                 height: asset.height, bitrate: asset.bitrate, label: asset.label, isManifest: false,
-                headers: asset.headers)
+                headers: requestHeaders)
             var lastTotal: Int64 = 0
             let result = try await download(descriptor, to: partial, startingAt: offset) { bytes, total, speed in
                 lastTotal = total
