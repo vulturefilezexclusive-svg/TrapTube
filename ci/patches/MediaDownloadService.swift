@@ -73,6 +73,7 @@ struct TrapTubeDownloadTask: Codable, Identifiable {
     var selectedVideoRepresentationID: String? = nil
     var selectedAudioRepresentationID: String? = nil
     var selectedVideoHeight: Int? = nil
+    var selectedVideoBitrate: Int? = nil
     var selectedAudioBitrate: Int? = nil
     var selectedVideoMimeType: String? = nil
     var selectedAudioMimeType: String? = nil
@@ -1093,7 +1094,8 @@ final class TrapTubeDownloadManager: ObservableObject {
                 sourceURL: videoURL, selectedVideoURL: selectedVideo?.url, selectedAudioURL: selectedAudio?.url,
                 selectedVideoStreamIndex: selectedVideo?.streamIndex, selectedAudioStreamIndex: selectedAudio?.streamIndex,
                 selectedVideoRepresentationID: selectedVideo?.representationID, selectedAudioRepresentationID: selectedAudio?.representationID,
-                selectedVideoHeight: selectedVideo?.height, selectedAudioBitrate: selectedAudio?.bitrate,
+                selectedVideoHeight: selectedVideo?.height, selectedVideoBitrate: selectedVideo?.bitrate,
+                selectedAudioBitrate: selectedAudio?.bitrate,
                 selectedVideoMimeType: selectedVideo?.mimeType, selectedAudioMimeType: selectedAudio?.mimeType,
                 partialFileName: nil, outputFileName: nil, resumeOffset: 0)
             jobs.insert(job, at: 0)
