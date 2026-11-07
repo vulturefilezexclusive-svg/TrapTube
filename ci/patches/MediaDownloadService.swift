@@ -36,6 +36,8 @@ struct TrapTubeFlatAsset: Codable, Identifiable, Hashable {
     let headers: [String: String]
     var representationID: String? = nil
     var streamIndex: Int? = nil
+    var initializationURL: URL? = nil
+    var segmentURLs: [URL] = []
 }
 
 struct TrapTubeResolvedMedia: Codable {
@@ -469,6 +471,67 @@ enum TrapTubeFlatTransfer {
         }
         progress(effectiveOffset + received, total, 0)
         return destination
+    }
+
+    static func downloadSegmented(_ asset: TrapTubeFlatAsset, jobID: String, assetIndex: Int,
+                                  directory: URL,
+                                  progress: @escaping (Int64, Int64, Int64) -> Void) async throws -> URL {
+        guard !asset.segmentURLs.isEmpty else { throw TrapTubeResolverError.noStreams }
+        let workDirectory = directory.appendingPathComponent("\(jobID)-\(assetIndex)-segments", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
+        var pieces: [URL] = []
+        var completedBytes: Int64 = 0
+        var aggregateTotal: Int64 = 0
+        var aggregateSpeed: Int64 = 0
+
+        func fetch(_ url: URL, name: String, index: Int) async throws {
+            let partial = workDirectory.appendingPathComponent(name)
+            let offset = (try? FileManager.default.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
+            let descriptor = TrapTubeFlatAsset(url: url, kind: asset.kind, mimeType: asset.mimeType,
+                height: asset.height, bitrate: asset.bitrate, label: asset.label, isManifest: false,
+                headers: asset.headers)
+            var lastTotal: Int64 = 0
+            let result = try await download(descriptor, to: partial, startingAt: offset) { bytes, total, speed in
+                lastTotal = total
+                aggregateSpeed = speed
+                progress(completedBytes + bytes, aggregateTotal + total, speed)
+            }
+            let size = (try? FileManager.default.attributesOfItem(atPath: result.path)[.size] as? NSNumber)?.int64Value ?? 0
+            completedBytes += size
+            aggregateTotal += max(lastTotal, size)
+            pieces.append(result)
+        }
+
+        if let initializationURL = asset.initializationURL {
+            try await fetch(initializationURL, name: "init.partial", index: -1)
+        }
+        for (index, segmentURL) in asset.segmentURLs.enumerated() {
+            try Task.checkCancellation()
+            try await fetch(segmentURL, name: String(format: "segment-%06d.partial", index), index: index)
+        }
+
+        let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.mp4")
+        if !FileManager.default.fileExists(atPath: output.path) {
+            FileManager.default.createFile(atPath: output.path, contents: nil)
+        }
+        let outputHandle = try FileHandle(forWritingTo: output)
+        try outputHandle.truncate(atOffset: 0)
+        do {
+            for piece in pieces {
+                let input = try FileHandle(forReadingFrom: piece)
+                defer { try? input.close() }
+                while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
+                    try Task.checkCancellation()
+                    try outputHandle.write(contentsOf: chunk)
+                }
+            }
+            try outputHandle.close()
+        } catch {
+            try? outputHandle.close()
+            throw error
+        }
+        progress(completedBytes, aggregateTotal, aggregateSpeed)
+        return output
     }
 }
 
