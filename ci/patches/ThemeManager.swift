@@ -36,8 +36,9 @@ final class ThemeManager: ObservableObject {
     @Published private(set) var secondaryTextHex = "A6A4A6"
 
     init() {
-        let saved = UserDefaults.standard.string(forKey: "theme.accent") ?? "E50920"
-        accentHex = Self.accents.first(where: { $0.hex == saved })?.hex ?? "E50920"
+        let saved = (UserDefaults.standard.string(forKey: "theme.accent") ?? "E50920").uppercased()
+        let isHex = saved.count == 6 && saved.allSatisfy { $0.isHexDigit }
+        accentHex = isHex ? saved : "E50920"
     }
 
     var accent: Color { Color(hex: accentHex) }
