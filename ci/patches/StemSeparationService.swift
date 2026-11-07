@@ -16,7 +16,7 @@ enum Stem: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum DemucsError: LocalizedError {
+enum DemucsError: LocalizedError, Sendable {
     case unreadableAudio, invalidSampleRate, modelDownload, outputWrite(String)
     var errorDescription: String? {
         switch self {
