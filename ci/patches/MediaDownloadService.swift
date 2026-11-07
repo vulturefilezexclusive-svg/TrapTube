@@ -329,6 +329,7 @@ struct TrapTubeStreamResolver {
         let mpdHeader = String(xml[..<mpdHeaderEnd])
         let mpdTemplate = element("SegmentTemplate", in: mpdHeader)
         let mpdList = element("SegmentList", in: mpdHeader)
+        let mpdSegmentBase = element("SegmentBase", in: mpdHeader)
         let mpdBase = elementText("BaseURL", in: mpdHeader)
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var streamIndex = 0
@@ -348,6 +349,7 @@ struct TrapTubeStreamResolver {
             let periodHeader = String(periodBody[..<periodHeaderEnd])
             let periodTemplate = element("SegmentTemplate", in: periodHeader) ?? mpdTemplate
             let periodList = element("SegmentList", in: periodHeader) ?? mpdList
+            let periodSegmentBase = element("SegmentBase", in: periodHeader) ?? mpdSegmentBase
             let periodBase = elementText("BaseURL", in: periodHeader) ?? mpdBase
             let adaptationSets = periodBody.components(separatedBy: "<AdaptationSet").dropFirst()
             for adaptation in adaptationSets {
@@ -360,6 +362,7 @@ struct TrapTubeStreamResolver {
             let adaptationHeader = String(adaptationBody[..<adaptationHeaderEnd])
             let inheritedTemplate = element("SegmentTemplate", in: adaptationHeader) ?? periodTemplate
             let inheritedList = element("SegmentList", in: adaptationHeader) ?? periodList
+            let inheritedSegmentBase = element("SegmentBase", in: adaptationHeader) ?? periodSegmentBase
             let inheritedBase = elementText("BaseURL", in: adaptationHeader) ?? periodBase
             let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
             for block in representations {
@@ -375,6 +378,7 @@ struct TrapTubeStreamResolver {
                 let representationID = attrs["id"]
                 let template = element("SegmentTemplate", in: segment) ?? inheritedTemplate
                 let list = element("SegmentList", in: segment) ?? inheritedList
+                let segmentBase = element("SegmentBase", in: segment) ?? inheritedSegmentBase
                 var initializationURL: URL?
                 var segmentURLs: [URL] = []
 
@@ -461,8 +465,11 @@ struct TrapTubeStreamResolver {
                 let kind: TrapTubeAssetKind = type.contains("audio") ? .audio : (type.contains("video") ? .video : .muxed)
                 let label = height.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media")
                 let segmented = !segmentURLs.isEmpty
-                let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: type, height: height, bitrate: bitrate,
-                    label: label, isManifest: !segmented, headers: headers, representationID: representationID,
+                let hasDirectBase = representationBase != nil || inheritedBase != nil
+                let needsManifestReader = template != nil || list != nil || segmentBase != nil || !hasDirectBase
+                let assetURL = segmented || needsManifestReader ? source : resolvedBase
+                let asset = TrapTubeFlatAsset(url: assetURL, kind: kind, mimeType: type, height: height, bitrate: bitrate,
+                    label: label, isManifest: needsManifestReader && !segmented, headers: headers, representationID: representationID,
                     streamIndex: streamIndex, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
                 streamIndex += 1
