@@ -341,7 +341,10 @@ struct TrapTubeStreamResolver {
         let encrypted = lines.contains { line in
             line.hasPrefix("#EXT-X-KEY:") && !line.uppercased().contains("METHOD=NONE")
         }
-        let hasByteRanges = lines.contains { $0.hasPrefix("#EXT-X-BYTERANGE:") }
+        let hasByteRanges = lines.contains {
+            $0.hasPrefix("#EXT-X-BYTERANGE:") ||
+            ($0.hasPrefix("#EXT-X-MAP:") && $0.contains("BYTERANGE="))
+        }
         let isCompleteVOD = lines.contains("#EXT-X-ENDLIST")
         guard !encrypted, !hasByteRanges, isCompleteVOD else { return (nil, []) }
 
