@@ -61,6 +61,10 @@ struct TrapTubeDownloadTask: Codable, Identifiable {
     var sourceURL: URL?
     var selectedVideoURL: URL?
     var selectedAudioURL: URL?
+    var selectedVideoStreamIndex: Int? = nil
+    var selectedAudioStreamIndex: Int? = nil
+    var selectedVideoRepresentationID: String? = nil
+    var selectedAudioRepresentationID: String? = nil
     var partialFileName: String?
     var outputFileName: String?
     var resumeOffset: Int64
@@ -351,9 +355,19 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
                     isManifest: false, headers: headers))
             }
         }
+        if muxed.isEmpty && videos.isEmpty {
+            let manifest = (streaming["dashManifestUrl"] as? String).flatMap(URL.init(string:))
+                ?? (streaming["hlsManifestUrl"] as? String).flatMap(URL.init(string:))
+            if let manifest {
+                muxed.append(TrapTubeFlatAsset(url: manifest, kind: .muxed,
+                    mimeType: manifest.pathExtension.lowercased() == "m3u8" ? "application/vnd.apple.mpegurl" : "application/dash+xml",
+                    height: nil, bitrate: nil, label: "YouTube adaptive manifest", isManifest: true,
+                    headers: baseHeaders))
+            }
+        }
         guard !videos.isEmpty || !audios.isEmpty || !muxed.isEmpty else {
             throw TrapTubeResolverError.unsupportedManifest(
-                "YouTube did not expose direct media URLs. Ciphered or protected formats are not decoded by this adapter."
+                "YouTube did not expose direct media URLs or a usable manifest. Ciphered or protected formats are not decoded by this adapter."
             )
         }
         return TrapTubeResolvedMedia(title: resolvedTitle, sourceURL: source, videoAssets: videos,
@@ -581,18 +595,20 @@ final class TrapTubeDownloadManager: ObservableObject {
             let chosenAudio = media.audioAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
             let chosenMuxed = media.muxedAssets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
                 .last(where: { height == nil || ($0.height ?? 0) <= height! }) ?? media.muxedAssets.last
-            if mode == "audio" && chosenAudio == nil && chosenMuxed == nil { throw TrapTubeResolverError.noStreams }
-            if mode != "audio" && chosenVideo == nil && chosenMuxed == nil { throw TrapTubeResolverError.noStreams }
-            var job = TrapTubeDownloadTask(id: id, title: title, mode: mode, status: "queued", stage: "Streams resolved",
+            let hasSeparatePair = mode != "audio" && chosenVideo != nil && chosenAudio != nil
+            let selectedVideo = mode == "audio" ? nil : (hasSeparatePair ? chosenVideo : (chosenMuxed ?? chosenVideo))
+            let selectedAudio = mode == "audio" ? (chosenAudio ?? chosenMuxed) : (hasSeparatePair ? chosenAudio : nil)
+            if mode == "audio" && selectedAudio == nil { throw TrapTubeResolverError.noStreams }
+            if mode != "audio" && selectedVideo == nil { throw TrapTubeResolverError.noStreams }
+            let job = TrapTubeDownloadTask(id: id, title: title, mode: mode, status: "queued", stage: "Streams resolved",
                 progress: 0, downloadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, error: nil,
-                sourceURL: videoURL, selectedVideoURL: chosenVideo?.url, selectedAudioURL: chosenAudio?.url,
+                sourceURL: videoURL, selectedVideoURL: selectedVideo?.url, selectedAudioURL: selectedAudio?.url,
+                selectedVideoStreamIndex: selectedVideo?.streamIndex, selectedAudioStreamIndex: selectedAudio?.streamIndex,
+                selectedVideoRepresentationID: selectedVideo?.representationID, selectedAudioRepresentationID: selectedAudio?.representationID,
                 partialFileName: nil, outputFileName: nil, resumeOffset: 0)
-            if mode == "audio" { job.selectedVideoURL = nil }
-            if chosenMuxed != nil { job.selectedVideoURL = chosenMuxed?.url; job.selectedAudioURL = nil }
             jobs.insert(job, at: 0)
             persistQueue()
-            start(jobID: id, media: media, video: mode == "audio" ? nil : (chosenVideo ?? chosenMuxed),
-                  audio: mode == "audio" ? (chosenAudio ?? chosenMuxed) : chosenAudio, format: format)
+            start(jobID: id, media: media, video: selectedVideo, audio: selectedAudio, format: format)
         } catch { lastError = error.localizedDescription }
     }
 
@@ -693,8 +709,10 @@ final class TrapTubeDownloadManager: ObservableObject {
         Task {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
-                let selectedVideo = media.videoAssets.first(where: { $0.url == job.selectedVideoURL }) ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL })
-                let selectedAudio = media.audioAssets.first(where: { $0.url == job.selectedAudioURL })
+                let selectedVideo = media.videoAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
+                    ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
+                let selectedAudio = media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
+                    ?? media.muxedAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
                 let video = job.mode == "audio" ? nil : selectedVideo
                 let audio = job.mode == "audio"
                     ? (selectedAudio ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL }))
