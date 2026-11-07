@@ -28,6 +28,15 @@ enum DemucsError: LocalizedError, Sendable {
     }
 }
 
+private enum TrapTubeDemucsCache {
+    static let configured: Bool = {
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TrapTube/Demucs", isDirectory: true)
+        DemucsEngine.configureCacheDirectory(cache)
+        return true
+    }()
+}
+
 @MainActor
 final class StemSeparationService: ObservableObject {
     enum Availability: Equatable {
@@ -52,9 +61,7 @@ final class StemSeparationService: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
 
     init() {
-        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("TrapTube/Demucs", isDirectory: true)
-        DemucsEngine.configureCacheDirectory(cache)
+        _ = TrapTubeDemucsCache.configured
         refresh()
     }
 
