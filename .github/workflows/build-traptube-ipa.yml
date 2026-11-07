@@ -14,6 +14,12 @@ on:
       - 'ci/source.zip'
       - 'ci/patches/**'
       - '.github/workflows/build-traptube-ipa.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ci/source.zip'
+      - 'ci/patches/**'
+      - '.github/workflows/build-traptube-ipa.yml'
 
 permissions:
   contents: read
@@ -24,7 +30,7 @@ concurrency:
 
 jobs:
   validate:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.build_candidate)
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.build_candidate)
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
