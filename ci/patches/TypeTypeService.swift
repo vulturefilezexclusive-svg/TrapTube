@@ -191,15 +191,23 @@ enum TrapTubeFFmpegError: LocalizedError {
 }
 
 enum TrapTubeFFmpegProcessor {
-    static func execute(_ arguments: [String]) async throws {
+    static func execute(_ arguments: [String],
+                        progress: ((Int64, Double) -> Void)? = nil) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            _ = FFmpegKit.executeWithArgumentsAsync(arguments, withCompleteCallback: { session in
-                if ReturnCode.isSuccess(session.getReturnCode()) {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: TrapTubeFFmpegError.failed(session.getOutput()))
+            _ = FFmpegKit.executeWithArgumentsAsync(
+                arguments,
+                withCompleteCallback: { session in
+                    if ReturnCode.isSuccess(session.getReturnCode()) {
+                        continuation.resume()
+                    } else {
+                        continuation.resume(throwing: TrapTubeFFmpegError.failed(session.getOutput()))
+                    }
+                },
+                withLogCallback: nil,
+                withStatisticsCallback: { statistics in
+                    progress?(Int64(statistics.getSize()), statistics.getSpeed())
                 }
-            })
+            )
         }
     }
 }
@@ -452,19 +460,21 @@ enum TrapTubeFlatTransfer {
 }
 
 enum TrapTubeMP4Box {
-    static func mux(video: URL, audio: URL?, output: URL) async throws {
+    static func mux(video: URL, audio: URL?, output: URL,
+                    progress: ((Int64, Double) -> Void)? = nil) async throws {
         var args = ["-y", "-i", video.path]
         if let audio { args += ["-i", audio.path] }
         args += audio == nil
             ? ["-map", "0:v?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", output.path]
             : ["-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", output.path]
-        try await TrapTubeFFmpegProcessor.execute(args)
+        try await TrapTubeFFmpegProcessor.execute(args, progress: progress)
         guard FileManager.default.fileExists(atPath: output.path) else { throw TrapTubeFFmpegError.missingOutput }
     }
 
-    static func extractAudio(input: URL, output: URL, format: String) async throws {
+    static func extractAudio(input: URL, output: URL, format: String,
+                             progress: ((Int64, Double) -> Void)? = nil) async throws {
         let codec = format == "wav" ? "pcm_s16le" : "aac"
-        try await TrapTubeFFmpegProcessor.execute(["-y", "-i", input.path, "-vn", "-c:a", codec, output.path])
+        try await TrapTubeFFmpegProcessor.execute(["-y", "-i", input.path, "-vn", "-c:a", codec, output.path], progress: progress)
         guard FileManager.default.fileExists(atPath: output.path) else { throw TrapTubeFFmpegError.missingOutput }
     }
 }
@@ -555,10 +565,27 @@ final class TrapTubeDownloadManager: ObservableObject {
             let outputName = "\(jobID).\(outputExt)"
             let outputURL = dir.appendingPathComponent(outputName)
             jobs[index].stage = "Muxing / finalizing"; persistQueue()
+            var lastStatsAt = Date()
+            var lastStatsBytes: Int64 = 0
+            let stats: (Int64, Double) -> Void = { [weak self] bytes, speed in
+                let now = Date()
+                let elapsed = max(0.1, now.timeIntervalSince(lastStatsAt))
+                let measuredSpeed = Int64(Double(max(0, bytes - lastStatsBytes)) / elapsed)
+                lastStatsAt = now
+                lastStatsBytes = bytes
+                Task { @MainActor in
+                    guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                    self.jobs[i].stage = "Receiving / muxing stream"
+                    self.jobs[i].downloadedBytes = bytes
+                    self.jobs[i].speedBytesPerSecond = measuredSpeed > 0 ? measuredSpeed : Int64(max(0, speed) * 0)
+                    self.jobs[i].progress = 0
+                    self.persistQueue()
+                }
+            }
             if modeFor(jobID) == "audio" {
-                try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt)
+                try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt, progress: stats)
             } else {
-                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL)
+                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL, progress: stats)
             }
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
             let item = TrapTubeDownloadedMedia(id: UUID().uuidString, title: media.title, fileName: outputName,
