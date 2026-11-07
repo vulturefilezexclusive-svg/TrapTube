@@ -57,7 +57,7 @@ jobs:
           import sys
           path = Path(sys.argv[1])
           source = path.read_text()
-          source = source.replace('title: "YouTube"', 'title: "Videos"')
+          source = source.replace('title: "YouTube"', 'title: "TrapTube"')
           path.write_text(source)
           PY
 
