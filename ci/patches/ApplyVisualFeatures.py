@@ -231,12 +231,15 @@ private struct AudioReactiveVisualizer: View {
 '''
 p.write_text(s)
 
-# Make the actual YouTube Home page the app's primary Home tab.
-# Keep the local audio collection available from the former TrapTube tab.
+# Keep tab destinations deterministic on every build, even when the splash
+# and visual treatments were already applied by an earlier build.
 root_view = find("RootView.swift")
 root_source = root_view.read_text()
-root_source = root_source.replace("case .home: HomeView()", "case .home: YouTubeView()", 1)
-# Keep the existing YouTube tab and all other tab destinations unchanged.
+import re
+root_source, home_count = re.subn(r"case \.home:\s*(?:HomeView|YouTubeView)\(\)", "case .home: HomeView()", root_source, count=1)
+root_source, discovery_count = re.subn(r"case \.youtube:\s*(?:HomeView|YouTubeView)\(\)", "case .youtube: YouTubeView()", root_source, count=1)
+if home_count != 1 or discovery_count != 1:
+    raise SystemExit("Could not enforce Home and TrapTube tab destinations")
 root_view.write_text(root_source)
 
 print("Applied splash, glass surfaces, and audio-reactive visualizer patches.")
