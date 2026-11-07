@@ -165,17 +165,26 @@ struct TrapTubeStreamResolver {
         var request = URLRequest(url: source)
         request.httpMethod = "GET"; request.timeoutInterval = 25
         providerHeaders.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-        if !isHLS && !isDASH && mime.contains("text/html") {
+        if !isHLS && !isDASH {
+            // Some providers reject HEAD; inspect a bounded initial response instead.
             request.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
-        } else if !isHLS && !isDASH {
-            throw TrapTubeResolverError.unsupportedSite
         }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
         if isHLS { return try await parseHLS(data: data, source: source, title: title, headers: providerHeaders) }
         if isDASH { return try parseDASH(data: data, source: source, title: title, headers: providerHeaders) }
-        if let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
+        let responseMime = ((response as? HTTPURLResponse)?.mimeType ?? mime).lowercased()
+        if responseMime.hasPrefix("video/") || responseMime.hasPrefix("audio/") {
+            let kind: TrapTubeAssetKind = responseMime.hasPrefix("audio/") ? .audio : .muxed
+            let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: responseMime, height: nil, bitrate: nil,
+                label: "Original media", isManifest: false, headers: providerHeaders)
+            return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
+                audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
+                supportsSeparateAudioVideo: false)
+        }
+        if responseMime.contains("text/html") || responseMime.isEmpty,
+           let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
             return try await resolve(candidate, title: title)
         }
         throw TrapTubeResolverError.unsupportedSite
