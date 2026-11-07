@@ -920,6 +920,26 @@ enum TrapTubeFFmpegProcessor {
     }
 }
 
+private final class TrapTubeAggregateProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completedBytes: Int64 = 0
+    private var completedTotal: Int64 = 0
+    private var currentTotal: Int64 = 0
+
+    func report(bytes: Int64, total: Int64, speed: Int64) -> (Int64, Int64, Int64) {
+        lock.lock(); defer { lock.unlock() }
+        currentTotal = max(currentTotal, total)
+        return (completedBytes + bytes, completedTotal + max(currentTotal, total), speed)
+    }
+
+    func finishAsset(actualBytes: Int64) {
+        lock.lock(); defer { lock.unlock() }
+        completedBytes += actualBytes
+        completedTotal += max(currentTotal, actualBytes)
+        currentTotal = 0
+    }
+}
+
 @MainActor
 final class TrapTubeDownloadManager: ObservableObject {
     static let shared = TrapTubeDownloadManager()
@@ -982,114 +1002,129 @@ final class TrapTubeDownloadManager: ObservableObject {
         }
     }
 
+    private func updateJob(_ id: String, _ update: (inout TrapTubeDownloadTask) -> Void) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+        update(&jobs[index])
+        persistQueue()
+    }
+
     private func run(jobID: String, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
                      audio: TrapTubeFlatAsset?, format: String) async {
         defer { workers[jobID] = nil }
-        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        jobs[index].status = "running"; jobs[index].stage = "Downloading streams"; persistQueue()
+        guard jobs.contains(where: { $0.id == jobID }) else { return }
+        updateJob(jobID) { $0.status = "running"; $0.stage = "Downloading streams" }
         do {
             let dir = TrapTubeDownloadPaths.downloadsDirectory
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             var inputURLs: [URL] = []
-            var completedTransferBytes: Int64 = 0
-            var expectedTransferBytes: Int64 = 0
+            let aggregate = TrapTubeAggregateProgress()
             let assets = [video, audio].compactMap { $0 }
+
             for (assetIndex, asset) in assets.enumerated() {
-                let ext = asset.isManifest ? (asset.mimeType.contains("mpegurl") ? "m3u8" : "mpd") : (asset.url.pathExtension.isEmpty ? "media" : asset.url.pathExtension)
-                if !asset.segmentURLs.isEmpty {
-                    jobs[index].partialFileName = "\(jobID)-\(assetIndex)-segments"; jobs[index].resumeOffset = 0; persistQueue()
-                    let segmented = try await TrapTubeFlatTransfer.downloadSegmented(asset, jobID: jobID, assetIndex: assetIndex, directory: dir) { [weak self] bytes, total, speed in
-                        Task { @MainActor in
-                            guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-                            self.jobs[i].stage = "Downloading DASH segments"
-                            self.jobs[i].downloadedBytes = bytes
-                            self.jobs[i].totalBytes = total
-                            self.jobs[i].speedBytesPerSecond = speed
-                            self.jobs[i].progress = total > 0 ? min(0.98, Double(bytes) / Double(total)) : 0
-                            self.persistQueue()
-                        }
-                    }
-                    inputURLs.append(segmented)
-                    continue
-                }
+                try Task.checkCancellation()
+                let ext = asset.isManifest
+                    ? (asset.mimeType.contains("mpegurl") ? "m3u8" : "mpd")
+                    : (asset.url.pathExtension.isEmpty ? "media" : asset.url.pathExtension)
                 let partialName = "\(jobID)-\(assetIndex).partial.\(ext)"
                 let partialURL = dir.appendingPathComponent(partialName)
                 let offset = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? NSNumber)?.int64Value ?? 0
-                jobs[index].partialFileName = partialName; jobs[index].resumeOffset = offset; persistQueue()
+
                 if asset.isManifest && asset.segmentURLs.isEmpty {
-                    // FFmpeg reads exposed HLS/DASH manifests directly when the provider
-                    // does not give us an explicit finite segment list.
+                    updateJob(jobID) { $0.partialFileName = partialName; $0.resumeOffset = 0; $0.stage = "Preparing manifest input" }
                     inputURLs.append(asset.url)
                     continue
                 }
+
+                updateJob(jobID) {
+                    $0.partialFileName = asset.segmentURLs.isEmpty ? partialName : "\(jobID)-\(assetIndex)-segments"
+                    $0.resumeOffset = offset
+                    $0.stage = asset.segmentURLs.isEmpty ? "Downloading media stream" : "Downloading DASH segments"
+                }
+
                 let progressHandler: (Int64, Int64, Int64) -> Void = { [weak self] bytes, total, speed in
+                    let snapshot = aggregate.report(bytes: bytes, total: total, speed: speed)
                     Task { @MainActor in
-                        guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-                        self.jobs[i].downloadedBytes = completedTransferBytes + bytes
-                        self.jobs[i].totalBytes = expectedTransferBytes + total
-                        self.jobs[i].speedBytesPerSecond = speed
-                        let aggregateTotal = expectedTransferBytes + total
-                        self.jobs[i].progress = aggregateTotal > 0 ? min(0.98, Double(completedTransferBytes + bytes) / Double(aggregateTotal)) : 0
-                        self.persistQueue()
+                        guard let self else { return }
+                        self.updateJob(jobID) {
+                            $0.downloadedBytes = snapshot.0
+                            $0.totalBytes = snapshot.1
+                            $0.speedBytesPerSecond = snapshot.2
+                            $0.progress = snapshot.1 > 0 ? min(0.98, Double(snapshot.0) / Double(snapshot.1)) : 0
+                        }
                     }
                 }
+
                 let downloaded: URL
                 if !asset.segmentURLs.isEmpty {
                     downloaded = try await TrapTubeFlatTransfer.downloadSegmented(asset, jobID: jobID,
                         assetIndex: assetIndex, directory: dir, progress: progressHandler)
                 } else {
-                    downloaded = try await TrapTubeFlatTransfer.download(asset, to: partialURL, startingAt: offset,
-                        progress: progressHandler)
+                    downloaded = try await TrapTubeFlatTransfer.download(asset, to: partialURL,
+                        startingAt: offset, progress: progressHandler)
                 }
                 inputURLs.append(downloaded)
                 let actualSize = (try? FileManager.default.attributesOfItem(atPath: downloaded.path)[.size] as? NSNumber)?.int64Value ?? 0
-                completedTransferBytes += actualSize
-                expectedTransferBytes = max(expectedTransferBytes, jobs[index].totalBytes)
+                aggregate.finishAsset(actualBytes: actualSize)
             }
+
             guard let first = inputURLs.first else { throw TrapTubeResolverError.noStreams }
-            let outputExt = format == "m4a" || modeFor(jobID) == "audio" ? (format == "wav" ? "wav" : "m4a") : "mp4"
+            let isAudioOnly = modeFor(jobID) == "audio"
+            let outputExt = isAudioOnly ? (format == "wav" ? "wav" : "m4a") : "mp4"
             let outputName = "\(jobID).\(outputExt)"
             let outputURL = dir.appendingPathComponent(outputName)
-            jobs[index].stage = "Muxing / finalizing"; persistQueue()
+            updateJob(jobID) { $0.stage = "Muxing / finalizing"; $0.speedBytesPerSecond = 0 }
+
             let rateMeter = TrapTubeTransferRateMeter()
             let stats: (Int64, Double) -> Void = { [weak self] bytes, _ in
                 let measuredSpeed = rateMeter.update(bytes)
                 Task { @MainActor in
-                    guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-                    self.jobs[i].stage = "Processing stream"
-                    self.jobs[i].downloadedBytes = bytes
-                    self.jobs[i].speedBytesPerSecond = measuredSpeed
-                    self.jobs[i].progress = 0
-                    self.persistQueue()
+                    guard let self else { return }
+                    self.updateJob(jobID) {
+                        $0.stage = "Processing stream"
+                        $0.downloadedBytes = bytes
+                        $0.speedBytesPerSecond = measuredSpeed
+                    }
                 }
             }
-            if modeFor(jobID) == "audio" {
+
+            if isAudioOnly {
+                let audioAsset = audio ?? video
                 try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt,
-                    streamIndex: (audio?.segmentURLs.isEmpty == false || video?.segmentURLs.isEmpty == false) ? nil : (audio?.streamIndex ?? video?.streamIndex),
-                    headers: audio?.headers ?? video?.headers ?? [:], progress: stats)
+                    streamIndex: audioAsset?.isManifest == true || audioAsset?.segmentURLs.isEmpty == false ? nil : audioAsset?.streamIndex,
+                    headers: audioAsset?.headers ?? [:], progress: stats)
             } else {
-                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL,
-                    videoStreamIndex: video?.isManifest == true || video?.segmentURLs.isEmpty == false ? nil : video?.streamIndex,
-                    audioStreamIndex: audio?.isManifest == true || audio?.segmentURLs.isEmpty == false ? nil : audio?.streamIndex,
-                    videoHeaders: video?.headers ?? [:], audioHeaders: audio?.headers ?? [:], progress: stats)
+                let videoAsset = video
+                let audioAsset = audio
+                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil,
+                    output: outputURL,
+                    videoStreamIndex: videoAsset?.isManifest == true || videoAsset?.segmentURLs.isEmpty == false ? nil : videoAsset?.streamIndex,
+                    audioStreamIndex: audioAsset?.isManifest == true || audioAsset?.segmentURLs.isEmpty == false ? nil : audioAsset?.streamIndex,
+                    videoHeaders: videoAsset?.headers ?? [:], audioHeaders: audioAsset?.headers ?? [:], progress: stats)
             }
+
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
             let item = TrapTubeDownloadedMedia(id: UUID().uuidString, title: media.title, fileName: outputName,
                 mode: modeFor(jobID), sizeBytes: size, createdAt: Date())
-            completed.insert(item, at: 0); persistCompleted()
-            jobs[index].status = "saved"; jobs[index].stage = "Saved to device"; jobs[index].progress = 1
-            jobs[index].outputFileName = outputName; jobs[index].speedBytesPerSecond = 0
-            persistQueue()
+            completed.insert(item, at: 0)
+            persistCompleted()
+            updateJob(jobID) {
+                $0.status = "saved"
+                $0.stage = "Saved to device"
+                $0.progress = 1
+                $0.outputFileName = outputName
+                $0.speedBytesPerSecond = 0
+            }
         } catch is CancellationError {
-            if let i = jobs.firstIndex(where: { $0.id == jobID }) { jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"; persistQueue() }
+            updateJob(jobID) { $0.status = "paused"; $0.stage = "Paused · can resume" }
         } catch {
-            if let i = jobs.firstIndex(where: { $0.id == jobID }) {
+            updateJob(jobID) {
                 if Task.isCancelled {
-                    jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"
+                    $0.status = "paused"
+                    $0.stage = "Paused · resume available"
                 } else {
-                    jobs[i].status = "failed"; jobs[i].error = error.localizedDescription
+                    $0.status = "failed"
+                    $0.error = error.localizedDescription
                 }
-                persistQueue()
             }
         }
     }
