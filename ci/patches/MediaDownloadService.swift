@@ -1249,7 +1249,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                     ?? media.audioAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                     ?? media.muxedAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 let video = job.mode == "audio" ? nil : selectedVideo
-                let audio = job.mode == "audio" ? selectedAudio : selectedAudio
+                let audio = selectedAudio
                 start(jobID: id, media: media, video: video, audio: audio, format: job.mode == "audio" ? "m4a" : "mp4")
             } catch { lastError = error.localizedDescription }
         }
