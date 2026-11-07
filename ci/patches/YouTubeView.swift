@@ -7,16 +7,16 @@ import SafariServices
 struct YouTubeView: View {
     @State private var didLaunchYouTube = false
     @State private var showYouTube = false
+    @AppStorage("discovery.sourceURL") private var discoverySourceURL = ""
 
-    private let homeURL = URL(string: "https://www.youtube.com/")!
-
+    private var homeURL: URL {\n        let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)\n        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else {\n            return URL(string: "https://www.youtube.com/")!\n        }\n        return url\n    }\n
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 14) {
                 ProgressView().tint(.white)
-                Text("Opening YouTube Home").font(.headline).foregroundStyle(.white)
-                Text("Your personalized YouTube feed and account sign-in are provided by YouTube.")
+                Text("Opening Streaming Home").font(.headline).foregroundStyle(.white)
+                Text("Your selected streaming website opens here. Set its address in Settings → Video discovery.")
                     .font(.caption).foregroundStyle(.white.opacity(0.65))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 28)
