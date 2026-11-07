@@ -722,19 +722,20 @@ private struct TrapTubeDownloadsSheet: View {
                             Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
                                 Text("Best available").tag("best")
                                 if mode == "video" {
-                                    Text("Best available").tag("best")
                                     ForEach(manager.availableVideoHeights, id: \.self) { height in
                                         Text("\(height)p").tag("\(height)p")
                                     }
                                 } else {
-                                    Text("Best available source").tag("best")
+                                    ForEach(manager.availableAudioBitrates, id: \.self) { bitrate in
+                                        Text("\(max(1, bitrate / 1000)) kbps").tag("\(bitrate)bps")
+                                    }
                                 }
                             }
                             .pickerStyle(.menu)
                             .tint(Color(hex: "F04452"))
 
                             if mode == "audio" {
-                                Text("The highest compatible source audio stream is selected automatically.")
+                                Text(quality == "best" ? "The highest exposed audio rendition is selected automatically." : "TrapTube will select the closest exposed audio rendition at or below this bitrate.")
                                     .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                             }
                         }
@@ -762,7 +763,8 @@ private struct TrapTubeDownloadsSheet: View {
                                     mode: mode,
                                     quality: quality,
                                     format: format,
-                                    bitrate: nil,
+                                    bitrate: mode == "audio" && quality != "best"
+                                        ? Int(quality.replacingOccurrences(of: "bps", with: "")) : nil,
                                     height: mode == "video" && quality != "best"
                                         ? Int(quality.replacingOccurrences(of: "p", with: "")) : nil
                                 )
