@@ -111,7 +111,9 @@ jobs:
         run: |
           set -euo pipefail
           gem install xcodeproj --no-document
-          ruby ci/patches/AddFFmpegKitPackage.rb work/TrapTube/TrapTube.xcodeproj
+          GOOGLE_AUTH_SOURCE="$(find work/TrapTube -type f -name GoogleYouTubeAuth.swift -print -quit)"
+          test -n "$GOOGLE_AUTH_SOURCE"
+          ruby ci/patches/AddFFmpegKitPackage.rb work/TrapTube/TrapTube.xcodeproj "$GOOGLE_AUTH_SOURCE"
           xcodebuild -resolvePackageDependencies -project work/TrapTube/TrapTube.xcodeproj -scheme TrapTube
 
       - name: Download and validate licensed HTDemucs model package
