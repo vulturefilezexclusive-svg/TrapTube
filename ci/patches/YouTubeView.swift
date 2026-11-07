@@ -566,6 +566,8 @@ private struct TrapTubePlayerMenu: View {
     let title: String
     let onPlayback: () -> Void
     @State private var showDownloadInfo = false
+    @State private var showMenuInfo = false
+    @State private var menuInfoText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -587,9 +589,9 @@ private struct TrapTubePlayerMenu: View {
                 VStack(spacing: 0) {
                     menuRow("Downloads", icon: "arrow.down.to.line") { showDownloadInfo = true }
                     menuRow("Playback tools", icon: "play.circle", action: onPlayback)
-                    menuRow("Library", icon: "rectangle.stack") { }
-                    menuRow("Transcript", icon: "captions.bubble") { }
-                    menuRow("Information", icon: "info.circle") { }
+                    menuRow("Library", icon: "rectangle.stack") { menuInfoText = "Your imported tracks and playlists are available in the Library tab."; showMenuInfo = true }
+                    menuRow("Transcript", icon: "captions.bubble") { menuInfoText = "A transcript appears only when the connected provider supplies caption or transcript data."; showMenuInfo = true }
+                    menuRow("Information", icon: "info.circle") { menuInfoText = "Playback and stream quality are provided by your connected TypeType service."; showMenuInfo = true }
                 }.padding(.horizontal, 20)
             }
             Button("Cancel") { dismiss() }.font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
@@ -599,6 +601,11 @@ private struct TrapTubePlayerMenu: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("The connected streaming player does not expose an authorized media download endpoint. You can import audio and video files you own or are licensed to use into your TrapTube library.")
+        }
+        .alert("TrapTube", isPresented: $showMenuInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(menuInfoText)
         }
     }
 
