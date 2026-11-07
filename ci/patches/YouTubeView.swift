@@ -103,6 +103,7 @@ private struct TypeTypeWatchSheet: View {
     @State private var eqError: String?
     @State private var videoQualities: [TypeTypePlayerOption] = []
     @State private var audioTracks: [TypeTypePlayerOption] = []
+    @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
     @State private var showEQ = false
     @State private var showTrapTubeMenu = false
     @State private var controlsVisible = true
@@ -255,6 +256,7 @@ private struct TypeTypeWatchSheet: View {
         .onChange(of: audio.eqGains) { _, _ in applyEQ() }
         .onChange(of: audio.bassBoost) { _, _ in applyEQ() }
         .onChange(of: audio.masterGain) { _, _ in applyEQ() }
+        .onChange(of: preferredVideoQuality) { _, _ in applyPreferredVideoQuality() }
     }
 
     private func receive(_ body: [String: Any]) {
@@ -266,7 +268,9 @@ private struct TypeTypeWatchSheet: View {
         case "eqStatus":
             eqReady = body["ready"] as? Bool ?? false
             eqError = body["error"] as? String
-        case "videoQualities": videoQualities = options(body["items"])
+        case "videoQualities":
+            videoQualities = options(body["items"])
+            applyPreferredVideoQuality()
         case "audioTracks": audioTracks = options(body["items"])
         case "playerError": eqError = body["message"] as? String
         default: break
@@ -297,6 +301,17 @@ private struct TypeTypeWatchSheet: View {
         webView?.evaluateJavaScript("window.__traptubeSetEQ && window.__traptubeSetEQ(\(json));")
     }
 
+    private func applyPreferredVideoQuality() {
+        guard preferredVideoQuality != "auto", let preferredHeight = Int(preferredVideoQuality), !videoQualities.isEmpty else { return }
+        let candidates = videoQualities.compactMap { option -> (TypeTypePlayerOption, Int)? in
+            guard let range = option.label.range(of: #"(?:^|\D)(\d{3,4})\s*p?"#, options: .regularExpression) else { return nil }
+            let height = Int(option.label[range].filter { $0.isNumber }) ?? 0
+            return height > 0 ? (option, height) : nil
+        }
+        guard let chosen = candidates.filter({ $0.1 <= preferredHeight }).max(by: { $0.1 < $1.1 })?.0 else { return }
+        guard !chosen.selected else { return }
+        select(kind: "video", label: chosen.label)
+    }
     private func timeText(_ value: Double) -> String {
         let seconds = value.isFinite ? max(0, Int(value)) : 0
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
