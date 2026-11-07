@@ -181,12 +181,17 @@ private enum HTDemucsRuntime {
     static func validateDSPRoundTrip() throws {
         let signal = (0..<segmentLength).map { i -> Float in
             let t = Double(i) / sampleRate
-            return Float(0.4 * sin(2 * Double.pi * 55 * t) + 0.3 * sin(2 * Double.pi * 1_234.5 * t) + 0.2 * sin(2 * Double.pi * 9_876 * t))
+            return Float(0.05 + sin(2 * Double.pi * 440 * t) + 0.5 * sin(2 * Double.pi * 1_000 * t))
         }
         let spec = try spectrogram(signal)
         let restored = try inverseSpectrogram(real: spec.real[...], imaginary: spec.imaginary[...])
-        let worst = (8_192..<(segmentLength - 8_192)).reduce(Float.zero) { max($0, abs(restored[$1] - signal[$1])) }
-        guard worst < 1e-4 else { throw DemucsError.processing("HTDemucs STFT/iSTFT self-check failed (max error \(worst)); no stems were written.") }
+        var worst: Float = 0
+        for index in 4_096..<(segmentLength - 4_096) {
+            worst = max(worst, abs(restored[index] - signal[index]))
+        }
+        guard worst < 1e-4 else {
+            throw DemucsError.processing("HTDemucs PyTorch-parity STFT/iSTFT self-check failed (max error \(worst)); no stems were written.")
+        }
     }
 
     static func makeFloat16Array(shape: [Int], values: [Float]) throws -> MLMultiArray {
@@ -222,7 +227,8 @@ private enum HTDemucsRuntime {
     }
 
     static func predict(left: [Float], right: [Float], model: MLModel) throws -> [[[Float]]] {
-        let leftSpec = try spectrogram(left), rightSpec = try spectrogram(right)
+        let leftSpec = try spectrogram(left)
+        let rightSpec = try spectrogram(right)
         let spectral = leftSpec.real + leftSpec.imaginary + rightSpec.real + rightSpec.imaginary
         let wave = try makeFloat16Array(shape: [1, 2, segmentLength], values: left + right)
         let spec = try makeFloat16Array(shape: [1, 4, bins, frames], values: spectral)
@@ -236,18 +242,37 @@ private enum HTDemucsRuntime {
             throw DemucsError.invalidModel("Expected time_output and freq_output; got \(prediction.featureNames.sorted()).")
         }
         let time = try readFloat16(timeArray, shape: [1, 8, segmentLength], name: "time_output")
-        let freq = try readFloat16(freqArray, shape: [1, 16, bins, frames], name: "freq_output")
+        let masks = try readFloat16(freqArray, shape: [1, 16, bins, frames], name: "freq_output")
         let plane = bins * frames
+        let mixtureReal = [leftSpec.real, rightSpec.real]
+        let mixtureImaginary = [leftSpec.imaginary, rightSpec.imaginary]
         var stems = Array(repeating: Array(repeating: [Float](repeating: 0, count: segmentLength), count: 2), count: 4)
-        for source in 0..<4 { for channel in 0..<2 {
-            let base = (source * 4 + channel * 2) * plane
-            let spectralWave = try inverseSpectrogram(real: freq[base..<(base + plane)], imaginary: freq[(base + plane)..<(base + 2 * plane)])
-            let timeBase = (source * 2 + channel) * segmentLength
-            for i in 0..<segmentLength { stems[source][channel][i] = spectralWave[i] + time[timeBase + i] }
-            guard stems[source][channel].allSatisfy(\.isFinite) else {
-                throw DemucsError.processing("HTDemucs frequency/time reconstruction produced invalid samples for source \(source), channel \(channel). No WAV files were written.")
+
+        // Demucs' CAC head predicts complex masks, not finished spectrograms.
+        // Apply each complex mask to the matching mixture channel before iSTFT.
+        for source in 0..<4 {
+            for channel in 0..<2 {
+                let maskBase = (source * 4 + channel * 2) * plane
+                var maskedReal = [Float](repeating: 0, count: plane)
+                var maskedImaginary = [Float](repeating: 0, count: plane)
+                for index in 0..<plane {
+                    let maskReal = masks[maskBase + index]
+                    let maskImag = masks[maskBase + plane + index]
+                    let mixReal = mixtureReal[channel][index]
+                    let mixImag = mixtureImaginary[channel][index]
+                    maskedReal[index] = maskReal * mixReal - maskImag * mixImag
+                    maskedImaginary[index] = maskReal * mixImag + maskImag * mixReal
+                }
+                let spectralWave = try inverseSpectrogram(real: maskedReal[...], imaginary: maskedImaginary[...])
+                let timeBase = (source * 2 + channel) * segmentLength
+                for index in 0..<segmentLength {
+                    stems[source][channel][index] = spectralWave[index] + time[timeBase + index]
+                }
+                guard stems[source][channel].allSatisfy(\.isFinite) else {
+                    throw DemucsError.processing("HTDemucs complex-mask reconstruction produced invalid samples for source \(source), channel \(channel). No WAV files were written.")
+                }
             }
-        } }
+        }
         return stems
     }
 
