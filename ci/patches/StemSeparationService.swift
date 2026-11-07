@@ -4,7 +4,7 @@ import Accelerate
 import CoreML
 import Combine
 
-enum Stem: String, CaseIterable, Identifiable {
+enum Stem: String, CaseIterable, Identifiable, Sendable {
     case drums = "Drums", bass = "Bass", other = "Other", vocals = "Vocals"
     var id: String { rawValue }
     var icon: String {
@@ -279,25 +279,35 @@ final class StemSeparationService: ObservableObject {
         let destination = LibraryStore.appDirectory.appendingPathComponent("Stems", isDirectory: true)
             .appendingPathComponent(track.id.uuidString, isDirectory: true)
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let service = self
+        Task.detached(priority: .userInitiated) {
             do {
                 let result = try Self.run(source: source, destination: destination) { value, message in
-                    Task { @MainActor [weak self] in self?.progress = value; self?.statusMessage = message }
+                    Task { @MainActor in service.updateProgress(value, message: message) }
                 }
-                await MainActor.run {
-                    self?.outputs = result
-                    self?.progress = 1
-                    self?.statusMessage = "Separation complete"
-                    self?.isProcessing = false
-                }
+                await service.finish(result: result)
             } catch {
-                await MainActor.run {
-                    self?.errorMessage = error.localizedDescription
-                    self?.statusMessage = "Separation failed"
-                    self?.isProcessing = false
-                }
+                await service.finish(error: error.localizedDescription)
             }
         }
+    }
+
+    private func updateProgress(_ value: Double, message: String) {
+        progress = value
+        statusMessage = message
+    }
+
+    private func finish(result: [Stem: URL]) {
+        outputs = result
+        progress = 1
+        statusMessage = "Separation complete"
+        isProcessing = false
+    }
+
+    private func finish(error: String) {
+        errorMessage = error
+        statusMessage = "Separation failed"
+        isProcessing = false
     }
 
     nonisolated private static func run(source: URL, destination: URL, progress: @escaping (Double, String) -> Void) throws -> [Stem: URL] {
