@@ -859,6 +859,9 @@ enum TrapTubeFlatTransfer {
         }
         let finalBytes = effectiveOffset + received
         if total > 0 && finalBytes < total {
+            if http.statusCode == 200 && offset > 0 {
+                throw TrapTubeResolverError.unsupportedManifest("This server ignored the resume range and returned an incomplete response. The partial file was kept, but this source does not currently support byte-range resume.")
+            }
             guard rangeAttempt < 16 else {
                 throw TrapTubeResolverError.unsupportedManifest("The server repeatedly returned incomplete byte ranges. The partial file was kept; resume the task to continue.")
             }
