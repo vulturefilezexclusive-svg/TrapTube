@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage("settings.reduceMotion") private var reduceMotion = false
     @AppStorage("settings.shareDiagnostics") private var shareDiagnostics = false
     @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
+    @AppStorage("discovery.sourceURL") private var discoverySourceURL = ""
 
     private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
 
@@ -50,31 +51,28 @@ struct SettingsView: View {
                 }
 
                 settingsCard(title: "Video discovery", icon: "play.rectangle.fill") {
-                    HStack(spacing: 10) {
-                        Image(systemName: "server.rack").foregroundStyle(theme.accent)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("watch.typetype.video").font(.subheadline.bold()).foregroundStyle(.white)
-                            Text("Native feed and search use the TypeType server.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    Text("Choose the website TrapTube opens for its home streaming view. Leave this field empty to use the default home page.")
+                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    HStack(spacing: 9) {
+                        Image(systemName: "globe").foregroundStyle(theme.accent)
+                        TextField("", text: $discoverySourceURL, prompt: Text("https://example.com").foregroundColor(Color(hex: "777277")))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .textContentType(.URL)
+                            .foregroundStyle(.white)
+                            .tint(theme.accent)
+                            .accessibilityLabel("Streaming website address")
+                        if !discoverySourceURL.isEmpty {
+                            Button { discoverySourceURL = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(Color(hex: "A6A4A6"))
+                            }.accessibilityLabel("Clear streaming website address")
                         }
                     }
-                    Button {
-                        checkingConnection = true; connectionStatus = nil
-                        Task {
-                            defer { checkingConnection = false }
-                            do { connectionStatus = try await TypeTypeService().checkHealth() }
-                            catch { connectionStatus = error.localizedDescription }
-                        }
-                    } label: {
-                        Label(checkingConnection ? "Checking…" : "Check TypeType connection", systemImage: "network")
-                            .font(.subheadline.bold()).foregroundStyle(.white)
-                            .frame(maxWidth: .infinity).padding(.vertical, 12)
-                            .background(theme.accent, in: Capsule())
-                    }
-                    .disabled(checkingConnection)
-                    if let connectionStatus {
-                        Text(connectionStatus).font(.caption).foregroundStyle(connectionStatus.hasPrefix("Connected") ? Color.green : Color(hex: "FF7A84"))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    .padding(13)
+                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                    Text("Enter a website URL. TrapTube will open that site in the home streaming view; playback and downloads depend on what the site makes available.")
+                        .font(.caption2).foregroundStyle(Color(hex: "858185"))
                 }
 
                 settingsCard(title: "Streaming quality", icon: "slider.horizontal.3") {
@@ -153,7 +151,7 @@ struct SettingsView: View {
                     infoRow("Stem separation", value: stemService.availability.title)
                 }
 
-                Text("TrapTube · Local music stays on this device. Remote video discovery and playback are provided by TypeType.")
+                Text("TrapTube · Local music stays on this device. Streaming content is loaded from your selected website.")
                     .font(.caption).foregroundStyle(Color(hex: "858185")).multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity).padding(.vertical, 6)
             }
