@@ -246,22 +246,14 @@ struct TrapTubeStreamResolver {
         guard let scheme = source.scheme?.lowercased(), ["http", "https"].contains(scheme), source.host != nil else {
             throw TrapTubeResolverError.unsupportedSite
         }
-        var request = URLRequest(url: source)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 25
-        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else {
-            throw TrapTubeResolverError.badResponse
-        }
-        let mime = (http.mimeType ?? "").lowercased()
         let ext = source.pathExtension.lowercased()
-        if ext == "m3u8" || mime.contains("mpegurl") {
-            return try parseHLS(data: data, source: source, title: title)
-        }
-        if ext == "mpd" || mime.contains("dash+xml") {
-            return try parseDASH(data: data, source: source, title: title)
-        }
+        var head = URLRequest(url: source)
+        head.httpMethod = "HEAD"
+        head.timeoutInterval = 20
+        head.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        let headResponse = try? await URLSession.shared.data(for: head)
+        let http = headResponse?.1 as? HTTPURLResponse
+        let mime = (http?.mimeType ?? "").lowercased()
         if mime.hasPrefix("video/") || mime.hasPrefix("audio/") ||
             ["mp4","m4v","mov","webm","m4a","mp3","aac","wav","flac"].contains(ext) {
             let kind: TrapTubeAssetKind = mime.hasPrefix("audio/") || ["m4a","mp3","aac","wav","flac"].contains(ext) ? .audio : .muxed
@@ -272,7 +264,20 @@ struct TrapTubeStreamResolver {
                 videoAssets: [], audioAssets: kind == .audio ? [asset] : [],
                 muxedAssets: kind == .muxed ? [asset] : [], supportsSeparateAudioVideo: false)
         }
-        throw TrapTubeResolverError.unsupportedSite
+        guard ext == "m3u8" || ext == "mpd" || mime.contains("mpegurl") || mime.contains("dash+xml") else {
+            throw TrapTubeResolverError.unsupportedSite
+        }
+        var request = URLRequest(url: source)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 25
+        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let manifestResponse = response as? HTTPURLResponse,
+              (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
+        if ext == "m3u8" || mime.contains("mpegurl") {
+            return try parseHLS(data: data, source: source, title: title)
+        }
+        return try parseDASH(data: data, source: source, title: title)
     }
 
     private func parseHLS(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
@@ -354,8 +359,8 @@ struct TrapTubeStreamResolver {
 
     private func parseAttributes(_ value: String) -> [String: String] {
         var result: [String: String] = [:]
-        let pattern = #"([A-Z0-9-]+)=("[^"]*"|[^,]*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
+        let pattern = #"([A-Za-z0-9-]+)=("[^"]*"|[^,]*)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return result }
         let ns = value as NSString
         for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)) where match.numberOfRanges > 2 {
             let key = ns.substring(with: match.range(at: 1))
