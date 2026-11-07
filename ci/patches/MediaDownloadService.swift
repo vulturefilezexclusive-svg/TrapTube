@@ -586,7 +586,7 @@ struct TrapTubeStreamResolver {
     private func xmlUnescape(_ value: String) -> String {
         value.replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
-            .replacingOccurrences(of: "&quot;", with: "\\"")
+            .replacingOccurrences(of: "&quot;", with: "\"")
             .replacingOccurrences(of: "&apos;", with: "'")
             .replacingOccurrences(of: "&amp;", with: "&")
     }
