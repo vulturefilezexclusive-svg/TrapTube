@@ -123,6 +123,13 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
+      - name: Download and smoke-test HTDemucs FT on Metal
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift run --package-path ci/demucs-smoke
+
+
   build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_candidate
     runs-on: xcode-27
@@ -253,6 +260,12 @@ jobs:
           test -n "$GOOGLE_AUTH_SOURCE"
           ruby ci/patches/AddFFmpegKitPackage.rb work/TrapTube/TrapTube.xcodeproj "$GOOGLE_AUTH_SOURCE"
           xcodebuild -resolvePackageDependencies -project work/TrapTube/TrapTube.xcodeproj -scheme TrapTube
+
+      - name: Download and smoke-test HTDemucs FT on Metal
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift run --package-path ci/demucs-smoke
 
       - name: Build and package unsigned IPA
         shell: bash
