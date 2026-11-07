@@ -200,6 +200,7 @@ struct TypeTypeDownloadOptions: Encodable {
     var quality: String?
     var format: String?
     var bitrate: Int?
+    var height: Int?
     var allowQualityFallback: Bool = true
     var sponsorBlock: Bool = false
     var sponsorBlockCategories: [String]? = nil
@@ -345,6 +346,7 @@ final class TrapTubeDownloadManager: ObservableObject {
         quality: String,
         format: String,
         bitrate: Int?,
+        height: Int?,
         sponsorBlock: Bool,
         subtitles: Bool
     ) async {
@@ -355,6 +357,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 quality: quality,
                 format: format,
                 bitrate: bitrate,
+                height: height,
                 allowQualityFallback: true,
                 sponsorBlock: sponsorBlock,
                 sponsorBlockCategories: sponsorBlock
@@ -445,11 +448,17 @@ final class TrapTubeDownloadManager: ObservableObject {
             throw TrapTubeFFmpegError.missingOutput
         }
 
+        let outputMode: String
+        switch operation {
+        case .remuxMP4: outputMode = "video"
+        case .convertM4A, .convertWAV: outputMode = "audio"
+        case .extractThumbnail: outputMode = "thumbnail"
+        }
         let processed = TrapTubeDownloadedMedia(
             id: UUID().uuidString,
             title: "\(item.title) · \(operation.title)",
             fileName: outputName,
-            mode: operation.rawValue,
+            mode: outputMode,
             sizeBytes: size,
             createdAt: Date()
         )
