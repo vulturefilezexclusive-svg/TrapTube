@@ -1367,7 +1367,9 @@ final class TrapTubeDownloadManager: ObservableObject {
            let match = candidates.first(where: { $0.mimeType == mime && $0.bitrate == job.selectedAudioBitrate }) { return match }
         if let url = job.selectedAudioURL,
            let match = candidates.first(where: { $0.url == url && $0.streamIndex == job.selectedAudioStreamIndex }) { return match }
-        guard job.mode == "audio" else { return nil }
+        guard job.mode == "audio" || job.selectedAudioURL != nil || job.selectedAudioRepresentationID != nil else {
+            return nil
+        }
         return candidates.max { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }
     }
 
