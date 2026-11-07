@@ -2,6 +2,12 @@ name: Build TrapTube unsigned IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      build_candidate:
+        description: "Build an unsigned IPA after model validation is complete"
+        required: true
+        type: boolean
+        default: false
   push:
     branches: [main, master, feature/native-player-demucs-eq]
     paths:
@@ -13,11 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: traptube-ipa-${{ github.ref }}-${{ github.sha }}
+  group: traptube-ipa-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_candidate
     runs-on: macos-15
     timeout-minutes: 60
     steps:
