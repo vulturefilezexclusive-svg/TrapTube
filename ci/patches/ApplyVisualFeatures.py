@@ -231,4 +231,12 @@ private struct AudioReactiveVisualizer: View {
 '''
 p.write_text(s)
 
+# Make the actual YouTube Home page the app's primary Home tab.
+# Keep the local audio collection available from the former TrapTube tab.
+root_view = find("RootView.swift")
+root_source = root_view.read_text()
+root_source = root_source.replace("case .home: HomeView()", "case .home: YouTubeView()", 1)
+root_source = root_source.replace("case .youtube: YouTubeView()", "case .youtube: HomeView()", 1)
+root_view.write_text(root_source)
+
 print("Applied splash, glass surfaces, and audio-reactive visualizer patches.")
