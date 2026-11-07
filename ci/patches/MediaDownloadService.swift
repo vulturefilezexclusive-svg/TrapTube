@@ -84,6 +84,30 @@ enum TrapTubeResolverError: LocalizedError {
     }
 }
 
+enum TrapTubeWebCookieBridge {
+    @MainActor
+    static func cookieHeader(for url: URL) async -> String? {
+        let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
+        }
+        let host = url.host?.lowercased() ?? ""
+        let matching = cookies.filter { cookie in
+            let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            return host == domain || host.hasSuffix("." + domain)
+        }
+        guard !matching.isEmpty else { return nil }
+        return matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    static func headers(for url: URL, userAgent: String = "TrapTube/1.0",
+                        referer: URL? = nil) async -> [String: String] {
+        var headers = ["User-Agent": userAgent]
+        if let referer { headers["Referer"] = referer.absoluteString }
+        if let cookie = await cookieHeader(for: url) { headers["Cookie"] = cookie }
+        return headers
+    }
+}
+
 protocol TrapTubeStreamProviderAdapter {
     func canResolve(_ source: URL) -> Bool
     func resolve(_ source: URL, title: String) async throws -> TrapTubeResolvedMedia
@@ -101,9 +125,10 @@ struct TrapTubeStreamResolver {
             throw TrapTubeResolverError.unsupportedSite
         }
         let ext = source.pathExtension.lowercased()
+        let providerHeaders = await TrapTubeWebCookieBridge.headers(for: source)
         var head = URLRequest(url: source)
         head.httpMethod = "HEAD"; head.timeoutInterval = 20
-        head.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        providerHeaders.forEach { head.setValue($0.value, forHTTPHeaderField: $0.key) }
         let headResponse = try? await URLSession.shared.data(for: head)
         let http = headResponse?.1 as? HTTPURLResponse
         let mime = (http?.mimeType ?? "").lowercased()
@@ -111,7 +136,7 @@ struct TrapTubeStreamResolver {
             ["mp4","m4v","mov","webm","m4a","mp3","aac","wav","flac"].contains(ext) {
             let kind: TrapTubeAssetKind = mime.hasPrefix("audio/") || ["m4a","mp3","aac","wav","flac"].contains(ext) ? .audio : .muxed
             let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: mime, height: nil, bitrate: nil,
-                label: kind == .audio ? "Original audio" : "Original media", isManifest: false, headers: [:])
+                label: kind == .audio ? "Original audio" : "Original media", isManifest: false, headers: providerHeaders)
             return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
                 audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
                 supportsSeparateAudioVideo: false)
@@ -120,7 +145,7 @@ struct TrapTubeStreamResolver {
         let isDASH = ext == "mpd" || mime.contains("dash+xml")
         var request = URLRequest(url: source)
         request.httpMethod = "GET"; request.timeoutInterval = 25
-        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        providerHeaders.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         if !isHLS && !isDASH && mime.contains("text/html") {
             request.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
         } else if !isHLS && !isDASH {
@@ -129,8 +154,8 @@ struct TrapTubeStreamResolver {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
-        if isHLS { return try await parseHLS(data: data, source: source, title: title) }
-        if isDASH { return try parseDASH(data: data, source: source, title: title) }
+        if isHLS { return try await parseHLS(data: data, source: source, title: title, headers: providerHeaders) }
+        if isDASH { return try parseDASH(data: data, source: source, title: title, headers: providerHeaders) }
         if let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
             return try await resolve(candidate, title: title)
         }
@@ -159,13 +184,12 @@ struct TrapTubeStreamResolver {
         return candidates.filter { seen.insert($0.absoluteString).inserted }
     }
 
-    private func parseHLS(data: Data, source: URL, title: String) async throws -> TrapTubeResolvedMedia {
+    private func parseHLS(data: Data, source: URL, title: String, headers: [String: String]) async throws -> TrapTubeResolvedMedia {
         guard let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else {
             throw TrapTubeResolverError.badResponse
         }
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let isMasterPlaylist = text.contains("#EXT-X-STREAM-INF")
-        let headers = ["User-Agent": "TrapTube/1.0"]
         if !isMasterPlaylist {
             let media = parseHLSMediaPlaylist(lines, source: source)
             let asset = TrapTubeFlatAsset(url: source, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
@@ -260,7 +284,7 @@ struct TrapTubeStreamResolver {
         guard !segments.isEmpty else { return (nil, []) }
         return (initializationURL, segments)
     }
-    private func parseDASH(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
+    private func parseDASH(data: Data, source: URL, title: String, headers: [String: String]) throws -> TrapTubeResolvedMedia {
         guard let xml = String(data: data, encoding: .utf8), xml.contains("<MPD") else {
             throw TrapTubeResolverError.badResponse
         }
@@ -378,7 +402,7 @@ struct TrapTubeStreamResolver {
                 let label = height.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media")
                 let segmented = !segmentURLs.isEmpty
                 let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: type, height: height, bitrate: bitrate,
-                    label: label, isManifest: !segmented, headers: [:], representationID: representationID,
+                    label: label, isManifest: !segmented, headers: headers, representationID: representationID,
                     streamIndex: streamIndex, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
                 streamIndex += 1
