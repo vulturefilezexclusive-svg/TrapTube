@@ -979,6 +979,8 @@ final class TrapTubeDownloadManager: ObservableObject {
             let dir = TrapTubeDownloadPaths.downloadsDirectory
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             var inputURLs: [URL] = []
+            var completedTransferBytes: Int64 = 0
+            var expectedTransferBytes: Int64 = 0
             let assets = [video, audio].compactMap { $0 }
             for (assetIndex, asset) in assets.enumerated() {
                 let ext = asset.isManifest ? (asset.mimeType.contains("mpegurl") ? "m3u8" : "mpd") : (asset.url.pathExtension.isEmpty ? "media" : asset.url.pathExtension)
@@ -1011,10 +1013,11 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let progressHandler: (Int64, Int64, Int64) -> Void = { [weak self] bytes, total, speed in
                     Task { @MainActor in
                         guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-                        self.jobs[i].downloadedBytes = bytes
-                        self.jobs[i].totalBytes = total
+                        self.jobs[i].downloadedBytes = completedTransferBytes + bytes
+                        self.jobs[i].totalBytes = expectedTransferBytes + total
                         self.jobs[i].speedBytesPerSecond = speed
-                        self.jobs[i].progress = total > 0 ? min(0.98, Double(bytes) / Double(total)) : 0
+                        let aggregateTotal = expectedTransferBytes + total
+                        self.jobs[i].progress = aggregateTotal > 0 ? min(0.98, Double(completedTransferBytes + bytes) / Double(aggregateTotal)) : 0
                         self.persistQueue()
                     }
                 }
@@ -1027,6 +1030,9 @@ final class TrapTubeDownloadManager: ObservableObject {
                         progress: progressHandler)
                 }
                 inputURLs.append(downloaded)
+                let actualSize = (try? FileManager.default.attributesOfItem(atPath: downloaded.path)[.size] as? NSNumber)?.int64Value ?? 0
+                completedTransferBytes += actualSize
+                expectedTransferBytes = max(expectedTransferBytes, jobs[index].totalBytes)
             }
             guard let first = inputURLs.first else { throw TrapTubeResolverError.noStreams }
             let outputExt = format == "m4a" || modeFor(jobID) == "audio" ? (format == "wav" ? "wav" : "m4a") : "mp4"
@@ -1051,8 +1057,8 @@ final class TrapTubeDownloadManager: ObservableObject {
                     headers: audio?.headers ?? video?.headers ?? [:], progress: stats)
             } else {
                 try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL,
-                    videoStreamIndex: video?.segmentURLs.isEmpty == false ? nil : video?.streamIndex,
-                    audioStreamIndex: audio?.segmentURLs.isEmpty == false ? nil : audio?.streamIndex,
+                    videoStreamIndex: video?.isManifest == true || video?.segmentURLs.isEmpty == false ? nil : video?.streamIndex,
+                    audioStreamIndex: audio?.isManifest == true || audio?.segmentURLs.isEmpty == false ? nil : audio?.streamIndex,
                     videoHeaders: video?.headers ?? [:], audioHeaders: audio?.headers ?? [:], progress: stats)
             }
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
