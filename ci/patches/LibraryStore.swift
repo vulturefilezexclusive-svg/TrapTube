@@ -64,21 +64,17 @@ final class LibraryStore: ObservableObject {
                 let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0 else { throw ImportError.emptyFile }
 
-                // Validate the exported file with the same decoder used by local playback.
-                let playbackProbe = try AVAudioFile(forReading: target)
-                guard playbackProbe.length > 0,
-                      playbackProbe.processingFormat.sampleRate.isFinite,
-                      playbackProbe.processingFormat.sampleRate > 0,
-                      playbackProbe.processingFormat.channelCount > 0 else {
+                // Validate with AVAudioPlayer, the compatibility decoder used if the
+                // equalizer's AVAudioEngine graph cannot decode/schedule this container.
+                // Requiring AVAudioFile here would reject files the fallback player can play.
+                let playbackProbe = try AVAudioPlayer(contentsOf: target)
+                guard playbackProbe.duration.isFinite,
+                      playbackProbe.duration > 0,
+                      playbackProbe.numberOfChannels > 0,
+                      playbackProbe.prepareToPlay() else {
                     throw ImportError.playbackValidationFailed
                 }
-                let probeFrames = AVAudioFrameCount(min(4_096, playbackProbe.length))
-                guard let probeBuffer = AVAudioPCMBuffer(pcmFormat: playbackProbe.processingFormat, frameCapacity: probeFrames) else {
-                    throw ImportError.playbackValidationFailed
-                }
-                try playbackProbe.read(into: probeBuffer, frameCount: probeFrames)
-                guard probeBuffer.frameLength > 0 else { throw ImportError.playbackValidationFailed }
-                let verifiedDuration = Double(playbackProbe.length) / playbackProbe.processingFormat.sampleRate
+                let verifiedDuration = playbackProbe.duration
                 guard verifiedDuration.isFinite, verifiedDuration > 0 else {
                     throw ImportError.playbackValidationFailed
                 }
