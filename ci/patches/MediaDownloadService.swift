@@ -212,7 +212,7 @@ struct TrapTubeStreamResolver {
         guard let xml = String(data: data, encoding: .utf8), xml.contains("<MPD") else {
             throw TrapTubeResolverError.badResponse
         }
-        let usesSegmentTemplate = xml.contains("<SegmentTemplate") || xml.contains("<SegmentList") || xml.contains("<SegmentBase")
+        let durationSeconds = parseISODuration(attribute("mediaPresentationDuration", in: xml) ?? "")
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var streamIndex = 0
         let adaptationSets = xml.components(separatedBy: "<AdaptationSet").dropFirst()
@@ -222,28 +222,112 @@ struct TrapTubeStreamResolver {
             let adaptationBody = String(adaptation[..<adaptationEnd.lowerBound])
             let adaptationAttributes = parseAttributes(String(adaptation[..<adaptationTagEnd]))
             let inheritedType = (adaptationAttributes["mimeType"] ?? adaptationAttributes["contentType"] ?? "").lowercased()
+            let inheritedTemplate = element("SegmentTemplate", in: adaptationBody)
+            let inheritedList = element("SegmentList", in: adaptationBody)
+            let inheritedBase = elementText("BaseURL", in: adaptationBody)
             let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
             for block in representations {
                 guard let end = block.range(of: "</Representation>") else { continue }
                 let segment = String(block[..<end.lowerBound])
                 guard let tagEnd = segment.firstIndex(of: ">") else { continue }
                 let attrs = parseAttributes(String(segment[..<tagEnd]))
-                let baseStart = segment.range(of: "<BaseURL>")
-                let baseEnd = segment.range(of: "</BaseURL>")
-                let explicitBase: URL? = {
-                    guard let baseStart, let baseEnd else { return nil }
-                    let raw = String(segment[baseStart.upperBound..<baseEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    return URL(string: raw, relativeTo: source)?.absoluteURL
-                }()
-                let url = usesSegmentTemplate || explicitBase == nil ? source : explicitBase!
+                let representationBase = elementText("BaseURL", in: segment) ?? inheritedBase
+                let resolvedBase = representationBase.flatMap { URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: source)?.absoluteURL } ?? source
                 let type = (attrs["mimeType"] ?? attrs["contentType"] ?? inheritedType).lowercased()
-                let h = Int(attrs["height"] ?? ""), rate = Int(attrs["bandwidth"] ?? "")
-                let id = attrs["id"]
+                let height = Int(attrs["height"] ?? "")
+                let bitrate = Int(attrs["bandwidth"] ?? "")
+                let representationID = attrs["id"]
+                let template = element("SegmentTemplate", in: segment) ?? inheritedTemplate
+                let list = element("SegmentList", in: segment) ?? inheritedList
+                var initializationURL: URL?
+                var segmentURLs: [URL] = []
+
+                if let template {
+                    let templateAttributes = parseAttributes(template.tag)
+                    let mediaPattern = templateAttributes["media"]
+                    let initializationPattern = templateAttributes["initialization"]
+                    let timescale = Int64(templateAttributes["timescale"] ?? "1") ?? 1
+                    let startNumber = Int64(templateAttributes["startNumber"] ?? "1") ?? 1
+                    if let initializationPattern {
+                        let expanded = expandDASHTemplate(initializationPattern, representationID: representationID,
+                            bandwidth: bitrate, number: startNumber, time: 0)
+                        initializationURL = URL(string: expanded, relativeTo: resolvedBase)?.absoluteURL
+                    }
+                    if let mediaPattern {
+                        let timeline = element("SegmentTimeline", in: template.body)?.body ?? ""
+                        if !timeline.isEmpty {
+                            let entries = timeline.components(separatedBy: "<S").dropFirst()
+                            var currentTime: Int64 = 0
+                            var currentNumber = startNumber
+                            for (entryIndex, entry) in entries.enumerated() {
+                                guard let tagEnd = entry.firstIndex(of: ">") else { continue }
+                                let values = parseAttributes(String(entry[..<tagEnd]))
+                                guard let segmentDuration = Int64(values["d"] ?? ""), segmentDuration > 0 else { continue }
+                                let startTime = Int64(values["t"] ?? "") ?? currentTime
+                                let repeatCount = Int64(values["r"] ?? "0") ?? 0
+                                var count: Int64
+                                if repeatCount >= 0 {
+                                    count = repeatCount + 1
+                                } else {
+                                    let nextTime: Int64? = entries.dropFirst(entryIndex + 1).first.flatMap { next in
+                                        guard let nextEnd = next.firstIndex(of: ">") else { return nil }
+                                        return Int64(parseAttributes(String(next[..<nextEnd]))["t"] ?? "")
+                                    }
+                                    let endTime = nextTime ?? (durationSeconds > 0 ? Int64((durationSeconds * Double(timescale)).rounded(.up)) : nil)
+                                    guard let endTime, endTime > startTime else {
+                                        throw TrapTubeResolverError.unsupportedManifest("DASH timeline has an open-ended repeat without a known period duration.")
+                                    }
+                                    count = Int64(ceil(Double(endTime - startTime) / Double(segmentDuration)))
+                                }
+                                guard count > 0, count <= 10000, Int64(segmentURLs.count) + count <= 10000 else {
+                                    throw TrapTubeResolverError.unsupportedManifest("DASH timeline contains too many segments to queue safely.")
+                                }
+                                for offset in 0..<count {
+                                    let number = currentNumber + offset
+                                    let time = startTime + offset * segmentDuration
+                                    let expanded = expandDASHTemplate(mediaPattern, representationID: representationID,
+                                        bandwidth: bitrate, number: number, time: time)
+                                    if let url = URL(string: expanded, relativeTo: resolvedBase)?.absoluteURL { segmentURLs.append(url) }
+                                }
+                                currentNumber += count
+                                currentTime = startTime + count * segmentDuration
+                            }
+                        } else if let segmentDuration = Int64(templateAttributes["duration"] ?? ""), segmentDuration > 0,
+                                  durationSeconds > 0, timescale > 0 {
+                            let count = Int64(ceil(durationSeconds * Double(timescale) / Double(segmentDuration)))
+                            guard count > 0, count <= 10000 else {
+                                throw TrapTubeResolverError.unsupportedManifest("DASH duration template contains too many segments.")
+                            }
+                            for offset in 0..<count {
+                                let expanded = expandDASHTemplate(mediaPattern, representationID: representationID,
+                                    bandwidth: bitrate, number: startNumber + offset, time: offset * segmentDuration)
+                                if let url = URL(string: expanded, relativeTo: resolvedBase)?.absoluteURL { segmentURLs.append(url) }
+                            }
+                        }
+                    }
+                } else if let list {
+                    let listBody = list.body
+                    if let initTag = firstTag("Initialization", in: listBody) {
+                        let initAttrs = parseAttributes(initTag)
+                        if let raw = initAttrs["sourceURL"] {
+                            initializationURL = URL(string: raw, relativeTo: resolvedBase)?.absoluteURL
+                        }
+                    }
+                    let segmentTags = allTags("SegmentURL", in: listBody)
+                    for tag in segmentTags {
+                        let values = parseAttributes(tag)
+                        if let raw = values["media"], let url = URL(string: raw, relativeTo: resolvedBase)?.absoluteURL {
+                            segmentURLs.append(url)
+                        }
+                    }
+                }
+
                 let kind: TrapTubeAssetKind = type.contains("audio") ? .audio : (type.contains("video") ? .video : .muxed)
-                let asset = TrapTubeFlatAsset(url: url, kind: kind, mimeType: type, height: h, bitrate: rate,
-                    label: h.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media"),
-                    isManifest: usesSegmentTemplate || explicitBase == nil, headers: [:],
-                    representationID: id, streamIndex: streamIndex)
+                let label = height.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media")
+                let segmented = !segmentURLs.isEmpty
+                let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: type, height: height, bitrate: bitrate,
+                    label: label, isManifest: !segmented, headers: [:], representationID: representationID,
+                    streamIndex: streamIndex, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
                 streamIndex += 1
             }
@@ -253,6 +337,78 @@ struct TrapTubeStreamResolver {
         }
         return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: video, audioAssets: audio,
             muxedAssets: muxed, supportsSeparateAudioVideo: !video.isEmpty && !audio.isEmpty)
+    }
+
+    private func attribute(_ name: String, in text: String) -> String? {
+        guard let tagEnd = text.firstIndex(of: ">") else { return nil }
+        return parseAttributes(String(text[..<tagEnd]))[name]
+    }
+
+    private func element(_ name: String, in text: String) -> (tag: String, body: String)? {
+        guard let start = text.range(of: "<\(name)"),
+              let tagEnd = text[start.lowerBound...].firstIndex(of: ">") else { return nil }
+        let tag = String(text[start.lowerBound...tagEnd])
+        if let close = text.range(of: "</\(name)>", range: tagEnd..<text.endIndex) {
+            return (tag, String(text[tagEnd..<close.lowerBound]))
+        }
+        return (tag, "")
+    }
+
+    private func elementText(_ name: String, in text: String) -> String? {
+        guard let opening = text.range(of: "<\(name)>"),
+              let closing = text.range(of: "</\(name)>", range: opening.upperBound..<text.endIndex) else { return nil }
+        return String(text[opening.upperBound..<closing.lowerBound])
+    }
+
+    private func firstTag(_ name: String, in text: String) -> String? {
+        guard let start = text.range(of: "<\(name)"),
+              let end = text[start.lowerBound...].firstIndex(of: ">") else { return nil }
+        return String(text[start.lowerBound...end])
+    }
+
+    private func allTags(_ name: String, in text: String) -> [String] {
+        var output: [String] = []
+        var search = text.startIndex
+        while let start = text.range(of: "<\(name)", range: search..<text.endIndex),
+              let end = text[start.lowerBound...].firstIndex(of: ">") {
+            output.append(String(text[start.lowerBound...end]))
+            search = text.index(after: end)
+        }
+        return output
+    }
+
+    private func parseISODuration(_ value: String) -> Double {
+        guard let regex = try? NSRegularExpression(pattern: #"^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$"#),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return 0 }
+        func number(_ index: Int) -> Double {
+            guard match.range(at: index).location != NSNotFound,
+                  let range = Range(match.range(at: index), in: value) else { return 0 }
+            return Double(value[range]) ?? 0
+        }
+        return number(1) * 3600 + number(2) * 60 + number(3)
+    }
+
+    private func expandDASHTemplate(_ template: String, representationID: String?, bandwidth: Int?,
+                                   number: Int64, time: Int64) -> String {
+        let escapeToken = "\u{0}"
+        var output = template.replacingOccurrences(of: "$$", with: escapeToken)
+        if let regex = try? NSRegularExpression(pattern: #"\$(Number|Time|Bandwidth)%0(\d+)d\$"#) {
+            let ns = output as NSString
+            for match in regex.matches(in: output, range: NSRange(location: 0, length: ns.length)).reversed() {
+                guard match.numberOfRanges == 3 else { continue }
+                let key = ns.substring(with: match.range(at: 1))
+                let width = Int(ns.substring(with: match.range(at: 2))) ?? 1
+                let value = key == "Number" ? number : (key == "Time" ? time : Int64(bandwidth ?? 0))
+                let formatted = String(format: "%0*lld", width, value)
+                if let range = Range(match.range, in: output) { output.replaceSubrange(range, with: formatted) }
+            }
+        }
+        output = output.replacingOccurrences(of: "$RepresentationID$", with: representationID ?? "")
+            .replacingOccurrences(of: "$Bandwidth$", with: String(bandwidth ?? 0))
+            .replacingOccurrences(of: "$Number$", with: String(number))
+            .replacingOccurrences(of: "$Time$", with: String(time))
+            .replacingOccurrences(of: escapeToken, with: "$")
+        return output
     }
     private func parseAttributes(_ value: String) -> [String: String] {
         var result: [String: String] = [:]
