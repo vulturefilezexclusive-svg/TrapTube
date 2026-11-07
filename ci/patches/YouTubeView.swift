@@ -11,27 +11,25 @@ struct YouTubeView: View {
     @State private var latestVideoTitle = "YouTube video"
     @State private var showDownloads = false
 
-    private var homeURL: URL {
-        guard discoveryMode else { return URL(string: "https://www.youtube.com/")! }
+    private var homeURL: URL? {
+        guard discoveryMode else { return URL(string: "https://www.youtube.com/") }
         let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return URL(string: "https://www.youtube.com/")! }
-
-        // Accept both fully-qualified URLs and ordinary addresses such as example.com/path.
+        guard !raw.isEmpty else { return nil }
         let candidate = raw.contains("://") ? raw : "https://\(raw)"
         guard var components = URLComponents(string: candidate),
               let scheme = components.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
-              let host = components.host, !host.isEmpty else {
-            return URL(string: "https://www.youtube.com/")!
-        }
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil else { return nil }
         components.scheme = scheme
-        return components.url ?? URL(string: "https://www.youtube.com/")!
+        return components.url
     }
 
     var body: some View {
-        StreamingHomeWebView(url: homeURL) { url in
+        StreamingHomeWebView(url: homeURL) { url, title in
             latestVideoURL = url
-            selectedWatch = YouTubeWatchItem(url: url, title: "YouTube video")
+            latestVideoTitle = title
+            selectedWatch = YouTubeWatchItem(url: url, title: title)
         }
         .ignoresSafeArea(edges: .bottom)
         .overlay(alignment: .topTrailing) {
@@ -65,8 +63,8 @@ private struct YouTubeWatchItem: Identifiable {
 }
 
 private struct StreamingHomeWebView: UIViewRepresentable {
-    let url: URL
-    let onWatch: (URL) -> Void
+    let url: URL?
+    let onWatch: (URL, String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onWatch: onWatch) }
 
@@ -98,7 +96,11 @@ private struct StreamingHomeWebView: UIViewRepresentable {
         web.allowsBackForwardNavigationGestures = true
         web.scrollView.contentInsetAdjustmentBehavior = .never
         context.coordinator.lastLoaded = url
-        web.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        if let url {
+            web.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        } else {
+            web.loadHTMLString(Self.discoveryPlaceholder, baseURL: nil)
+        }
         return web
     }
 
@@ -106,30 +108,43 @@ private struct StreamingHomeWebView: UIViewRepresentable {
         context.coordinator.onWatch = onWatch
         if context.coordinator.lastLoaded != url {
             context.coordinator.lastLoaded = url
-            web.load(URLRequest(url: url))
+            if let url { web.load(URLRequest(url: url)) }
+            else { web.loadHTMLString(Self.discoveryPlaceholder, baseURL: nil) }
         }
     }
 
+    private static let discoveryPlaceholder = """
+    <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{margin:0;background:#0c0b0d;color:#f5f5f5;font:16px -apple-system,BlinkMacSystemFont,sans-serif;display:grid;place-items:center;min-height:100vh}
+    main{max-width:420px;padding:28px;text-align:center}h1{font-size:23px}p{color:#aaa;line-height:1.5}</style></head>
+    <body><main><h1>Video Discovery</h1><p>Open Settings → Video discovery and enter a website address. That site loads here in the TrapTube tab. Your YouTube Home tab remains unchanged.</p></main></body></html>
+    """
+
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var onWatch: (URL) -> Void
+        var onWatch: (URL, String) -> Void
         var lastLoaded: URL?
-        init(onWatch: @escaping (URL) -> Void) { self.onWatch = onWatch }
+        init(onWatch: @escaping (URL, String) -> Void) { self.onWatch = onWatch }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let raw = message.body as? String, let url = URL(string: raw) else { return }
-            onWatch(url)
+            guard let payload = message.body as? [String: Any],
+                  let raw = payload["url"] as? String, let url = URL(string: raw) else { return }
+            let rawTitle = (payload["title"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = rawTitle.isEmpty ? "YouTube video" : String(rawTitle.prefix(180))
+            onWatch(url, title)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url,
-                  url.host?.lowercased().hasSuffix("youtube.com") == true,
+                  { let host = url.host?.lowercased() ?? ""; return host == "youtube.com" || host.hasSuffix(".youtube.com") || host == "youtu.be" }(),
                   url.path == "/watch" || url.path.hasPrefix("/shorts/") || url.path.hasPrefix("/live/"),
                   navigationAction.targetFrame?.isMainFrame != false else {
                 decisionHandler(.allow)
                 return
             }
-            onWatch(url)
+            let rawTitle = (webView.title ?? "").replacingOccurrences(of: " - YouTube", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            onWatch(url, rawTitle.isEmpty ? "YouTube video" : String(rawTitle.prefix(180)))
             decisionHandler(.cancel)
         }
     }
