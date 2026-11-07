@@ -403,6 +403,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         return String(text[range])
     }
 
+    @MainActor
     private func cookieHeader(for url: URL) async -> String? {
         let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
