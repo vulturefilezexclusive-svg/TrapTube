@@ -670,16 +670,10 @@ private struct TrapTubeDownloadsSheet: View {
     @State private var mode = "video"
     @State private var quality = "best"
     @State private var format = "mp4"
-    @State private var sponsorBlock = false
-    @State private var subtitles = true
     @State private var selectedVideo: TrapTubeDownloadedMedia?
 
     private var modeTitle: String {
-        switch mode {
-        case "audio": return "Audio"
-        case "thumbnail": return "Cover art"
-        default: return "Video"
-        }
+        mode == "audio" ? "Audio" : "Video"
     }
 
     var body: some View {
@@ -699,15 +693,14 @@ private struct TrapTubeDownloadsSheet: View {
                         Picker("Download type", selection: $mode) {
                             Text("Video").tag("video")
                             Text("Audio").tag("audio")
-                            Text("Cover").tag("thumbnail")
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: mode) { _, newMode in
                             quality = "best"
-                            format = newMode == "audio" ? "m4a" : (newMode == "thumbnail" ? "jpg" : "mp4")
+                            format = newMode == "audio" ? "m4a" : "mp4"
                         }
 
-                        if mode != "thumbnail" {
+                        if mode == "video" || mode == "audio" {
                             Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
                                 Text("Best available").tag("best")
                                 if mode == "video" {
@@ -736,31 +729,15 @@ private struct TrapTubeDownloadsSheet: View {
                                 Text("M4A").tag("m4a")
                                 Text("Opus").tag("opus")
                             } else {
-                                Text("JPEG").tag("jpg")
- 
+                                Text("M4A").tag("m4a")
                             }
                         }
                         .pickerStyle(.menu)
                         .tint(Color(hex: "F04452"))
 
                         if mode == "video" {
-                            Toggle(isOn: $subtitles) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Include subtitles").font(.subheadline.bold()).foregroundStyle(.white)
-                                    Text("Embed available English captions when supported.")
-                                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                                }
-                            }
-                            .tint(Color(hex: "E50920"))
-
-                            Toggle(isOn: $sponsorBlock) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Skip SponsorBlock segments").font(.subheadline.bold()).foregroundStyle(.white)
-                                    Text("Ask the TypeType downloader to omit supported sponsor segments.")
-                                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                                }
-                            }
-                            .tint(Color(hex: "E50920"))
+                            Text("Video and audio streams are selected by the TypeType downloader, then muxed into the chosen container.")
+                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                         }
 
                         Button {
@@ -774,9 +751,7 @@ private struct TrapTubeDownloadsSheet: View {
                                     bitrate: nil,
                                     height: mode == "video"
                                         ? (quality == "best" ? 2160 : Int(quality.replacingOccurrences(of: "p", with: "")))
-                                        : nil,
-                                    sponsorBlock: sponsorBlock,
-                                    subtitles: subtitles
+                                        : nil
                                 )
                             }
                         } label: {
