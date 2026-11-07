@@ -162,6 +162,25 @@ jobs:
           chmod +x scripts/build-unsigned-ipa.sh
           ./scripts/build-unsigned-ipa.sh
 
+      - name: Add third-party notices to app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA="work/TrapTube/dist/TrapTube-unsigned.ipa"
+          STAGING="$RUNNER_TEMP/traptube-third-party-notices"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          ditto -x -k "$IPA" "$STAGING"
+          APP_PATH="$STAGING/Payload/TrapTube.app"
+          cp ci/patches/HTDemucs-ATTRIBUTION.md "$APP_PATH/HTDemucs-ATTRIBUTION.md"
+          cp ci/patches/FFmpegKit-LICENSE "$APP_PATH/FFmpegKit-LICENSE"
+          cp ci/patches/FFmpegKit-NOTICE.md "$APP_PATH/FFmpegKit-NOTICE.md"
+          REPACK="$RUNNER_TEMP/TrapTube-third-party-notices.ipa"
+          (cd "$STAGING" && /usr/bin/zip -qry "$REPACK" Payload)
+          mv "$REPACK" "$IPA"
+          /usr/bin/unzip -tq "$IPA"
+          echo "Added Demucs and FFmpegKit third-party notices to the app bundle."
+
       - name: Embed Swift runtime dependencies required by FFmpegKit
         shell: bash
         run: |
