@@ -745,6 +745,7 @@ private struct TrapTubeDownloadsSheet: View {
                                 Text("MP4 · iOS compatible").tag("mp4")
                             } else {
                                 Text("M4A · AAC").tag("m4a")
+                                Text("WAV · PCM").tag("wav")
                             }
                         }
                         .pickerStyle(.menu)
