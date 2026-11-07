@@ -65,6 +65,39 @@ jobs:
           path.write_text(source)
           PY
 
+      - name: Make the TrapTube app icon available to the player menu
+        shell: bash
+        run: |
+          set -euo pipefail
+          ICON_SET="$(find work/TrapTube -type d -name 'AppIcon.appiconset' -print -quit)"
+          if [[ -z "$ICON_SET" ]]; then
+            echo "WARNING: AppIcon.appiconset was not found; player menu will use the asset fallback."
+            exit 0
+          fi
+          ICON_SOURCE="$(find "$ICON_SET" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 | xargs -0 ls -S | head -n 1)"
+          if [[ -z "$ICON_SOURCE" ]]; then
+            echo "WARNING: AppIcon.appiconset contains no raster image; player menu will use the asset fallback."
+            exit 0
+          fi
+          ICON_ASSETS="$(dirname "$ICON_SET")"
+          mkdir -p "$ICON_ASSETS/TrapTubeIcon.imageset"
+          cp "$ICON_SOURCE" "$ICON_ASSETS/TrapTubeIcon.imageset/TrapTubeIcon.png"
+          cat > "$ICON_ASSETS/TrapTubeIcon.imageset/Contents.json" <<'JSON'
+          {
+            "images": [
+              {
+                "filename": "TrapTubeIcon.png",
+                "idiom": "universal"
+              }
+            ],
+            "info": {
+              "author": "xcode",
+              "version": 1
+            }
+          }
+          JSON
+          echo "Prepared TrapTubeIcon from $(basename "$ICON_SOURCE")."
+
       - name: Add LGPL FFmpegKit Swift package
         shell: bash
         run: |
