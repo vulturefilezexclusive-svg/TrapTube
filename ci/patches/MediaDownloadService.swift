@@ -1251,36 +1251,48 @@ final class TrapTubeDownloadManager: ObservableObject {
         if let i = jobs.firstIndex(where: { $0.id == id }) { jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"; persistQueue() }
     }
 
+    private func restoredVideoAsset(in media: TrapTubeResolvedMedia, for job: TrapTubeDownloadTask) -> TrapTubeFlatAsset? {
+        let candidates = media.videoAssets + media.muxedAssets
+        if let representationID = job.selectedVideoRepresentationID,
+           let match = candidates.first(where: { $0.representationID == representationID }) { return match }
+        if let mime = job.selectedVideoMimeType,
+           let match = candidates.first(where: { $0.mimeType == mime && $0.height == job.selectedVideoHeight }) { return match }
+        if let url = job.selectedVideoURL,
+           let match = candidates.first(where: { $0.url == url && $0.streamIndex == job.selectedVideoStreamIndex }) { return match }
+        if let height = job.selectedVideoHeight {
+            let eligible = candidates.filter { ($0.height ?? 0) <= height }
+            return eligible.max { ($0.height ?? 0) < ($1.height ?? 0) }
+        }
+        return candidates.max { ($0.height ?? 0) < ($1.height ?? 0) }
+    }
+
+    private func restoredAudioAsset(in media: TrapTubeResolvedMedia, for job: TrapTubeDownloadTask) -> TrapTubeFlatAsset? {
+        let candidates = media.audioAssets + media.muxedAssets
+        if let representationID = job.selectedAudioRepresentationID,
+           let match = candidates.first(where: { $0.representationID == representationID }) { return match }
+        if let mime = job.selectedAudioMimeType,
+           let match = candidates.first(where: { $0.mimeType == mime && $0.bitrate == job.selectedAudioBitrate }) { return match }
+        if let url = job.selectedAudioURL,
+           let match = candidates.first(where: { $0.url == url && $0.streamIndex == job.selectedAudioStreamIndex }) { return match }
+        guard job.mode == "audio" else { return nil }
+        return candidates.max { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }
+    }
+
     func resume(_ id: String) {
         guard let job = jobs.first(where: { $0.id == id }), let source = job.sourceURL else { return }
         Task {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
-                let selectedVideo = media.videoAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
-                    ?? media.videoAssets.first(where: { $0.height == job.selectedVideoHeight && $0.mimeType == job.selectedVideoMimeType })
-                    ?? media.videoAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
-                    ?? media.muxedAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
-                    ?? media.muxedAssets.first(where: { $0.height == job.selectedVideoHeight && $0.mimeType == job.selectedVideoMimeType })
-                    ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
-                    ?? media.videoAssets.filter { job.selectedVideoHeight == nil || ($0.height ?? 0) <= job.selectedVideoHeight! }.max(by: { ($0.height ?? 0) < ($1.height ?? 0) })
-                    ?? media.muxedAssets.filter { job.selectedVideoHeight == nil || ($0.height ?? 0) <= job.selectedVideoHeight! }.max(by: { ($0.height ?? 0) < ($1.height ?? 0) })
-                let matchedAudio = media.audioAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
-                    ?? media.audioAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType && job.selectedAudioMimeType != nil })
-                    ?? media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex && job.selectedAudioURL != nil })
-                    ?? media.muxedAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
-                    ?? media.muxedAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType && job.selectedAudioMimeType != nil })
-                    ?? media.muxedAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex && job.selectedAudioURL != nil })
-                let selectedAudio = matchedAudio ?? (job.mode == "audio"
-                    ? (media.audioAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
-                        ?? media.muxedAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }))
-                    : nil)
+                let selectedVideo = restoredVideoAsset(in: media, for: job)
+                let selectedAudio = restoredAudioAsset(in: media, for: job)
                 let video = job.mode == "audio" ? nil : selectedVideo
-                let audio = selectedAudio
-                start(jobID: id, media: media, video: video, audio: audio, format: job.mode == "audio" ? "m4a" : "mp4")
-            } catch { lastError = error.localizedDescription }
+                start(jobID: id, media: media, video: video, audio: selectedAudio,
+                      format: job.mode == "audio" ? "m4a" : "mp4")
+            } catch {
+                lastError = error.localizedDescription
+            }
         }
     }
-
     func remove(_ item: TrapTubeDownloadedMedia) {
         try? FileManager.default.removeItem(at: item.fileURL)
         completed.removeAll { $0.id == item.id }; persistCompleted()
