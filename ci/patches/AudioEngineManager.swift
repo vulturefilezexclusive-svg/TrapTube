@@ -232,6 +232,10 @@ final class AudioEngineManager: ObservableObject {
     }
 
     private func startCompatibilityPlayback(_ track: Track, at time: TimeInterval, autoplay: Bool, engineError: Error) {
+        playerNode.stop()
+        compatibilityPlayer?.stop()
+        compatibilityPlayer = nil
+        isPlaying = false
         let fileURL = LibraryStore.audioURL(for: track.fileName).standardizedFileURL
         do {
             try configureAudioSession()
