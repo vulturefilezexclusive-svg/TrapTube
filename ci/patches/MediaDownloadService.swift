@@ -1,3 +1,8 @@
+import Foundation
+import SwiftUI
+import WebKit
+import ffmpegkit
+
 enum TrapTubeDownloadPaths {
     static var appDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
