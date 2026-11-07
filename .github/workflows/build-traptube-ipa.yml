@@ -240,6 +240,62 @@ jobs:
           chmod +x scripts/build-unsigned-ipa.sh
           ./scripts/build-unsigned-ipa.sh
 
+      - name: Embed Swift runtime dependencies required by FFmpegKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA="work/TrapTube/dist/TrapTube-unsigned.ipa"
+          test -s "$IPA" || { echo "ERROR: unsigned IPA missing before runtime embedding."; exit 6; }
+          STAGING="$RUNNER_TEMP/traptube-swift-runtime"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          ditto -x -k "$IPA" "$STAGING"
+          APP_PATH="$STAGING/Payload/TrapTube.app"
+          test -d "$APP_PATH/Frameworks" || { echo "ERROR: app Frameworks directory missing."; exit 6; }
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")
+          test -s "$APP_PATH/$EXECUTABLE"
+          SWIFT_STDLIB_TOOL="$(xcrun --find swift-stdlib-tool)"
+          echo "Embedding Swift runtime libraries referenced by the app and bundled frameworks."
+          "$SWIFT_STDLIB_TOOL" --copy --verbose \
+            --scan-executable "$APP_PATH/$EXECUTABLE" \
+            --scan-folder "$APP_PATH/Frameworks" \
+            --destination "$APP_PATH/Frameworks" \
+            --platform iphoneos
+          # Fail early if any bundled binary still references an absent Swift runtime dylib.
+          python3 - "$APP_PATH" <<'PYVERIFY'
+          from pathlib import Path
+          import subprocess, sys
+          app = Path(sys.argv[1])
+          frameworks = app / "Frameworks"
+          binaries = [app / subprocess.check_output(
+              ["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleExecutable", str(app / "Info.plist")],
+              text=True).strip()]
+          binaries += [p for p in frameworks.rglob("*") if p.is_file() and (p.suffix == ".dylib" or ".framework" in str(p) and p.name == p.parent.name)]
+          missing = set()
+          for binary in binaries:
+              try:
+                  output = subprocess.check_output(["/usr/bin/otool", "-L", str(binary)], text=True, stderr=subprocess.DEVNULL)
+              except (subprocess.CalledProcessError, OSError):
+                  continue
+              for line in output.splitlines()[1:]:
+                  dep = line.strip().split(" (", 1)[0]
+                  if dep.startswith("@rpath/libswift") and dep.endswith(".dylib"):
+                      name = Path(dep).name
+                      if not (frameworks / name).is_file():
+                          missing.add(f"{binary}: {name}")
+          if missing:
+              raise SystemExit("Missing embedded Swift runtime dependencies:\\n" + "\\n".join(sorted(missing)))
+          required = frameworks / "libswiftCoreMedia.dylib"
+          if not required.is_file():
+              raise SystemExit("libswiftCoreMedia.dylib was not embedded; refusing to ship an IPA that will fail at launch.")
+          print("Verified libswiftCoreMedia.dylib and all scanned @rpath/libswift*.dylib dependencies are embedded.")
+          PYVERIFY
+          REPACK="$RUNNER_TEMP/TrapTube-runtime-fixed.ipa"
+          (cd "$STAGING" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/$REPACK" Payload)
+          mv "$GITHUB_WORKSPACE/$REPACK" "$IPA"
+          /usr/bin/unzip -tq "$IPA"
+          /usr/bin/shasum -a 256 "$IPA" > work/TrapTube/dist/SHA256SUMS.txt
+
       - name: Upload IPA and build log
         if: always()
         uses: actions/upload-artifact@v4
