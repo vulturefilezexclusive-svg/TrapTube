@@ -66,6 +66,36 @@ jobs:
           path.write_text(source)
           PY
 
+      - name: Export app source files for feature integration review
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          root = Path("work/TrapTube")
+          output = Path("review-source")
+          names = {"RootView.swift", "PlayerView.swift", "TrapTubeApp.swift", "HomeView.swift", "YouTubeView.swift", "StemStudioView.swift", "AudioEngineManager.swift"}
+          copied = 0
+          for source in root.rglob("*.swift"):
+              if source.name in names:
+                  target = output / source.relative_to(root)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(source, target)
+                  print(f"Exported {source}")
+                  copied += 1
+          if copied == 0:
+              raise SystemExit("No review source files were found.")
+          PY
+      - name: Upload app source review artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrapTube-source-review
+          path: review-source/
+          retention-days: 3
+
       - name: Make the TrapTube app icon available to the player menu
         shell: bash
         run: |
