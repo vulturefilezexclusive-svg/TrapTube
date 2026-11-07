@@ -1130,6 +1130,8 @@ final class TrapTubeDownloadManager: ObservableObject {
     private let resolver = TrapTubeStreamResolver()
     private var workers: [String: Task<Void, Never>] = [:]
     private var workerTokens: [String: UUID] = [:]
+    private var pendingWork: [String: (media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?, audio: TrapTubeFlatAsset?, format: String)] = [:]
+    private let maximumConcurrentTransfers = 2
     private var manifestURL: URL { TrapTubeDownloadPaths.appDirectory.appendingPathComponent("downloads.json") }
     private var queueURL: URL { TrapTubeDownloadPaths.appDirectory.appendingPathComponent("queue.json") }
 
@@ -1191,11 +1193,32 @@ final class TrapTubeDownloadManager: ObservableObject {
 
     private func start(jobID: String, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
                        audio: TrapTubeFlatAsset?, format: String) {
-        workers[jobID]?.cancel()
+        let work = (media: media, video: video, audio: audio, format: format)
+        if workers.count >= maximumConcurrentTransfers {
+            pendingWork[jobID] = work
+            updateJob(jobID) { $0.status = "queued"; $0.stage = "Waiting in download queue" }
+            return
+        }
+        pendingWork.removeValue(forKey: jobID)
+        launch(jobID: jobID, work: work)
+    }
+
+    private func launch(jobID: String,
+                        work: (media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?, audio: TrapTubeFlatAsset?, format: String)) {
         let token = UUID()
         workerTokens[jobID] = token
         workers[jobID] = Task { [weak self] in
-            await self?.run(jobID: jobID, workerToken: token, media: media, video: video, audio: audio, format: format)
+            await self?.run(jobID: jobID, workerToken: token, media: work.media,
+                            video: work.video, audio: work.audio, format: work.format)
+        }
+    }
+
+    private func startNextPending() {
+        guard workers.count < maximumConcurrentTransfers else { return }
+        for job in jobs {
+            guard let work = pendingWork.removeValue(forKey: job.id) else { continue }
+            launch(jobID: job.id, work: work)
+            if workers.count >= maximumConcurrentTransfers { break }
         }
     }
 
@@ -1211,6 +1234,7 @@ final class TrapTubeDownloadManager: ObservableObject {
             if workerTokens[jobID] == workerToken {
                 workers[jobID] = nil
                 workerTokens[jobID] = nil
+                startNextPending()
             }
         }
         guard jobs.contains(where: { $0.id == jobID }) else { return }
@@ -1337,8 +1361,14 @@ final class TrapTubeDownloadManager: ObservableObject {
     private func modeFor(_ id: String) -> String { jobs.first(where: { $0.id == id })?.mode ?? "video" }
 
     func cancel(_ id: String) async {
+        pendingWork.removeValue(forKey: id)
         workers[id]?.cancel(); workers[id] = nil; workerTokens[id] = nil
-        if let i = jobs.firstIndex(where: { $0.id == id }) { jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"; persistQueue() }
+        if let i = jobs.firstIndex(where: { $0.id == id }) {
+            jobs[i].status = "paused"
+            jobs[i].stage = "Paused · can resume"
+            persistQueue()
+        }
+        startNextPending()
     }
 
     private func restoredVideoAsset(in media: TrapTubeResolvedMedia, for job: TrapTubeDownloadTask) -> TrapTubeFlatAsset? {
