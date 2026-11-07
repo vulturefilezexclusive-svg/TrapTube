@@ -202,18 +202,6 @@ struct TypeTypeDownloadOptions: Encodable {
     var bitrate: Int?
     var height: Int?
     var allowQualityFallback: Bool = true
-    var sponsorBlock: Bool = false
-    var sponsorBlockCategories: [String]? = nil
-    var thumbnailOnly: Bool? = nil
-    var subtitles: TypeTypeSubtitleOptions? = nil
-}
-
-struct TypeTypeSubtitleOptions: Encodable {
-    var enabled: Bool
-    var auto: Bool
-    var embed: Bool
-    var languages: [String]
-    var format: String
 }
 
 struct TypeTypeDownloadJob: Decodable, Identifiable {
@@ -346,9 +334,7 @@ final class TrapTubeDownloadManager: ObservableObject {
         quality: String,
         format: String,
         bitrate: Int?,
-        height: Int?,
-        sponsorBlock: Bool,
-        subtitles: Bool
+        height: Int?
     ) async {
         lastError = nil
         do {
@@ -358,20 +344,8 @@ final class TrapTubeDownloadManager: ObservableObject {
                 format: format,
                 bitrate: bitrate,
                 height: height,
-                allowQualityFallback: true,
-                sponsorBlock: sponsorBlock,
-                sponsorBlockCategories: sponsorBlock
-                    ? ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview", "filler", "music_offtopic"]
-                    : nil,
-                thumbnailOnly: mode == "thumbnail" ? true : nil,
-                subtitles: subtitles && mode == "video"
-                    ? TypeTypeSubtitleOptions(enabled: true, auto: true, embed: true, languages: ["en"], format: "srt")
-                    : nil
+                allowQualityFallback: true
             )
-            if mode == "thumbnail" {
-                options.quality = nil
-                options.format = format.isEmpty ? "jpg" : format
-            }
 
             let remote = try await service.createDownloadJob(videoURL: videoURL, options: options)
             let initial = TrapTubeDownloadTask(
