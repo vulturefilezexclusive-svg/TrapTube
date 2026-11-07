@@ -4,6 +4,7 @@ import AVKit
 import UIKit
 
 struct YouTubeView: View {
+    var discoveryMode: Bool = false
     @AppStorage("discovery.sourceURL") private var discoverySourceURL = ""
     @State private var selectedWatch: YouTubeWatchItem?
     @State private var latestVideoURL = URL(string: "https://www.youtube.com/")!
@@ -11,6 +12,7 @@ struct YouTubeView: View {
     @State private var showDownloads = false
 
     private var homeURL: URL {
+        guard discoveryMode else { return URL(string: "https://www.youtube.com/")! }
         let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return URL(string: "https://www.youtube.com/")! }
 
