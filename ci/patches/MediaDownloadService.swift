@@ -856,7 +856,11 @@ enum TrapTubeFlatTransfer {
             try? handle.close()
             throw error
         }
-        progress(effectiveOffset + received, total, 0)
+        let finalBytes = effectiveOffset + received
+        if total > 0 && finalBytes < total {
+            throw TrapTubeResolverError.unsupportedManifest("The server ended the response before the advertised media length. The partial file was kept; resume the task to continue.")
+        }
+        progress(finalBytes, total, 0)
         return destination
     }
 
