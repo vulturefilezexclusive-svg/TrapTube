@@ -324,19 +324,33 @@ struct TrapTubeStreamResolver {
         guard let xml = String(data: data, encoding: .utf8), xml.contains("<MPD") else {
             throw TrapTubeResolverError.badResponse
         }
-        let durationSeconds = parseISODuration(attribute("mediaPresentationDuration", in: xml) ?? "")
+        let mpdDuration = parseISODuration(attribute("mediaPresentationDuration", in: xml) ?? "")
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var streamIndex = 0
-        let adaptationSets = xml.components(separatedBy: "<AdaptationSet").dropFirst()
-        for adaptation in adaptationSets {
+        let periodParts = xml.components(separatedBy: "<Period")
+        let periodBodies: [String] = periodParts.count > 1
+            ? periodParts.dropFirst().map { part in
+                if let end = part.range(of: "</Period>") { return String(part[..<end.lowerBound]) }
+                return part
+            }
+            : [xml]
+        for periodBody in periodBodies {
+            let periodTagEnd = periodBody.firstIndex(of: ">")
+            let periodAttributes = periodTagEnd.map { parseAttributes(String(periodBody[..<$0])) } ?? [:]
+            let durationSeconds = mpdDuration > 0 ? mpdDuration : parseISODuration(periodAttributes["duration"] ?? "")
+            let periodTemplate = element("SegmentTemplate", in: periodBody)
+            let periodList = element("SegmentList", in: periodBody)
+            let periodBase = elementText("BaseURL", in: periodBody)
+            let adaptationSets = periodBody.components(separatedBy: "<AdaptationSet").dropFirst()
+            for adaptation in adaptationSets {
             guard let adaptationEnd = adaptation.range(of: "</AdaptationSet>"),
                   let adaptationTagEnd = adaptation.firstIndex(of: ">") else { continue }
             let adaptationBody = String(adaptation[..<adaptationEnd.lowerBound])
             let adaptationAttributes = parseAttributes(String(adaptation[..<adaptationTagEnd]))
             let inheritedType = (adaptationAttributes["mimeType"] ?? adaptationAttributes["contentType"] ?? "").lowercased()
-            let inheritedTemplate = element("SegmentTemplate", in: adaptationBody)
-            let inheritedList = element("SegmentList", in: adaptationBody)
-            let inheritedBase = elementText("BaseURL", in: adaptationBody)
+            let inheritedTemplate = element("SegmentTemplate", in: adaptationBody) ?? periodTemplate
+            let inheritedList = element("SegmentList", in: adaptationBody) ?? periodList
+            let inheritedBase = elementText("BaseURL", in: adaptationBody) ?? periodBase
             let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
             for block in representations {
                 guard let end = block.range(of: "</Representation>") else { continue }
@@ -442,6 +456,7 @@ struct TrapTubeStreamResolver {
                     streamIndex: streamIndex, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
                 streamIndex += 1
+            }
             }
         }
         guard !video.isEmpty || !audio.isEmpty || !muxed.isEmpty else {
