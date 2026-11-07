@@ -517,7 +517,9 @@ enum TrapTubeFlatTransfer {
         if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
-        if offset > 0 && http.statusCode == 200 { throw TrapTubeFlatTransferError.serverDoesNotSupportResume }
+        if offset > 0 && http.statusCode == 200 {
+            return try await download(asset, to: destination, startingAt: 0, progress: progress)
+        }
         guard http.statusCode == 200 || http.statusCode == 206 else { throw TrapTubeFlatTransferError.invalidStatus(http.statusCode) }
         let total = Int64(http.expectedContentLength) > 0 ? Int64(http.expectedContentLength) + offset : 0
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -527,17 +529,23 @@ enum TrapTubeFlatTransfer {
         var received: Int64 = 0
         var windowBytes: Int64 = 0
         var windowStart = Date()
+        var buffer = Data()
         do {
             for try await byte in bytes {
                 try Task.checkCancellation()
-                try handle.write(contentsOf: Data([byte]))
+                buffer.append(byte)
                 received += 1; windowBytes += 1
+                if buffer.count >= 65536 {
+                    try handle.write(contentsOf: buffer)
+                    buffer.removeAll(keepingCapacity: true)
+                }
                 if received % 262144 == 0 {
                     let elapsed = max(0.1, Date().timeIntervalSince(windowStart))
                     progress(offset + received, total, Int64(Double(windowBytes) / elapsed))
                     windowBytes = 0; windowStart = Date()
                 }
             }
+            if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
             try handle.close()
         } catch {
             try? handle.close()
@@ -629,6 +637,12 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let partialURL = dir.appendingPathComponent(partialName)
                 let offset = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? NSNumber)?.int64Value ?? 0
                 jobs[index].partialFileName = partialName; jobs[index].resumeOffset = offset; persistQueue()
+                if asset.isManifest {
+                    // FFmpeg reads the exposed manifest directly so relative HLS segments,
+                    // encryption keys, initialization maps and byte ranges remain valid.
+                    inputURLs.append(asset.url)
+                    continue
+                }
                 let downloaded = try await TrapTubeFlatTransfer.download(asset, to: partialURL, startingAt: offset) { [weak self] bytes, total, speed in
                     Task { @MainActor in
                         guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
@@ -677,8 +691,12 @@ final class TrapTubeDownloadManager: ObservableObject {
         Task {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
-                let video = media.videoAssets.first(where: { $0.url == job.selectedVideoURL }) ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL })
-                let audio = media.audioAssets.first(where: { $0.url == job.selectedAudioURL })
+                let selectedVideo = media.videoAssets.first(where: { $0.url == job.selectedVideoURL }) ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL })
+                let selectedAudio = media.audioAssets.first(where: { $0.url == job.selectedAudioURL })
+                let video = job.mode == "audio" ? nil : selectedVideo
+                let audio = job.mode == "audio"
+                    ? (selectedAudio ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL }))
+                    : selectedAudio
                 start(jobID: id, media: media, video: video, audio: audio, format: job.mode == "audio" ? "m4a" : "mp4")
             } catch { lastError = error.localizedDescription }
         }
