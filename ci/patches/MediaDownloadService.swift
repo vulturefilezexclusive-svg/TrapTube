@@ -33,7 +33,7 @@ struct TrapTubeFlatAsset: Codable, Identifiable, Hashable {
     let bitrate: Int?
     let label: String
     let isManifest: Bool
-    let headers: [String: String]
+    var headers: [String: String]
     var representationID: String? = nil
     var streamIndex: Int? = nil
     var initializationURL: URL? = nil
@@ -170,6 +170,22 @@ struct TrapTubeStreamResolver {
             return try await resolve(candidate, title: title)
         }
         throw TrapTubeResolverError.unsupportedSite
+    }
+
+    func resolveManifest(_ source: URL, title: String, format: String,
+                         headers: [String: String]) async throws -> TrapTubeResolvedMedia {
+        var request = URLRequest(url: source)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw TrapTubeResolverError.badResponse
+        }
+        if format == "hls" {
+            return try await parseHLS(data: data, source: source, title: title, headers: headers)
+        }
+        return try parseDASH(data: data, source: source, title: title, headers: headers)
     }
 
     private func htmlMediaCandidates(data: Data, baseURL: URL) -> [URL] {
@@ -610,14 +626,33 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
                     isManifest: false, headers: headers))
             }
         }
-        if muxed.isEmpty && videos.isEmpty {
-            let manifest = (streaming["dashManifestUrl"] as? String).flatMap(URL.init(string:))
-                ?? (streaming["hlsManifestUrl"] as? String).flatMap(URL.init(string:))
-            if let manifest {
-                muxed.append(TrapTubeFlatAsset(url: manifest, kind: .muxed,
-                    mimeType: manifest.pathExtension.lowercased() == "m3u8" ? "application/vnd.apple.mpegurl" : "application/dash+xml",
-                    height: nil, bitrate: nil, label: "YouTube adaptive manifest", isManifest: true,
-                    headers: baseHeaders))
+        if videos.isEmpty || audios.isEmpty {
+            let dashManifest = (streaming["dashManifestUrl"] as? String).flatMap(URL.init(string:))
+            let hlsManifest = (streaming["hlsManifestUrl"] as? String).flatMap(URL.init(string:))
+            if let manifest = dashManifest ?? hlsManifest {
+                let manifestFormat = dashManifest != nil ? "dash" : "hls"
+                var manifestHeaders = baseHeaders
+                if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: manifest) {
+                    manifestHeaders["Cookie"] = cookie
+                }
+                if let parsed = try? await TrapTubeStreamResolver(adapters: []).resolveManifest(
+                    manifest, title: resolvedTitle, format: manifestFormat, headers: manifestHeaders
+                ) {
+                    func withHeaders(_ asset: TrapTubeFlatAsset) -> TrapTubeFlatAsset {
+                        var copy = asset
+                        copy.headers = manifestHeaders
+                        return copy
+                    }
+                    videos += parsed.videoAssets.map(withHeaders)
+                    audios += parsed.audioAssets.map(withHeaders)
+                    muxed += parsed.muxedAssets.map(withHeaders)
+                }
+                if videos.isEmpty && audios.isEmpty && muxed.isEmpty {
+                    muxed.append(TrapTubeFlatAsset(url: manifest, kind: .muxed,
+                        mimeType: manifestFormat == "hls" ? "application/vnd.apple.mpegurl" : "application/dash+xml",
+                        height: nil, bitrate: nil, label: "YouTube adaptive manifest", isManifest: true,
+                        headers: manifestHeaders))
+                }
             }
         }
         guard !videos.isEmpty || !audios.isEmpty || !muxed.isEmpty else {
