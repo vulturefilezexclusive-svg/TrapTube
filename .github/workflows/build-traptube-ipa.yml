@@ -23,6 +23,106 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.build_candidate)
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and extract Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f ci/source.zip
+          unzip -tq ci/source.zip
+          mkdir -p work
+          unzip -oq ci/source.zip -d work
+          test -f work/TrapTube/TrapTube.xcodeproj/project.pbxproj
+
+      - name: Apply TrapTube source overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE_SOURCE="$(find work/TrapTube -type f -name AudioEngineManager.swift -print -quit)"
+          VIEW_SOURCE="$(find work/TrapTube -type f -name HomeView.swift -print -quit)"
+          MODEL_SOURCE="$(find work/TrapTube -type f -name Track.swift -print -quit)"
+          COMPONENTS_FILE="$(find work/TrapTube -type f -name Components.swift -print -quit)"
+          test -n "$SERVICE_SOURCE" && test -n "$VIEW_SOURCE" && test -n "$MODEL_SOURCE" && test -n "$COMPONENTS_FILE"
+          SERVICES_DIR="$(dirname "$SERVICE_SOURCE")"
+          VIEWS_DIR="$(dirname "$VIEW_SOURCE")"
+          MODELS_DIR="$(dirname "$MODEL_SOURCE")"
+          cp ci/patches/AudioEngineManager.swift "$SERVICES_DIR/AudioEngineManager.swift"
+          cp ci/patches/LibraryStore.swift "$SERVICES_DIR/LibraryStore.swift"
+          cp ci/patches/ThemeManager.swift "$SERVICES_DIR/ThemeManager.swift"
+          cp ci/patches/TypeTypeService.swift "$SERVICES_DIR/TypeTypeService.swift"
+          cp ci/patches/GoogleYouTubeAuth.swift "$SERVICES_DIR/GoogleYouTubeAuth.swift"
+          cp ci/patches/StemSeparationService.swift "$SERVICES_DIR/StemSeparationService.swift"
+          cp ci/patches/SettingsView.swift "$VIEWS_DIR/SettingsView.swift"
+          cp ci/patches/YouTubeView.swift "$VIEWS_DIR/YouTubeView.swift"
+          cp ci/patches/StemStudioView.swift "$VIEWS_DIR/StemStudioView.swift"
+          cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
+          python3 ci/patches/KeepImportAction.py work/TrapTube
+          python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
+          python3 - "$COMPONENTS_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          source = path.read_text().replace('title: "YouTube"', 'title: "TrapTube"')
+          path.write_text(source)
+          PY
+
+      - name: Make the TrapTube app icon available to the player menu
+        shell: bash
+        run: |
+          set -euo pipefail
+          ICON_SET="$(find work/TrapTube -type d -name 'AppIcon.appiconset' -print -quit)"
+          if [[ -n "$ICON_SET" ]]; then
+            ICON_SOURCE="$(python3 - "$ICON_SET" <<'PYICON'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          images = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+          print(max(images, key=lambda p: p.stat().st_size) if images else "")
+          PYICON
+          )"
+            if [[ -n "$ICON_SOURCE" ]]; then
+              ICON_ASSETS="$(dirname "$ICON_SET")"
+              mkdir -p "$ICON_ASSETS/TrapTubeIcon.imageset"
+              cp "$ICON_SOURCE" "$ICON_ASSETS/TrapTubeIcon.imageset/TrapTubeIcon.png"
+              cat > "$ICON_ASSETS/TrapTubeIcon.imageset/Contents.json" <<'JSON'
+          {
+            "images": [{"filename": "TrapTubeIcon.png", "idiom": "universal"}],
+            "info": {"author": "xcode", "version": 1}
+          }
+          JSON
+            fi
+          fi
+
+      - name: Resolve FFmpegKit and Demucs packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          gem install xcodeproj --no-document
+          GOOGLE_AUTH_SOURCE="$(find work/TrapTube -type f -name GoogleYouTubeAuth.swift -print -quit)"
+          test -n "$GOOGLE_AUTH_SOURCE"
+          ruby ci/patches/AddFFmpegKitPackage.rb work/TrapTube/TrapTube.xcodeproj "$GOOGLE_AUTH_SOURCE"
+          xcodebuild -resolvePackageDependencies -project work/TrapTube/TrapTube.xcodeproj -scheme TrapTube
+
+      - name: Compile TrapTube for device without packaging an IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project work/TrapTube/TrapTube.xcodeproj \
+            -scheme TrapTube \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
   build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_candidate
     runs-on: xcode-27
