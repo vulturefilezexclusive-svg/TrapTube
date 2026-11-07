@@ -1130,7 +1130,9 @@ final class TrapTubeDownloadManager: ObservableObject {
             let chosenAudio = eligibleAudio.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 ?? audioCandidates.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
             let chosenMuxed = bestVideoAsset(in: media.muxedAssets, maximumHeight: height)
-            let hasSeparatePair = mode != "audio" && chosenVideo != nil && chosenAudio != nil
+            let separatePairIsBest = chosenVideo != nil && chosenAudio != nil &&
+                (chosenMuxed == nil || (chosenVideo?.height ?? 0) >= (chosenMuxed?.height ?? 0))
+            let hasSeparatePair = mode != "audio" && separatePairIsBest
             let selectedVideo = mode == "audio" ? nil : (hasSeparatePair ? chosenVideo : (chosenMuxed ?? chosenVideo))
             let selectedAudio = mode == "audio" ? (chosenAudio ?? chosenMuxed) : (hasSeparatePair ? chosenAudio : nil)
             if mode == "audio" && selectedAudio == nil { throw TrapTubeResolverError.noStreams }
