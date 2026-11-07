@@ -208,7 +208,7 @@ final class AudioEngineManager: ObservableObject {
             let frameCount = Int(buffer.frameLength)
             guard frameCount >= TrapTubeVisualizerDSP.fftSize else { return }
             let channelCount = Int(buffer.format.channelCount)
-            let fftSize = Self.visualizerFFTSize
+            let fftSize = TrapTubeVisualizerDSP.fftSize
             var mono = [Float](repeating: 0, count: fftSize)
             for index in 0..<fftSize {
                 var sample: Float = 0
