@@ -30,7 +30,11 @@ struct TrapTubeDownloadedMedia: Codable, Identifiable {
 enum TrapTubeAssetKind: String, Codable { case video, audio, muxed }
 
 struct TrapTubeFlatAsset: Codable, Identifiable, Hashable {
-    var id: String { url.absoluteString + "|" + kind.rawValue }
+    var id: String {
+        let discriminator = representationID ?? streamIndex.map { String($0) }
+            ?? "\(height ?? -1):\(bitrate ?? -1)"
+        return url.absoluteString + "|" + kind.rawValue + "|" + discriminator
+    }
     let url: URL
     let kind: TrapTubeAssetKind
     let mimeType: String
@@ -102,9 +106,19 @@ enum TrapTubeWebCookieBridge {
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
         }
         let host = url.host?.lowercased() ?? ""
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        let isSecureRequest = url.scheme?.lowercased() == "https"
         let matching = cookies.filter { cookie in
-            let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            return host == domain || host.hasSuffix("." + domain)
+            let rawDomain = cookie.domain.lowercased()
+            let domain = rawDomain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            let domainMatches = rawDomain.hasPrefix(".")
+                ? (host == domain || host.hasSuffix("." + domain))
+                : host == domain
+            let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
+            let pathMatches = requestPath == cookiePath ||
+                requestPath.hasPrefix(cookiePath.hasSuffix("/") ? cookiePath : cookiePath + "/")
+            let secureMatches = !cookie.isSecure || isSecureRequest
+            return domainMatches && pathMatches && secureMatches
         }
         guard !matching.isEmpty else { return nil }
         return matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
@@ -138,7 +152,19 @@ struct TrapTubeStreamResolver {
     private let adapters: [any TrapTubeStreamProviderAdapter]
     init(adapters: [any TrapTubeStreamProviderAdapter] = [TrapTubeYouTubeAdapter()]) { self.adapters = adapters }
 
-    func resolve(_ source: URL, title: String) async throws -> TrapTubeResolvedMedia {
+    private func boundedGET(_ request: URLRequest, limit: Int) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        var data = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            data.append(byte)
+            if data.count >= limit { break }
+        }
+        return (data, response)
+    }
+
+    func resolve(_ source: URL, title: String, depth: Int = 0) async throws -> TrapTubeResolvedMedia {
+        guard depth < 3 else { throw TrapTubeResolverError.unsupportedSite }
         if let adapter = adapters.first(where: { $0.canResolve(source) }) {
             return try await adapter.resolve(source, title: title)
         }
@@ -180,7 +206,7 @@ struct TrapTubeStreamResolver {
             // Some providers reject HEAD; inspect a bounded initial response instead.
             request.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await boundedGET(request, limit: (isHLS || isDASH) ? 8_000_000 : 1_048_576)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
         let responseMime = (manifestResponse.mimeType ?? "").lowercased()
@@ -219,7 +245,7 @@ struct TrapTubeStreamResolver {
         }
         if responseMime.contains("text/html") || responseMime.isEmpty || mime.contains("text/html"),
            let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
-            return try await resolve(candidate, title: title)
+            return try await resolve(candidate, title: title, depth: depth + 1)
         }
         throw TrapTubeResolverError.unsupportedSite
     }
@@ -418,7 +444,7 @@ struct TrapTubeStreamResolver {
             let inheritedList = element("SegmentList", in: adaptationHeader) ?? periodList
             let inheritedSegmentBase = element("SegmentBase", in: adaptationHeader) ?? periodSegmentBase
             let inheritedBase = elementText("BaseURL", in: adaptationHeader) ?? periodBase
-            let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
+            let representations = splitElements("Representation", in: adaptationBody)
             for block in representations {
                 guard let end = block.range(of: "</Representation>") else { continue }
                 let segment = String(block[..<end.lowerBound])
@@ -554,7 +580,26 @@ struct TrapTubeStreamResolver {
     private func elementText(_ name: String, in text: String) -> String? {
         guard let opening = text.range(of: "<\(name)>"),
               let closing = text.range(of: "</\(name)>", range: opening.upperBound..<text.endIndex) else { return nil }
-        return String(text[opening.upperBound..<closing.lowerBound])
+        return xmlUnescape(String(text[opening.upperBound..<closing.lowerBound]))
+    }
+
+    private func xmlUnescape(_ value: String) -> String {
+        value.replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    private func splitElements(_ name: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: "<\(name)(?=[\\s>/])") else { return [] }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        return matches.enumerated().map { index, match in
+            let start = match.range.location + match.range.length
+            let end = index + 1 < matches.count ? matches[index + 1].range.location : ns.length
+            return ns.substring(with: NSRange(location: start, length: end - start))
+        }
     }
 
     private func firstTag(_ name: String, in text: String) -> String? {
@@ -615,7 +660,7 @@ struct TrapTubeStreamResolver {
         let ns = value as NSString
         for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)) where match.numberOfRanges > 2 {
             result[ns.substring(with: match.range(at: 1))] =
-                ns.substring(with: match.range(at: 2)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                xmlUnescape(ns.substring(with: match.range(at: 2)).trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
         }
         return result
     }
@@ -776,6 +821,8 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             query.removeAll { $0.name == parameter }
             query.append(URLQueryItem(name: parameter, value: signature))
             media.queryItems = query
+        } else if items.contains(where: { $0.name == "s" }) {
+            return nil
         }
         return media.url
     }
@@ -809,160 +856,142 @@ enum TrapTubeFlatTransferError: LocalizedError {
 }
 
 enum TrapTubeFlatTransfer {
+    private static let chunkSize: Int64 = 4 * 1024 * 1024
+
+    private static func fileSize(_ url: URL) -> Int64 {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    private static func append(_ source: URL, to destination: URL) throws -> Int64 {
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        let output = try FileHandle(forWritingTo: destination)
+        defer { try? output.close() }
+        try output.seekToEnd()
+        var written: Int64 = 0
+        while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+            written += Int64(chunk.count)
+        }
+        return written
+    }
+
     static func download(_ asset: TrapTubeFlatAsset, to destination: URL, startingAt offset: Int64 = 0,
                          rangeAttempt: Int = 0,
                          progress: @escaping (Int64, Int64, Int64) -> Void) async throws -> URL {
-        var request = URLRequest(url: asset.url)
-        request.timeoutInterval = 180
-        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        for (key, value) in asset.headers { request.setValue(value, forHTTPHeaderField: key) }
-        if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
-        if http.statusCode == 416, offset > 0,
-           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-           let totalText = contentRange.split(separator: "/").last,
-           let total = Int64(totalText), total == offset {
-            progress(offset, total, 0)
-            return destination
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var position: Int64 = 0
+        if offset > 0, fm.fileExists(atPath: destination.path) {
+            position = min(offset, fileSize(destination))
+            let handle = try FileHandle(forWritingTo: destination)
+            try handle.truncate(atOffset: UInt64(position))
+            try handle.close()
+        } else {
+            fm.createFile(atPath: destination.path, contents: nil)
         }
-        if http.statusCode == 416, offset > 0,
-           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-           let totalString = contentRange.split(separator: "/").last,
-           let expected = Int64(totalString),
-           let actual = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value,
-           actual == expected {
-            return destination
-        }
-        guard http.statusCode == 200 || http.statusCode == 206 else {
-            throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
-        }
-        let effectiveOffset: Int64 = http.statusCode == 206 ? offset : 0
-        var total = http.expectedContentLength > 0 ? http.expectedContentLength + effectiveOffset : 0
-        if http.statusCode == 206 {
+        var total: Int64 = 0
+        var stalls = rangeAttempt
+
+        while true {
+            try Task.checkCancellation()
+            var request = URLRequest(url: asset.url)
+            request.timeoutInterval = 60
+            request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            for (key, value) in asset.headers { request.setValue(value, forHTTPHeaderField: key) }
+            request.setValue("bytes=\(position)-\(position + chunkSize - 1)", forHTTPHeaderField: "Range")
+
+            let started = Date()
+            let (tmp, response) = try await URLSession.shared.download(for: request)
+            defer { try? fm.removeItem(at: tmp) }
+            guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
+
+            if http.statusCode == 416, position > 0 {
+                progress(position, position, 0)
+                return destination
+            }
+            guard http.statusCode == 200 || http.statusCode == 206 else {
+                throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
+            }
+            if http.statusCode == 200 {
+                try? fm.removeItem(at: destination)
+                try fm.moveItem(at: tmp, to: destination)
+                let size = fileSize(destination)
+                progress(size, size, 0)
+                return destination
+            }
             guard let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
                   let rangeValue = contentRange.split(separator: " ").last else {
                 throw TrapTubeResolverError.unsupportedManifest("The server returned a partial response without a valid Content-Range header.")
             }
-            let rangeParts = rangeValue.split(separator: "/")
-            let bounds = rangeParts.first?.split(separator: "-") ?? []
-            guard bounds.count == 2, let receivedStart = Int64(bounds[0]),
-                  receivedStart == offset else {
+            let parts = rangeValue.split(separator: "/")
+            let bounds = parts.first?.split(separator: "-") ?? []
+            guard bounds.count == 2, Int64(bounds[0]) == position else {
                 throw TrapTubeResolverError.unsupportedManifest("The server returned a mismatched byte range; the partial file was not appended.")
             }
-            if rangeParts.count == 2, let advertisedTotal = Int64(rangeParts[1]), advertisedTotal > 0 {
-                total = advertisedTotal
+            if parts.count == 2, let advertised = Int64(parts[1]), advertised > 0 { total = advertised }
+
+            let received = try append(tmp, to: destination)
+            position += received
+            stalls = received > 0 ? 0 : stalls + 1
+            guard stalls < 16 else {
+                throw TrapTubeResolverError.unsupportedManifest("The server repeatedly returned empty byte ranges. The partial file was kept; resume the task to continue.")
             }
+            let elapsed = max(0.1, Date().timeIntervalSince(started))
+            progress(position, total, Int64(Double(received) / elapsed))
+            if total > 0 ? position >= total : received < chunkSize { return destination }
         }
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: destination.path) {
-            FileManager.default.createFile(atPath: destination.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: destination)
-        if effectiveOffset == 0 { try handle.truncate(atOffset: 0) } else { try handle.seekToEnd() }
-        var received: Int64 = 0, windowBytes: Int64 = 0, windowStart = Date()
-        var buffer = Data()
-        do {
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                buffer.append(byte); received += 1; windowBytes += 1
-                if buffer.count >= 65536 {
-                    try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true)
-                }
-                if received % 262144 == 0 {
-                    let elapsed = max(0.1, Date().timeIntervalSince(windowStart))
-                    progress(effectiveOffset + received, total, Int64(Double(windowBytes) / elapsed))
-                    windowBytes = 0; windowStart = Date()
-                }
-            }
-            if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
-            try handle.close()
-        } catch {
-            try? handle.close()
-            throw error
-        }
-        let finalBytes = effectiveOffset + received
-        if total > 0 && finalBytes < total {
-            if http.statusCode == 200 && offset > 0 {
-                throw TrapTubeResolverError.unsupportedManifest("This server ignored the resume range and returned an incomplete response. The partial file was kept, but this source does not currently support byte-range resume.")
-            }
-            guard rangeAttempt < 16 else {
-                throw TrapTubeResolverError.unsupportedManifest("The server repeatedly returned incomplete byte ranges. The partial file was kept; resume the task to continue.")
-            }
-            return try await download(asset, to: destination, startingAt: finalBytes,
-                                      rangeAttempt: rangeAttempt + 1, progress: progress)
-        }
-        progress(finalBytes, total, 0)
-        return destination
     }
 
     static func downloadSegmented(_ asset: TrapTubeFlatAsset, jobID: String, assetIndex: Int,
                                   directory: URL,
                                   progress: @escaping (Int64, Int64, Int64) -> Void) async throws -> URL {
         guard !asset.segmentURLs.isEmpty else { throw TrapTubeResolverError.noStreams }
+        let fm = FileManager.default
         let workDirectory = directory.appendingPathComponent("\(jobID)-\(assetIndex)-segments", isDirectory: true)
-        try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: workDirectory, withIntermediateDirectories: true)
+        let allPieces: [(URL, String)] = (asset.initializationURL.map { [($0, "init.partial")] } ?? [])
+            + asset.segmentURLs.enumerated().map { ($0.element, String(format: "segment-%06d.partial", $0.offset)) }
+        let totalPieces = allPieces.count
         var pieces: [URL] = []
         var completedBytes: Int64 = 0
-        var aggregateTotal: Int64 = 0
-        var aggregateSpeed: Int64 = 0
+        var donePieces = 0
 
-        func fetch(_ url: URL, name: String) async throws {
+        for (url, name) in allPieces {
+            try Task.checkCancellation()
             let partial = workDirectory.appendingPathComponent(name)
             let marker = workDirectory.appendingPathComponent(name + ".complete")
-            let offset = (try? FileManager.default.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
-            if FileManager.default.fileExists(atPath: marker.path) {
-                completedBytes += offset; aggregateTotal += offset; pieces.append(partial)
-                return
+            if fm.fileExists(atPath: marker.path) {
+                completedBytes += fileSize(partial)
+                donePieces += 1
+                pieces.append(partial)
+                continue
             }
-            let requestHeaders = await TrapTubeWebCookieBridge.forwarding(asset.headers, from: asset.url, to: url)
+            let headers = await TrapTubeWebCookieBridge.forwarding(asset.headers, from: asset.url, to: url)
             let descriptor = TrapTubeFlatAsset(url: url, kind: asset.kind, mimeType: asset.mimeType,
-                height: asset.height, bitrate: asset.bitrate, label: asset.label, isManifest: false,
-                headers: requestHeaders)
-            var lastTotal: Int64 = 0
-            let result = try await download(descriptor, to: partial, startingAt: offset) { bytes, total, speed in
-                lastTotal = total
-                aggregateSpeed = speed
-                progress(completedBytes + bytes, aggregateTotal + total, speed)
+                height: asset.height, bitrate: asset.bitrate, label: asset.label, isManifest: false, headers: headers)
+            let base = completedBytes
+            let done = donePieces
+            _ = try await download(descriptor, to: partial, startingAt: fileSize(partial)) { bytes, _, speed in
+                let estimate = done > 0 ? base / Int64(done) * Int64(totalPieces) : 0
+                progress(base + bytes, max(estimate, base + bytes), speed)
             }
-            let size = (try? FileManager.default.attributesOfItem(atPath: result.path)[.size] as? NSNumber)?.int64Value ?? 0
             try Data().write(to: marker, options: .atomic)
-            completedBytes += size
-            aggregateTotal += max(lastTotal, size)
-            pieces.append(result)
+            completedBytes += fileSize(partial)
+            donePieces += 1
+            pieces.append(partial)
         }
 
-        if let initializationURL = asset.initializationURL {
-            try await fetch(initializationURL, name: "init.partial")
-        }
-        for (index, segmentURL) in asset.segmentURLs.enumerated() {
+        let ext = asset.mimeType.contains("mpegurl") ? (asset.initializationURL == nil ? "ts" : "mp4") : "mp4"
+        let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.\(ext)")
+        try? fm.removeItem(at: output)
+        fm.createFile(atPath: output.path, contents: nil)
+        for piece in pieces {
             try Task.checkCancellation()
-            try await fetch(segmentURL, name: String(format: "segment-%06d.partial", index))
+            _ = try append(piece, to: output)
         }
-
-        let outputExtension = asset.mimeType.contains("mpegurl") ? (asset.initializationURL == nil ? "ts" : "mp4") : "mp4"
-        let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.\(outputExtension)")
-        if !FileManager.default.fileExists(atPath: output.path) {
-            FileManager.default.createFile(atPath: output.path, contents: nil)
-        }
-        let outputHandle = try FileHandle(forWritingTo: output)
-        try outputHandle.truncate(atOffset: 0)
-        do {
-            for piece in pieces {
-                let input = try FileHandle(forReadingFrom: piece)
-                defer { try? input.close() }
-                while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
-                    try Task.checkCancellation()
-                    try outputHandle.write(contentsOf: chunk)
-                }
-            }
-            try outputHandle.close()
-        } catch {
-            try? outputHandle.close()
-            throw error
-        }
-        progress(completedBytes, aggregateTotal, aggregateSpeed)
+        progress(completedBytes, completedBytes, 0)
         return output
     }
 }
@@ -1157,14 +1186,25 @@ final class TrapTubeDownloadManager: ObservableObject {
         return eligible.last ?? sorted.first
     }
 
+    private static func nativeFirst(_ assets: [TrapTubeFlatAsset], _ mime: String) -> [TrapTubeFlatAsset] {
+        let native = assets.filter {
+            let value = $0.mimeType.lowercased()
+            return value.contains(mime) || value.contains("mpegurl")
+        }
+        return native.isEmpty ? assets : native
+    }
+
     func enqueue(videoURL: URL, title: String, mode: String, quality: String,
                  format: String, bitrate: Int?, height: Int?) async {
         lastError = nil
         do {
             let media = try await resolver.resolve(videoURL, title: title)
             let id = UUID().uuidString
-            let chosenVideo = bestVideoAsset(in: media.videoAssets, maximumHeight: height)
-            let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets : media.audioAssets
+            let wantsNative = mode != "audio"
+            let videoPool = wantsNative ? Self.nativeFirst(media.videoAssets, "video/mp4") : media.videoAssets
+            let chosenVideo = bestVideoAsset(in: videoPool, maximumHeight: height)
+            let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets
+                : (wantsNative ? Self.nativeFirst(media.audioAssets, "audio/mp4") : media.audioAssets)
             let eligibleAudio = audioCandidates.filter { bitrate == nil || ($0.bitrate ?? 0) <= bitrate! }
             let chosenAudio = eligibleAudio.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 ?? audioCandidates.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
@@ -1222,10 +1262,17 @@ final class TrapTubeDownloadManager: ObservableObject {
         }
     }
 
-    private func updateJob(_ id: String, _ update: (inout TrapTubeDownloadTask) -> Void) {
+    private func updateJob(_ id: String, persist: Bool = true, _ update: (inout TrapTubeDownloadTask) -> Void) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         update(&jobs[index])
-        persistQueue()
+        if persist { persistQueue() }
+    }
+
+    private func cleanupArtifacts(jobID: String, in dir: URL) {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasPrefix("\(jobID)-") {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     private func run(jobID: String, workerToken: UUID, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
@@ -1242,6 +1289,10 @@ final class TrapTubeDownloadManager: ObservableObject {
         do {
             let dir = TrapTubeDownloadPaths.downloadsDirectory
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var excluded = URLResourceValues()
+            excluded.isExcludedFromBackup = true
+            var mutableDir = dir
+            try? mutableDir.setResourceValues(excluded)
             var inputURLs: [URL] = []
             let aggregate = TrapTubeAggregateProgress()
             let assets = [video, audio].compactMap { $0 }
@@ -1271,7 +1322,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                     let snapshot = aggregate.report(bytes: bytes, total: total, speed: speed)
                     Task { @MainActor in
                         guard let self, self.workerTokens[jobID] == workerToken else { return }
-                        self.updateJob(jobID) {
+                        self.updateJob(jobID, persist: false) {
                             $0.downloadedBytes = snapshot.0
                             $0.totalBytes = snapshot.1
                             $0.speedBytesPerSecond = snapshot.2
@@ -1305,9 +1356,8 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let measuredSpeed = rateMeter.update(bytes)
                 Task { @MainActor in
                     guard let self, self.workerTokens[jobID] == workerToken else { return }
-                    self.updateJob(jobID) {
+                    self.updateJob(jobID, persist: false) {
                         $0.stage = "Processing stream"
-                        $0.downloadedBytes = bytes
                         $0.speedBytesPerSecond = measuredSpeed
                     }
                 }
@@ -1341,6 +1391,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 $0.outputFileName = outputName
                 $0.speedBytesPerSecond = 0
             }
+            cleanupArtifacts(jobID: jobID, in: dir)
         } catch is CancellationError {
             guard workerTokens[jobID] == workerToken else { return }
             updateJob(jobID) { $0.status = "paused"; $0.stage = "Paused · can resume" }
@@ -1404,17 +1455,28 @@ final class TrapTubeDownloadManager: ObservableObject {
     }
 
     func resume(_ id: String) {
-        guard let job = jobs.first(where: { $0.id == id }), let source = job.sourceURL else { return }
+        guard let job = jobs.first(where: { $0.id == id }), let source = job.sourceURL,
+              (job.status == "paused" || job.status == "failed"),
+              workers[id] == nil, pendingWork[id] == nil else { return }
+        updateJob(id) { $0.status = "queued"; $0.stage = "Re-resolving stream"; $0.error = nil }
         Task {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
                 let selectedVideo = restoredVideoAsset(in: media, for: job)
                 let selectedAudio = restoredAudioAsset(in: media, for: job)
+                let videoChanged = job.selectedVideoRepresentationID != nil &&
+                    selectedVideo?.representationID != job.selectedVideoRepresentationID
+                let audioChanged = job.selectedAudioRepresentationID != nil &&
+                    selectedAudio?.representationID != job.selectedAudioRepresentationID
+                if videoChanged || audioChanged {
+                    cleanupArtifacts(jobID: id, in: TrapTubeDownloadPaths.downloadsDirectory)
+                    updateJob(id) { $0.partialFileName = nil; $0.resumeOffset = 0 }
+                }
                 let video = job.mode == "audio" ? nil : selectedVideo
                 start(jobID: id, media: media, video: video, audio: selectedAudio,
                       format: job.outputFormat ?? (job.mode == "audio" ? "m4a" : "mp4"))
             } catch {
-                lastError = error.localizedDescription
+                updateJob(id) { $0.status = "failed"; $0.error = error.localizedDescription }
             }
         }
     }

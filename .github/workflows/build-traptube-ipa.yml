@@ -50,35 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SERVICE_SOURCE="$(find work/TrapTube -type f -name AudioEngineManager.swift -print -quit)"
-          VIEW_SOURCE="$(find work/TrapTube -type f -name HomeView.swift -print -quit)"
-          MODEL_SOURCE="$(find work/TrapTube -type f -name Track.swift -print -quit)"
-          COMPONENTS_FILE="$(find work/TrapTube -type f -name Components.swift -print -quit)"
-          test -n "$SERVICE_SOURCE" && test -n "$VIEW_SOURCE" && test -n "$MODEL_SOURCE" && test -n "$COMPONENTS_FILE"
-          SERVICES_DIR="$(dirname "$SERVICE_SOURCE")"
-          VIEWS_DIR="$(dirname "$VIEW_SOURCE")"
-          MODELS_DIR="$(dirname "$MODEL_SOURCE")"
-          cp ci/patches/AudioEngineManager.swift "$SERVICES_DIR/AudioEngineManager.swift"
-          cp ci/patches/LibraryStore.swift "$SERVICES_DIR/LibraryStore.swift"
-          cp ci/patches/ThemeManager.swift "$SERVICES_DIR/ThemeManager.swift"
-          cp ci/patches/MediaDownloadService.swift "$SERVICES_DIR/MediaDownloadService.swift"
-          python3 ci/patches/RenameLegacyDownloadService.py "$SERVICES_DIR" "$(find work/TrapTube -type f -name project.pbxproj -print -quit)"
-          cp ci/patches/GoogleYouTubeAuth.swift "$SERVICES_DIR/GoogleYouTubeAuth.swift"
-          cp ci/patches/StemSeparationService.swift "$SERVICES_DIR/StemSeparationService.swift"
-          cp ci/patches/SettingsView.swift "$VIEWS_DIR/SettingsView.swift"
-          cp ci/patches/YouTubeView.swift "$VIEWS_DIR/YouTubeView.swift"
-          cp ci/patches/StemStudioView.swift "$VIEWS_DIR/StemStudioView.swift"
-          cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
-          python3 ci/patches/KeepImportAction.py work/TrapTube
-          python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
-          python3 ci/patches/ValidateNativeDownloader.py "$SERVICES_DIR/MediaDownloadService.swift" "$VIEWS_DIR/YouTubeView.swift" "$VIEWS_DIR/SettingsView.swift"
-          python3 - "$COMPONENTS_FILE" <<'PY'
-          from pathlib import Path
-          import sys
-          path = Path(sys.argv[1])
-          source = path.read_text().replace('title: "YouTube"', 'title: "TrapTube"')
-          path.write_text(source)
-          PY
+          bash ci/patches/ApplySourceOverlays.sh work/TrapTube
 
       - name: Make the TrapTube app icon available to the player menu
         shell: bash
@@ -140,7 +112,7 @@ jobs:
 
   build:
     needs: validate
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.build_candidate && needs.validate.result == 'success'
+    if: always() && ((github.event_name == 'push' && needs.validate.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.build_candidate && needs.validate.result == 'success'))
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
@@ -161,35 +133,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SERVICE_SOURCE="$(find work/TrapTube -type f -name AudioEngineManager.swift -print -quit)"
-          VIEW_SOURCE="$(find work/TrapTube -type f -name HomeView.swift -print -quit)"
-          MODEL_SOURCE="$(find work/TrapTube -type f -name Track.swift -print -quit)"
-          COMPONENTS_FILE="$(find work/TrapTube -type f -name Components.swift -print -quit)"
-          test -n "$SERVICE_SOURCE" && test -n "$VIEW_SOURCE" && test -n "$MODEL_SOURCE" && test -n "$COMPONENTS_FILE"
-          SERVICES_DIR="$(dirname "$SERVICE_SOURCE")"
-          VIEWS_DIR="$(dirname "$VIEW_SOURCE")"
-          MODELS_DIR="$(dirname "$MODEL_SOURCE")"
-          cp ci/patches/AudioEngineManager.swift "$SERVICES_DIR/AudioEngineManager.swift"
-          cp ci/patches/LibraryStore.swift "$SERVICES_DIR/LibraryStore.swift"
-          cp ci/patches/ThemeManager.swift "$SERVICES_DIR/ThemeManager.swift"
-          cp ci/patches/MediaDownloadService.swift "$SERVICES_DIR/MediaDownloadService.swift"
-          python3 ci/patches/RenameLegacyDownloadService.py "$SERVICES_DIR" "$(find work/TrapTube -type f -name project.pbxproj -print -quit)"
-          cp ci/patches/GoogleYouTubeAuth.swift "$SERVICES_DIR/GoogleYouTubeAuth.swift"
-          cp ci/patches/StemSeparationService.swift "$SERVICES_DIR/StemSeparationService.swift"
-          cp ci/patches/SettingsView.swift "$VIEWS_DIR/SettingsView.swift"
-          cp ci/patches/YouTubeView.swift "$VIEWS_DIR/YouTubeView.swift"
-          cp ci/patches/StemStudioView.swift "$VIEWS_DIR/StemStudioView.swift"
-          python3 ci/patches/KeepImportAction.py work/TrapTube
-          python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
-          cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
-          python3 - "$COMPONENTS_FILE" <<'PY'
-          from pathlib import Path
-          import sys
-          path = Path(sys.argv[1])
-          source = path.read_text()
-          source = source.replace('title: "YouTube"', 'title: "TrapTube"')
-          path.write_text(source)
-          PY
+          bash ci/patches/ApplySourceOverlays.sh work/TrapTube
 
       - name: Export app source files for feature integration review
         if: always()

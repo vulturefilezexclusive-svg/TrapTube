@@ -70,19 +70,22 @@ private struct StreamingHomeWebView: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
         web.scrollView.contentInsetAdjustmentBehavior = .never
+        context.coordinator.lastLoaded = url
         web.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
         context.coordinator.onWatch = onWatch
-        if web.url?.absoluteString != url.absoluteString && !web.isLoading {
+        if context.coordinator.lastLoaded != url {
+            context.coordinator.lastLoaded = url
             web.load(URLRequest(url: url))
         }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onWatch: (URL) -> Void
+        var lastLoaded: URL?
         init(onWatch: @escaping (URL) -> Void) { self.onWatch = onWatch }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -367,6 +370,7 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
         view.scrollView.backgroundColor = .black
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
+        context.coordinator.lastLoaded = url
         onCreated(view)
         view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
         return view
@@ -375,11 +379,15 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.onMessage = onMessage
         context.coordinator.setEQ(gains: gains, bass: bass, master: master)
-        if uiView.url != url && !uiView.isLoading { uiView.load(URLRequest(url: url)) }
+        if context.coordinator.lastLoaded != url {
+            context.coordinator.lastLoaded = url
+            uiView.load(URLRequest(url: url))
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var onMessage: ([String: Any]) -> Void
+        var lastLoaded: URL?
         weak var webView: WKWebView?
         private var gains: [Float]
         private var bass: Float
@@ -499,6 +507,7 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
           };
           video.addEventListener("play", () => { resumeAudio(); state(); });
           video.addEventListener("playing", resumeAudio);
+          video.addEventListener("playing", () => setTimeout(() => window.__traptubeScanMenus && window.__traptubeScanMenus(), 1500), { once: true });
           video.addEventListener("canplay", resumeAudio);
           ["timeupdate","durationchange","play","pause","ended"].forEach(event => video.addEventListener(event, state));
           apply();
@@ -538,20 +547,20 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
       };
       const youtubeSettings = () => document.querySelector(".ytp-settings-button");
       const menuItems = () => Array.from(document.querySelectorAll(".ytp-panel-menu .ytp-menuitem, .ytp-panel-menu [role=menuitemradio]"));
-      const textOf = node => (node.innerText || node.textContent || "").trim().replace(/\\s+/g, " ");
+      const textOf = node => (node.innerText || node.textContent || "").trim().replace(/\s+/g, " ");
       const openQualityMenu = callback => {
         const trigger = youtubeSettings();
         if (!trigger) { callback([]); return; }
         trigger.click();
         setTimeout(() => {
-          const quality = menuItems().find(node => /^quality(?:\\s|$)/i.test(textOf(node)));
+          const quality = menuItems().find(node => /^quality(?:\s|$)/i.test(textOf(node)));
           if (!quality) { trigger.click(); callback([]); return; }
           quality.click();
           setTimeout(() => callback(menuItems().map(node => ({
             label:textOf(node),
             selected:node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true" ||
               node.classList.contains("ytp-menuitem-selected")
-          })).filter(item => /\\d{3,4}p|auto/i.test(item.label))), 180);
+          })).filter(item => /\d{3,4}p|auto/i.test(item.label))), 180);
         }, 180);
       };
       window.__traptubeScanMenus = () => openQualityMenu(items => {
@@ -678,7 +687,7 @@ private struct TrapTubePlayerMenu: View {
 private struct TrapTubeDownloadsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: LibraryStore
-    @StateObject private var manager = TrapTubeDownloadManager.shared
+    @ObservedObject private var manager = TrapTubeDownloadManager.shared
 
     let title: String
     let videoURL: URL

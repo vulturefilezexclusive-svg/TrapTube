@@ -284,14 +284,14 @@ private struct TrapTubeHuePicker: View {
                 HStack {
                     Spacer(minLength: 0)
                     ZStack {
-                        Circle().stroke(AngularGradient(gradient: Gradient(colors: [
-                            .red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink, .red
-                        ]), center: .center), style: StrokeStyle(lineWidth: 22, lineCap: .round))
-                        Circle().stroke(.white.opacity(0.12), lineWidth: 1).padding(11)
+                        Circle().strokeBorder(AngularGradient(gradient: Gradient(colors: (0...12).map {
+                            Color(hue: Double($0) / 12, saturation: 1, brightness: 1)
+                        }), center: .center), lineWidth: 22)
+                            .rotationEffect(.degrees(-90))
                         Circle().fill(selected).frame(width: 28, height: 28)
                             .overlay(Circle().stroke(.white, lineWidth: 3))
-                            .offset(x: 0, y: -(side / 2 - 11))
-                            .rotationEffect(.degrees(hue * 360))
+                            .position(x: side / 2 + (side / 2 - 11) * sin(hue * 2 * .pi),
+                                      y: side / 2 - (side / 2 - 11) * cos(hue * 2 * .pi))
                     }
                     .frame(width: side, height: side)
                     .contentShape(Circle())
@@ -341,7 +341,14 @@ private struct TrapTubeHuePicker: View {
         .onChange(of: initialColor) { _, _ in syncFromInitialColor() }
     }
 
+    private func hexString(_ color: Color) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "%02X%02X%02X", Int((r * 255).rounded()), Int((g * 255).rounded()), Int((b * 255).rounded()))
+    }
+
     private func syncFromInitialColor() {
+        guard hexString(initialColor) != hexString(selected) else { return }
         let ui = UIColor(initialColor)
         var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
         ui.getHue(&h, saturation: &s, brightness: &v, alpha: &a)
