@@ -253,6 +253,35 @@ jobs:
           APP_PATH="$STAGING/Payload/TrapTube.app"
           test -d "$APP_PATH/Frameworks" || { echo "ERROR: app Frameworks directory missing."; exit 6; }
           EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")
+          # FFmpegKit's libavcodec was incorrectly linked to the Swift CoreMedia
+          # overlay for a C symbol that is exported by Apple's CoreMedia framework.
+          # Redirect that load command to the actual system framework before embedding
+          # Swift runtime dependencies.
+          FIXED_COREMEDIA=0
+          while IFS= read -r -d '' BINARY; do
+            if /usr/bin/otool -L "$BINARY" 2>/dev/null | grep -Fq '@rpath/libswiftCoreMedia.dylib'; then
+              echo "Correcting CoreMedia provider in: $BINARY"
+              /usr/bin/install_name_tool -change \
+                '@rpath/libswiftCoreMedia.dylib' \
+                '/System/Library/Frameworks/CoreMedia.framework/CoreMedia' \
+                "$BINARY"
+              FIXED_COREMEDIA=$((FIXED_COREMEDIA + 1))
+            fi
+          done < <(find "$APP_PATH/Frameworks" -type f -print0)
+          if [[ "$FIXED_COREMEDIA" -eq 0 ]]; then
+            echo "ERROR: No bundled binary referenced @rpath/libswiftCoreMedia.dylib; expected FFmpeg linkage was not found." >&2
+            exit 7
+          fi
+          echo "Corrected $FIXED_COREMEDIA bundled binary/binaries to use Apple's CoreMedia framework."
+          # Verify the incorrect provider is gone and the system CoreMedia dependency is present.
+          if find "$APP_PATH/Frameworks" -type f -print0 | while IFS= read -r -d '' BINARY; do
+            /usr/bin/otool -L "$BINARY" 2>/dev/null | grep -Fq '@rpath/libswiftCoreMedia.dylib' && exit 1 || true
+          done; then
+            :
+          else
+            echo "ERROR: A bundled binary still references the incorrect Swift CoreMedia provider." >&2
+            exit 7
+          fi
           test -s "$APP_PATH/$EXECUTABLE"
           SWIFT_STDLIB_TOOL="$(xcrun --find swift-stdlib-tool)"
           echo "Embedding Swift runtime libraries referenced by the app and bundled frameworks."
