@@ -7,6 +7,8 @@ combined = "\n".join((service, player, settings))
 required = {
     "TrapTubeStreamResolver": service,
     "TrapTubeYouTubeAdapter": service,
+    "formatURL(from row:": service,
+    "signatureCipher": service,
     "TrapTubeFlatTransfer": service,
     "TrapTubeDownloadTask": service,
     "TrapTubeMP4Box": service,
