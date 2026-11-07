@@ -27,7 +27,7 @@ struct YouTubeView: View {
             VStack(alignment: .leading, spacing: 18) {
                 BrandHeader().padding(.horizontal, 20)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Discover").font(.largeTitle.bold()).foregroundStyle(.white)
+                    Text("TrapTube").font(.largeTitle.bold()).foregroundStyle(.white)
                     Text("Search your music library and browse TypeType videos.")
                         .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
                 }.padding(.horizontal, 18)
@@ -217,6 +217,7 @@ private struct TypeTypeWatchSheet: View {
     @State private var videoQualities: [TypeTypePlayerOption] = []
     @State private var audioTracks: [TypeTypePlayerOption] = []
     @State private var showEQ = false
+    @State private var showTrapTubeMenu = false
 
     var body: some View {
         ZStack {
@@ -230,7 +231,12 @@ private struct TypeTypeWatchSheet: View {
                             .frame(width: 38, height: 38).background(.black.opacity(0.7), in: Circle())
                     }
                     Text(title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
-                    Spacer()
+                    Spacer(minLength: 4)
+                    Button { showTrapTubeMenu = true } label: {
+                        Image("AppIcon").resizable().scaledToFill().frame(width: 38, height: 38)
+                            .clipShape(RoundedRectangle(cornerRadius: 11))
+                            .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.25), lineWidth: 1))
+                    }.accessibilityLabel("Open TrapTube player menu")
                 }.padding(14).background(LinearGradient(colors: [.black.opacity(0.85), .clear], startPoint: .top, endPoint: .bottom))
                 Spacer()
                 VStack(spacing: 10) {
@@ -297,6 +303,16 @@ private struct TypeTypeWatchSheet: View {
         }
         .sheet(isPresented: $showEQ) {
             EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
+        }
+        .confirmationDialog("TrapTube player", isPresented: $showTrapTubeMenu, titleVisibility: .visible) {
+            Button("Downloads") { }
+            Button("Playback tools") { showEQ = true }
+            Button("Library") { dismiss() }
+            Button("Transcript") { }
+            Button("Information") { }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("TrapTube player controls for this video.")
         }
         .onChange(of: audio.eqGains) { _, _ in applyEQ() }
         .onChange(of: audio.bassBoost) { _, _ in applyEQ() }
