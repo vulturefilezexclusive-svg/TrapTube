@@ -34,8 +34,8 @@ struct TrapTubeFlatAsset: Codable, Identifiable, Hashable {
     let label: String
     let isManifest: Bool
     let headers: [String: String]
-    let representationID: String? = nil
-    let streamIndex: Int? = nil
+    var representationID: String? = nil
+    var streamIndex: Int? = nil
 }
 
 struct TrapTubeResolvedMedia: Codable {
