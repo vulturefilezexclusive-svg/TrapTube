@@ -335,12 +335,15 @@ private struct TrapTubeHuePicker: View {
                 Text("\(Int(brightness * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.white)
             }
         }
-        .onAppear {
-            let ui = UIColor(initialColor)
-            var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
-            ui.getHue(&h, saturation: &s, brightness: &v, alpha: &a)
-            hue = Double(h); saturation = Double(s); brightness = Double(v)
-        }
+        .onAppear { syncFromInitialColor() }
+        .onChange(of: initialColor) { _, _ in syncFromInitialColor() }
+    }
+
+    private func syncFromInitialColor() {
+        let ui = UIColor(initialColor)
+        var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
+        ui.getHue(&h, saturation: &s, brightness: &v, alpha: &a)
+        hue = Double(h); saturation = Double(s); brightness = Double(v)
     }
 
     private func publish() { onChange(selected) }
