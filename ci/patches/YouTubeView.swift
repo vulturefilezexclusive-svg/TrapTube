@@ -105,36 +105,10 @@ private struct StreamingHomeWebView: UIViewRepresentable {
     }
 }
 
-private struct YouTubeVideoRow: View {
-    let video: YouTubeVideo
-    let tint: Color
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack(alignment: .bottomTrailing) {
-                AsyncImage(url: URL(string: video.thumbnailUrl)) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.07)).overlay(Image(systemName: "play.rectangle").foregroundStyle(.white.opacity(0.35)))
-                }
-                .frame(width: 132, height: 82).clipShape(RoundedRectangle(cornerRadius: 12))
-                Text(video.isLive == true ? "LIVE" : video.displayDuration)
-                    .font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.white)
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(video.isLive == true ? Color.red : Color.black.opacity(0.8), in: Capsule()).padding(5)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(video.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2).multilineTextAlignment(.leading)
-                Text(video.uploaderName).font(.caption).foregroundStyle(Color(hex: "AAA6AA")).lineLimit(1)
-                if let views = video.viewCount {
-                    Text("\(views.formatted()) views").font(.caption2).foregroundStyle(Color(hex: "858185"))
-                }
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(tint)
-        }
-        .padding(8)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-    }
+private struct YouTubePlayerOption: Identifiable {
+    let label: String
+    let selected: Bool
+    var id: String { label }
 }
 
 private struct YouTubeWatchSheet: View {
