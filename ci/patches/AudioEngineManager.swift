@@ -25,6 +25,10 @@ final class AudioEngineManager: ObservableObject {
     private let bassStage = AVAudioUnitEQ(numberOfBands: 1)
     private let masterStage = AVAudioUnitEQ(numberOfBands: 0)
     private var currentFile: AVAudioFile?
+    // Compatibility decoder used when AVAudioEngine cannot schedule a valid imported file.
+    // AVAudioPlayer supports the native iOS audio formats and prevents a working import
+    // from becoming unplayable solely because the EQ graph cannot start on a device.
+    private var compatibilityPlayer: AVAudioPlayer?
     private var queue: [Track] = []
     private var queueIndex = 0
     private var engineConfigured = false
@@ -44,15 +48,31 @@ final class AudioEngineManager: ObservableObject {
     func togglePlayback() {
         guard currentTrack != nil else { return }
         if isPlaying {
-            playerNode.pause()
+            if let compatibilityPlayer {
+                compatibilityPlayer.pause()
+            } else {
+                playerNode.pause()
+            }
             isPlaying = false
+        } else if let compatibilityPlayer {
+            guard compatibilityPlayer.play() else {
+                failPlayback(trackName: currentTrack?.title ?? "Audio", error: NSError(
+                    domain: "TrapTube.CompatibilityPlayer",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "iOS could not resume the imported audio file."]
+                ))
+                return
+            }
+            isPlaying = true
         } else {
             do {
                 try startEngineIfNeeded()
                 playerNode.play()
                 isPlaying = true
             } catch {
-                if let track = currentTrack { failPlayback(trackName: track.title, error: error) }
+                if let track = currentTrack {
+                    startCompatibilityPlayback(track, at: currentTime, autoplay: true, engineError: error)
+                }
             }
         }
     }
@@ -89,10 +109,20 @@ final class AudioEngineManager: ObservableObject {
     }
 
     func refreshProgress() {
-        guard isPlaying, let renderTime = playerNode.lastRenderTime,
-              let playerTime = playerNode.playerTime(forNodeTime: renderTime), playerTime.sampleRate > 0 else { return }
-        currentTime = scheduledStartTime + Double(playerTime.sampleTime) / playerTime.sampleRate
-        if duration > 0, currentTime >= duration - 0.15 { isPlaying = false; next() }
+        guard isPlaying else { return }
+        if let compatibilityPlayer {
+            currentTime = compatibilityPlayer.currentTime
+        } else if let renderTime = playerNode.lastRenderTime,
+                  let playerTime = playerNode.playerTime(forNodeTime: renderTime),
+                  playerTime.sampleRate > 0 {
+            currentTime = scheduledStartTime + Double(playerTime.sampleTime) / playerTime.sampleRate
+        } else {
+            return
+        }
+        if duration > 0, currentTime >= duration - 0.15 {
+            isPlaying = false
+            next()
+        }
     }
 
     func clearPlaybackError() { playbackError = nil }
@@ -161,7 +191,10 @@ final class AudioEngineManager: ObservableObject {
     private func start(_ track: Track, at time: TimeInterval, autoplay: Bool) {
         playbackGeneration += 1
         let generation = playbackGeneration
-        playerNode.stop(); currentFile = nil
+        playerNode.stop()
+        compatibilityPlayer?.stop()
+        compatibilityPlayer = nil
+        currentFile = nil
         currentTrack = track
         playbackError = nil
         let fileURL = LibraryStore.audioURL(for: track.fileName).standardizedFileURL
@@ -194,7 +227,48 @@ final class AudioEngineManager: ObservableObject {
             }
             if autoplay { playerNode.play(); isPlaying = true } else { isPlaying = false }
         } catch {
-            failPlayback(trackName: track.title, error: error)
+            startCompatibilityPlayback(track, at: time, autoplay: autoplay, engineError: error)
+        }
+    }
+
+    private func startCompatibilityPlayback(_ track: Track, at time: TimeInterval, autoplay: Bool, engineError: Error) {
+        let fileURL = LibraryStore.audioURL(for: track.fileName).standardizedFileURL
+        do {
+            try configureAudioSession()
+            let fallback = try AVAudioPlayer(contentsOf: fileURL)
+            guard fallback.duration.isFinite, fallback.duration > 0 else {
+                throw NSError(domain: "TrapTube.CompatibilityPlayer", code: -3, userInfo: [
+                    NSLocalizedDescriptionKey: "The imported file opened but did not report a valid audio duration."
+                ])
+            }
+            fallback.currentTime = min(max(0, time), fallback.duration)
+            fallback.volume = 1
+            fallback.prepareToPlay()
+            duration = fallback.duration
+            currentTime = fallback.currentTime
+            compatibilityPlayer = fallback
+            currentFile = nil
+            playbackError = nil
+            if autoplay {
+                guard fallback.play() else {
+                    throw NSError(domain: "TrapTube.CompatibilityPlayer", code: -4, userInfo: [
+                        NSLocalizedDescriptionKey: "iOS opened the imported file but could not begin playback."
+                    ])
+                }
+                isPlaying = true
+            } else {
+                isPlaying = false
+            }
+        } catch {
+            let engine = engineError as NSError
+            let fallback = error as NSError
+            failPlayback(trackName: track.title, error: NSError(
+                domain: "TrapTube.Playback",
+                code: fallback.code,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "The equalizer playback path failed (\(engine.domain) / \(engine.code)), and the iOS compatibility player also failed (\(fallback.domain) / \(fallback.code)): \(fallback.localizedDescription)"
+                ]
+            ))
         }
     }
 
@@ -218,6 +292,8 @@ final class AudioEngineManager: ObservableObject {
     private func stopPlayback(clearTrack: Bool) {
         playbackGeneration += 1
         playerNode.stop()
+        compatibilityPlayer?.stop()
+        compatibilityPlayer = nil
         currentFile = nil
         isPlaying = false
         if clearTrack { currentTrack = nil; currentTime = 0; duration = 0; scheduledStartTime = 0 }
