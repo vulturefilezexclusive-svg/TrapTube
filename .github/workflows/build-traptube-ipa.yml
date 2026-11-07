@@ -192,15 +192,18 @@ jobs:
           import shutil
           root = Path("work/TrapTube")
           output = Path("review-source")
-          names = {"RootView.swift", "PlayerView.swift", "TrapTubeApp.swift", "HomeView.swift", "YouTubeView.swift", "StemStudioView.swift", "AudioEngineManager.swift"}
           copied = 0
           for source in root.rglob("*.swift"):
-              if source.name in names:
-                  target = output / source.relative_to(root)
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copy2(source, target)
-                  print(f"Exported {source}")
-                  copied += 1
+              target = output / source.relative_to(root)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, target)
+              print(f"Exported {source}")
+              copied += 1
+          for source in root.rglob("Info.plist"):
+              target = output / source.relative_to(root)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, target)
+              print(f"Exported {source}")
           if copied == 0:
               raise SystemExit("No review source files were found.")
           PY
