@@ -129,7 +129,7 @@ struct TrapTubeStreamResolver {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
-        if isHLS { return try parseHLS(data: data, source: source, title: title) }
+        if isHLS { return try await parseHLS(data: data, source: source, title: title) }
         if isDASH { return try parseDASH(data: data, source: source, title: title) }
         if let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
             return try await resolve(candidate, title: title)
@@ -159,12 +159,22 @@ struct TrapTubeStreamResolver {
         return candidates.filter { seen.insert($0.absoluteString).inserted }
     }
 
-    private func parseHLS(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
+    private func parseHLS(data: Data, source: URL, title: String) async throws -> TrapTubeResolvedMedia {
         guard let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else {
             throw TrapTubeResolverError.badResponse
         }
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let isMasterPlaylist = text.contains("#EXT-X-STREAM-INF")
+        let headers = ["User-Agent": "TrapTube/1.0"]
+        if !isMasterPlaylist {
+            let media = parseHLSMediaPlaylist(lines, source: source)
+            let asset = TrapTubeFlatAsset(url: source, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
+                height: nil, bitrate: nil, label: "HLS media", isManifest: media.segmentURLs.isEmpty,
+                headers: headers, initializationURL: media.initializationURL, segmentURLs: media.segmentURLs)
+            return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
+                audioAssets: [], muxedAssets: [asset], supportsSeparateAudioVideo: false)
+        }
+
         var videos: [TrapTubeFlatAsset] = [], audios: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var pendingHeight: Int?, pendingBandwidth: Int?, audioGroup: String?
         var audioGroups: [String: URL] = [:]
@@ -180,34 +190,77 @@ struct TrapTubeStreamResolver {
                     pendingHeight = h
                 }
                 audioGroup = attrs["AUDIO"]
-            } else if isMasterPlaylist && !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL {
-                if pendingHeight != nil || pendingBandwidth != nil {
-                    videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
-                        height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
-                        isManifest: true, headers: [:]))
-                    if let group = audioGroup, let audioURL = audioGroups[group] {
-                        audios.append(TrapTubeFlatAsset(url: audioURL, kind: .audio, mimeType: "application/vnd.apple.mpegurl",
-                            height: nil, bitrate: nil, label: "Audio", isManifest: true, headers: [:]))
-                    } else {
-                        muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
-                            height: pendingHeight, bitrate: pendingBandwidth, label: "Muxed HLS",
-                            isManifest: true, headers: [:]))
-                    }
-                    pendingHeight = nil; pendingBandwidth = nil; audioGroup = nil
+            } else if !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL,
+                      pendingHeight != nil || pendingBandwidth != nil {
+                let media = await loadHLSVariant(url, headers: headers)
+                let videoAsset = TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
+                    height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
+                    isManifest: media.segmentURLs.isEmpty, headers: headers,
+                    initializationURL: media.initializationURL, segmentURLs: media.segmentURLs)
+                videos.append(videoAsset)
+                if let group = audioGroup, let audioURL = audioGroups[group] {
+                    let audioMedia = await loadHLSVariant(audioURL, headers: headers)
+                    audios.append(TrapTubeFlatAsset(url: audioURL, kind: .audio, mimeType: "application/vnd.apple.mpegurl",
+                        height: nil, bitrate: nil, label: "Audio", isManifest: audioMedia.segmentURLs.isEmpty,
+                        headers: headers, initializationURL: audioMedia.initializationURL, segmentURLs: audioMedia.segmentURLs))
                 } else {
                     muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
-                        height: nil, bitrate: nil, label: "HLS stream", isManifest: true, headers: [:]))
+                        height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p · muxed" } ?? "Muxed HLS",
+                        isManifest: media.segmentURLs.isEmpty, headers: headers,
+                        initializationURL: media.initializationURL, segmentURLs: media.segmentURLs))
                 }
+                pendingHeight = nil; pendingBandwidth = nil; audioGroup = nil
             }
         }
         if videos.isEmpty && muxed.isEmpty {
             muxed = [TrapTubeFlatAsset(url: source, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
-                height: nil, bitrate: nil, label: "HLS stream", isManifest: true, headers: [:])]
+                height: nil, bitrate: nil, label: "HLS stream", isManifest: true, headers: headers)]
         }
         return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: videos,
             audioAssets: audios, muxedAssets: muxed, supportsSeparateAudioVideo: !videos.isEmpty && !audios.isEmpty)
     }
 
+    private func loadHLSVariant(_ url: URL, headers: [String: String]) async -> (initializationURL: URL?, segmentURLs: [URL]) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else {
+            return (nil, [])
+        }
+        return parseHLSMediaPlaylist(text.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }, source: url)
+    }
+
+    private func parseHLSMediaPlaylist(_ lines: [String], source: URL) -> (initializationURL: URL?, segmentURLs: [URL]) {
+        let playlist = lines.joined(separator: "\n")
+        let encrypted = lines.contains { line in
+            line.hasPrefix("#EXT-X-KEY:") && !line.uppercased().contains("METHOD=NONE")
+        }
+        let hasByteRanges = lines.contains { $0.hasPrefix("#EXT-X-BYTERANGE:") }
+        let isCompleteVOD = lines.contains("#EXT-X-ENDLIST")
+        guard !encrypted, !hasByteRanges, isCompleteVOD else { return (nil, []) }
+
+        var initializationURL: URL?
+        if let mapLine = lines.first(where: { $0.hasPrefix("#EXT-X-MAP:") }) {
+            let attrs = parseAttributes(String(mapLine.dropFirst("#EXT-X-MAP:".count)))
+            if let uri = attrs["URI"] { initializationURL = URL(string: uri, relativeTo: source)?.absoluteURL }
+        }
+        var expectsSegment = false
+        var segments: [URL] = []
+        for line in lines where !line.isEmpty {
+            if line.hasPrefix("#EXTINF:") {
+                expectsSegment = true
+            } else if expectsSegment && !line.hasPrefix("#") {
+                if let url = URL(string: line, relativeTo: source)?.absoluteURL { segments.append(url) }
+                expectsSegment = false
+            }
+        }
+        guard !segments.isEmpty else { return (nil, []) }
+        return (initializationURL, segments)
+    }
     private func parseDASH(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
         guard let xml = String(data: data, encoding: .utf8), xml.contains("<MPD") else {
             throw TrapTubeResolverError.badResponse
