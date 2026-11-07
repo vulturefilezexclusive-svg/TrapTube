@@ -930,13 +930,13 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let partialURL = dir.appendingPathComponent(partialName)
                 let offset = (try? FileManager.default.attributesOfItem(atPath: partialURL.path)[.size] as? NSNumber)?.int64Value ?? 0
                 jobs[index].partialFileName = partialName; jobs[index].resumeOffset = offset; persistQueue()
-                if asset.isManifest {
-                    // FFmpeg reads the exposed manifest directly so relative HLS segments,
-                    // encryption keys, initialization maps and byte ranges remain valid.
+                if asset.isManifest && asset.segmentURLs.isEmpty {
+                    // FFmpeg reads exposed HLS/DASH manifests directly when the provider
+                    // does not give us an explicit finite segment list.
                     inputURLs.append(asset.url)
                     continue
                 }
-                let downloaded = try await TrapTubeFlatTransfer.download(asset, to: partialURL, startingAt: offset) { [weak self] bytes, total, speed in
+                let progressHandler: (Int64, Int64, Int64) -> Void = { [weak self] bytes, total, speed in
                     Task { @MainActor in
                         guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
                         self.jobs[i].downloadedBytes = bytes
@@ -945,6 +945,14 @@ final class TrapTubeDownloadManager: ObservableObject {
                         self.jobs[i].progress = total > 0 ? min(0.98, Double(bytes) / Double(total)) : 0
                         self.persistQueue()
                     }
+                }
+                let downloaded: URL
+                if !asset.segmentURLs.isEmpty {
+                    downloaded = try await TrapTubeFlatTransfer.downloadSegmented(asset, jobID: jobID,
+                        assetIndex: assetIndex, directory: dir, progress: progressHandler)
+                } else {
+                    downloaded = try await TrapTubeFlatTransfer.download(asset, to: partialURL, startingAt: offset,
+                        progress: progressHandler)
                 }
                 inputURLs.append(downloaded)
             }
