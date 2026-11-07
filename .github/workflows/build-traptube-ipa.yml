@@ -112,7 +112,7 @@ jobs:
 
   build:
     needs: validate
-    if: always() && ((github.event_name == 'push' && needs.validate.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.build_candidate && needs.validate.result == 'success'))
+    if: always() && ((github.event_name == 'push' || github.event_name == 'pull_request') && needs.validate.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.build_candidate && needs.validate.result == 'success'))
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
