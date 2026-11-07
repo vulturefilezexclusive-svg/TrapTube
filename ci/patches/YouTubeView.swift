@@ -670,7 +670,6 @@ private struct TrapTubeDownloadsSheet: View {
     @State private var mode = "video"
     @State private var quality = "best"
     @State private var format = "mp4"
-    @State private var bitrate = "192000"
     @State private var sponsorBlock = false
     @State private var subtitles = true
     @State private var selectedVideo: TrapTubeDownloadedMedia?
@@ -739,14 +738,13 @@ private struct TrapTubeDownloadsSheet: View {
                         Picker("File format", selection: $format) {
                             if mode == "video" {
                                 Text("MP4").tag("mp4")
-                                Text("MKV").tag("mkv")
+                                Text("WebM").tag("webm")
                             } else if mode == "audio" {
                                 Text("M4A").tag("m4a")
-                                Text("MP3").tag("mp3")
                                 Text("Opus").tag("opus")
                             } else {
                                 Text("JPEG").tag("jpg")
-                                Text("PNG").tag("png")
+ 
                             }
                         }
                         .pickerStyle(.menu)
@@ -780,7 +778,10 @@ private struct TrapTubeDownloadsSheet: View {
                                     mode: mode,
                                     quality: quality,
                                     format: format,
-                                    bitrate: mode == "audio" ? Int(bitrate) : nil,
+                                    bitrate: nil,
+                                    height: mode == "video"
+                                        ? (quality == "best" ? 2160 : Int(quality.replacingOccurrences(of: "p", with: "")))
+                                        : nil,
                                     sponsorBlock: sponsorBlock,
                                     subtitles: subtitles
                                 )
