@@ -813,7 +813,7 @@ private struct TrapTubeDownloadsSheet: View {
                                         if job.status == "queued" || job.status == "running" {
                                             Button("Pause") { Task { await manager.cancel(job.id) } }
                                                 .font(.caption.bold()).foregroundStyle(Color(hex: "FF7A84"))
-                                        } else if job.status == "paused" {
+                                        } else if job.status == "paused" || job.status == "failed" {
                                             Button("Resume") { manager.resume(job.id) }
                                                 .font(.caption.bold()).foregroundStyle(Color(hex: "78D69A"))
                                         }
