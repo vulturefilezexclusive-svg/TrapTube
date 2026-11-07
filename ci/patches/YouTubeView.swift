@@ -452,23 +452,24 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
         gain.gain.setTargetAtTime(master * Math.pow(10, headroomDB / 20), context.currentTime, 0.015);
       };
       window.__traptubeSetEQ = value => { settings = Object.assign(settings, value || {}); apply(); };
-      const attach = () => {
-        const candidate = document.querySelector("video");
-        if (!candidate) {
-          if (!missingVideoReported && Date.now() - bootstrapStartedAt > 12000) {
-            missingVideoReported = true;
-            post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: YouTube has not exposed a playable video element yet."});
-          }
-          return;
-        }
-        if (candidate === video) return;
-        video = candidate;
-        missingVideoReported = false;
-        try {
-          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-          if (!AudioContextClass) throw new Error("Web Audio is unavailable in this WebKit runtime.");
+      const mediaGraphs = new WeakMap();
+      let activeElement = null, activeSource = null;
+      const audioElements = () => Array.from(document.querySelectorAll("video, audio"));
+      const chooseMediaElement = () => {
+        const elements = audioElements().filter(element => {
+          try { return !!(element.currentSrc || element.src) && element.readyState >= 2 && !element.ended; }
+          catch (_) { return false; }
+        });
+        const playing = elements.filter(element => !element.paused && !element.muted && element.volume > 0);
+        return playing[0] || elements.find(element => element === activeElement) || elements[0] || null;
+      };
+      const ensureGraph = element => {
+        let graph = mediaGraphs.get(element);
+        if (graph) return graph;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error("Web Audio is unavailable in this WebKit runtime.");
+        if (!context) {
           context = new AudioContextClass();
-          directSource = context.createMediaElementSource(video);
           filters = hz.map(frequency => {
             const node = context.createBiquadFilter();
             node.type = "peaking";
@@ -482,54 +483,85 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
           shelf.frequency.value = 90;
           shelf.Q.value = 0.7;
           gain = context.createGain();
-          // Route the media element through exactly one audible path. Connecting it
-          // directly to destination and then disconnecting can race the WebKit render
-          // graph and leave the stream silent or bypass the filters.
-          let node = directSource;
-          filters.forEach(filter => { node.connect(filter); node = filter; });
-          node.connect(shelf);
+          let node = gain;
+          node.connect(context.destination);
           shelf.connect(gain);
-          gain.connect(context.destination);
-          const reportAudioState = () => {
-            const running = !!context && context.state === "running";
-            post({
-              type:"eqStatus",
-              ready:running,
-              error:running ? null : "Streaming EQ is waiting for iOS audio activation. Press Play in the player to start the processed audio path."
-            });
-          };
+          filters[filters.length - 1].connect(shelf);
+          for (let index = filters.length - 2; index >= 0; index--) filters[index].connect(filters[index + 1]);
           context.addEventListener("statechange", reportAudioState);
-          const resumeAudio = () => {
-            if (!context || context.state === "running") { reportAudioState(); return; }
-            context.resume().then(reportAudioState).catch(error => {
-              post({type:"eqStatus",ready:false,error:"Tap Play to activate streaming audio processing: " + error.message});
-            });
-          };
-          video.addEventListener("play", () => { resumeAudio(); state(); });
-          video.addEventListener("playing", resumeAudio);
-          video.addEventListener("playing", () => setTimeout(() => window.__traptubeScanMenus && window.__traptubeScanMenus(), 1500), { once: true });
-          video.addEventListener("canplay", resumeAudio);
-          ["timeupdate","durationchange","play","pause","ended"].forEach(event => video.addEventListener(event, state));
-          apply();
-          // The video may already be playing by the time the MutationObserver finds it.
-          // Resume immediately as well as on subsequent user-initiated playback events.
-          resumeAudio();
-          reportAudioState();
-          state();
-        } catch (error) {
+        }
+        const source = context.createMediaElementSource(element);
+        graph = {source};
+        mediaGraphs.set(element, graph);
+        return graph;
+      };
+      const reportAudioState = () => {
+        const running = !!context && context.state === "running";
+        post({
+          type:"eqStatus",
+          ready:running && !!activeSource,
+          error:running && activeSource ? null : "Streaming EQ is waiting for iOS audio activation. Press Play in the player to start processed audio."
+        });
+      };
+      const resumeAudio = () => {
+        if (!context || context.state === "running") { reportAudioState(); return; }
+        context.resume().then(reportAudioState).catch(error => {
+          post({type:"eqStatus",ready:false,error:"Tap Play to activate streaming audio processing: " + error.message});
+        });
+      };
+      const attach = () => {
+        const candidate = chooseMediaElement();
+        if (!candidate) {
+          if (!missingVideoReported && Date.now() - bootstrapStartedAt > 12000) {
+            missingVideoReported = true;
+            post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: YouTube has not exposed an active audio/video element yet."});
+          }
+          return;
+        }
+        missingVideoReported = false;
+        if (candidate !== activeElement) {
           try {
-            if (directSource && context) {
-              directSource.disconnect();
-              filters.forEach(node => node.disconnect());
-              if (shelf) shelf.disconnect();
-              if (gain) gain.disconnect();
-              // Retain audio if EQ setup fails; do not leave a disconnected source.
-              directSource.connect(context.destination);
-            }
-          } catch (_) {}
-          post({type:"eqStatus", ready:false, error:"Streaming EQ unavailable: " + (error && error.message ? error.message : String(error))});
+            if (activeSource) activeSource.disconnect();
+            const graph = ensureGraph(candidate);
+            activeElement = candidate;
+            video = candidate;
+            activeSource = graph.source;
+            activeSource.connect(filters[0]);
+            apply();
+            resumeAudio();
+            state();
+          } catch (error) {
+            post({type:"eqStatus",ready:false,error:"Streaming EQ unavailable for this media element: " + (error && error.message ? error.message : String(error))});
+            // If Web Audio cannot attach, preserve the native media output.
+            try {
+              if (activeSource) activeSource.disconnect();
+              activeSource = null;
+              activeElement = null;
+            } catch (_) {}
+          }
+        } else if (context && context.state !== "running" && !candidate.paused) {
+          resumeAudio();
         }
       };
+      const watchElement = element => {
+        if (element.__traptubeEQObserved) return;
+        element.__traptubeEQObserved = true;
+        ["play","playing","canplay","loadedmetadata","emptied","loadstart","volumechange"].forEach(event => {
+          element.addEventListener(event, () => { attach(); state(); }, {passive:true});
+        });
+      };
+      audioElements().forEach(watchElement);
+      const observer = new MutationObserver(() => {
+        audioElements().forEach(watchElement);
+        attach();
+      });
+      observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src"]});
+      attach();
+      setInterval(() => {
+        audioElements().forEach(watchElement);
+        attach();
+        state();
+      }, 500);
       window.__traptubeControl = (command, value) => {
         if (!video) return;
         if (command === "toggle") {
