@@ -220,6 +220,8 @@ private struct TypeTypeWatchSheet: View {
     @State private var audioTracks: [TypeTypePlayerOption] = []
     @State private var showEQ = false
     @State private var showTrapTubeMenu = false
+    @State private var controlsVisible = true
+    @State private var showDownloads = false
 
     var body: some View {
         ZStack {
@@ -230,23 +232,46 @@ private struct TypeTypeWatchSheet: View {
                 HStack {
                     Button { dismiss() } label: {
                         Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
-                            .frame(width: 38, height: 38).background(.black.opacity(0.7), in: Circle())
+                            .frame(width: 38, height: 38).background(.ultraThinMaterial, in: Circle()).overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
                     }
                     Text(title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
                     Spacer(minLength: 4)
                     Button { showTrapTubeMenu = true } label: {
                         Image(uiImage: UIImage(named: "TrapTubeIcon") ?? UIImage(systemName: "app.fill")!).resizable().scaledToFill().frame(width: 38, height: 38)
                             .clipShape(RoundedRectangle(cornerRadius: 11))
-                            .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.25), lineWidth: 1))
+                            .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.30), lineWidth: 1))
                     }.accessibilityLabel("Open TrapTube player menu")
-                }.padding(14).background(LinearGradient(colors: [.black.opacity(0.85), .clear], startPoint: .top, endPoint: .bottom))
-                Spacer()
-                VStack(spacing: 10) {
-                    HStack(spacing: 12) {
+                    Button { showDownloads = true } label: {
+                        Label("TrapHouse", systemImage: "house.fill")
+                            .font(.caption.weight(.bold)).foregroundStyle(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+                    }
+                    .accessibilityLabel("Open TrapHouse downloads")
+                }.padding(14).background(.ultraThinMaterial.opacity(0.72))
+                if controlsVisible {
+                    Spacer()
+                    VStack(spacing: 10) {
+                        HStack {
+                            Label("Player controls", systemImage: "waveform")
+                                .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.78))
+                            Spacer()
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.headline.bold()).foregroundStyle(.white)
+                                    .frame(width: 34, height: 30)
+                                    .background(.ultraThinMaterial, in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
+                            }
+                            .accessibilityLabel("Hide player controls")
+                        }
+                        HStack(spacing: 12) {
                         Button { command("toggle") } label: {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.title3.bold()).foregroundStyle(.white).frame(width: 42, height: 42)
-                                .background(theme.accent, in: Circle())
+                                .background(.ultraThinMaterial, in: Circle()).overlay(Circle().stroke(theme.accent.opacity(0.8), lineWidth: 1))
                         }
                         VStack(spacing: 3) {
                             Slider(value: Binding(get: { scrubbing ? scrubValue : (duration > 0 ? currentTime / duration : 0) },
@@ -299,9 +324,35 @@ private struct TypeTypeWatchSheet: View {
                     Text("Choices are read from the active TypeType player; unsupported quality levels are not fabricated.")
                         .font(.caption2).foregroundStyle(.white.opacity(0.55)).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(13).background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 18))
-                .padding(.horizontal, 10).padding(.bottom, 12)
+                    .padding(13)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.18), lineWidth: 1))
+                    .padding(.horizontal, 10).padding(.bottom, 12)
+                } else {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = true }
+                        } label: {
+                            Label("Show controls", systemImage: "slider.horizontal.3")
+                                .font(.caption.weight(.bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 14).padding(.vertical, 11)
+                                .background(.ultraThinMaterial, in: Capsule())
+                                .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+                        }
+                        .accessibilityLabel("Show player controls")
+                    }
+                    .padding(.horizontal, 14).padding(.bottom, 14)
+                }
             }
+        }
+        .sheet(isPresented: $showDownloads) {
+            TrapTubeDownloadsSheet(title: title, videoURL: url)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $showEQ) {
             EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
