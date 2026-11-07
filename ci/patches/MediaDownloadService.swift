@@ -325,6 +325,11 @@ struct TrapTubeStreamResolver {
             throw TrapTubeResolverError.badResponse
         }
         let mpdDuration = parseISODuration(attribute("mediaPresentationDuration", in: xml) ?? "")
+        let mpdHeaderEnd = xml.range(of: "<Period")?.lowerBound ?? xml.endIndex
+        let mpdHeader = String(xml[..<mpdHeaderEnd])
+        let mpdTemplate = element("SegmentTemplate", in: mpdHeader)
+        let mpdList = element("SegmentList", in: mpdHeader)
+        let mpdBase = elementText("BaseURL", in: mpdHeader)
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var streamIndex = 0
         let periodParts = xml.components(separatedBy: "<Period")
@@ -338,9 +343,11 @@ struct TrapTubeStreamResolver {
             let periodTagEnd = periodBody.firstIndex(of: ">")
             let periodAttributes = periodTagEnd.map { parseAttributes(String(periodBody[..<$0])) } ?? [:]
             let durationSeconds = mpdDuration > 0 ? mpdDuration : parseISODuration(periodAttributes["duration"] ?? "")
-            let periodTemplate = element("SegmentTemplate", in: periodBody)
-            let periodList = element("SegmentList", in: periodBody)
-            let periodBase = elementText("BaseURL", in: periodBody)
+            let periodHeaderEnd = periodBody.range(of: "<AdaptationSet")?.lowerBound ?? periodBody.endIndex
+            let periodHeader = String(periodBody[..<periodHeaderEnd])
+            let periodTemplate = element("SegmentTemplate", in: periodHeader) ?? mpdTemplate
+            let periodList = element("SegmentList", in: periodHeader) ?? mpdList
+            let periodBase = elementText("BaseURL", in: periodHeader) ?? mpdBase
             let adaptationSets = periodBody.components(separatedBy: "<AdaptationSet").dropFirst()
             for adaptation in adaptationSets {
             guard let adaptationEnd = adaptation.range(of: "</AdaptationSet>"),
@@ -348,9 +355,11 @@ struct TrapTubeStreamResolver {
             let adaptationBody = String(adaptation[..<adaptationEnd.lowerBound])
             let adaptationAttributes = parseAttributes(String(adaptation[..<adaptationTagEnd]))
             let inheritedType = (adaptationAttributes["mimeType"] ?? adaptationAttributes["contentType"] ?? "").lowercased()
-            let inheritedTemplate = element("SegmentTemplate", in: adaptationBody) ?? periodTemplate
-            let inheritedList = element("SegmentList", in: adaptationBody) ?? periodList
-            let inheritedBase = elementText("BaseURL", in: adaptationBody) ?? periodBase
+            let adaptationHeaderEnd = adaptationBody.range(of: "<Representation")?.lowerBound ?? adaptationBody.endIndex
+            let adaptationHeader = String(adaptationBody[..<adaptationHeaderEnd])
+            let inheritedTemplate = element("SegmentTemplate", in: adaptationHeader) ?? periodTemplate
+            let inheritedList = element("SegmentList", in: adaptationHeader) ?? periodList
+            let inheritedBase = elementText("BaseURL", in: adaptationHeader) ?? periodBase
             let representations = adaptationBody.components(separatedBy: "<Representation").dropFirst()
             for block in representations {
                 guard let end = block.range(of: "</Representation>") else { continue }
