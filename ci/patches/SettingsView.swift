@@ -184,36 +184,36 @@ struct SettingsView: View {
                         }
 
                                         settingsCard(title: "Theme colors", icon: "paintpalette.fill") {
-                                            Text("Choose an accent color. Your selection updates the app immediately.")
-                                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                                            LazyVGrid(columns: columns, spacing: 14) {
-                                                ForEach(ThemeManager.accents) { option in
-                                                    Button { theme.selectAccent(option) } label: {
-                                                        VStack(spacing: 7) {
-                                                            ZStack {
-                                                                Circle().fill(option.color).frame(width: 42, height: 42)
-                                                                if theme.accentHex == option.hex {
-                                                                    Image(systemName: "checkmark").font(.headline.bold()).foregroundStyle(option.hex == "F4F4F5" || option.hex == "A6A4A6" ? .black : .white)
-                                                                }
-                                                            }
-                                                            Text(option.name).font(.caption2.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                                                        }
-                                                        .frame(maxWidth: .infinity).padding(.vertical, 7)
-                                                        .background(theme.accentHex == option.hex ? .white.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 13))
-                                                        .overlay(RoundedRectangle(cornerRadius: 13).stroke(theme.accentHex == option.hex ? theme.accent : .white.opacity(0.07), lineWidth: 1))
-                                                        .contentShape(Rectangle())
+                            Text("Pick any accent color with the hue wheel and saturation/value square, or choose a preset below.")
+                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                            TrapTubeHuePicker(initialColor: theme.accent) { color in
+                                theme.selectCustomAccent(color)
+                            }
+                            HStack(spacing: 9) {
+                                RoundedRectangle(cornerRadius: 8).fill(theme.accent).frame(width: 28, height: 28)
+                                Text("Live preview · \(theme.selectedAccent.name)").font(.subheadline.bold()).foregroundStyle(.white)
+                                Spacer()
+                                Button("Reset") { theme.reset() }.font(.subheadline.bold()).foregroundStyle(theme.accent)
+                            }.padding(.top, 5)
+                            Text("Presets").font(.caption.bold()).foregroundStyle(Color(hex: "A6A4A6"))
+                            LazyVGrid(columns: columns, spacing: 12) {
+                                ForEach(ThemeManager.accents) { option in
+                                    Button { theme.selectAccent(option) } label: {
+                                        VStack(spacing: 6) {
+                                            Circle().fill(option.color).frame(width: 34, height: 34)
+                                                .overlay {
+                                                    if theme.accentHex == option.hex {
+                                                        Image(systemName: "checkmark").font(.caption.bold())
+                                                            .foregroundStyle(option.hex == "F4F4F5" || option.hex == "A6A4A6" ? .black : .white)
                                                     }
-                                                    .buttonStyle(.plain)
-                                                    .accessibilityLabel("\(option.name) accent color\(theme.accentHex == option.hex ? ", selected" : "")")
                                                 }
-                                            }
-                                            HStack(spacing: 9) {
-                                                RoundedRectangle(cornerRadius: 8).fill(theme.accent).frame(width: 28, height: 28)
-                                                Text("Live preview · \(theme.selectedAccent.name)").font(.subheadline.bold()).foregroundStyle(.white)
-                                                Spacer()
-                                                Button("Reset") { theme.reset() }.font(.subheadline.bold()).foregroundStyle(theme.accent)
-                                            }.padding(.top, 5)
+                                            Text(option.name).font(.caption2.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
                                         }
+                                        .frame(maxWidth: .infinity).padding(.vertical, 6)
+                                    }.buttonStyle(.plain)
+                                }
+                            }
+                        }
                     }
                     .padding(.top, 16).padding(.bottom, 24)
                 }
@@ -267,4 +267,81 @@ struct SettingsView: View {
             Text(value).font(.caption).foregroundStyle(Color(hex: "A6A4A6")).multilineTextAlignment(.trailing).frame(maxWidth: 180, alignment: .trailing)
         }
     }
+}
+
+private struct TrapTubeHuePicker: View {
+    let initialColor: Color
+    let onChange: (Color) -> Void
+    @State private var hue: Double = 0
+    @State private var saturation: Double = 1
+    @State private var brightness: Double = 1
+
+    private var selected: Color { Color(hue: hue, saturation: saturation, brightness: brightness) }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            GeometryReader { proxy in
+                let side = min(proxy.size.width, 250)
+                ZStack {
+                    Circle().stroke(AngularGradient(gradient: Gradient(colors: [
+                        .red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink, .red
+                    ]), center: .center), style: StrokeStyle(lineWidth: 22, lineCap: .round))
+                    Circle().stroke(.white.opacity(0.12), lineWidth: 1).padding(11)
+                    Circle().fill(selected).frame(width: 28, height: 28)
+                        .overlay(Circle().stroke(.white, lineWidth: 3))
+                        .offset(x: 0, y: -(side / 2 - 11))
+                        .rotationEffect(.degrees(hue * 360))
+                }
+                .frame(width: side, height: side)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Circle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    let center = CGPoint(x: side / 2, y: side / 2)
+                    let dx = value.location.x - center.x
+                    let dy = value.location.y - center.y
+                    var angle = atan2(dy, dx) / (2 * .pi) + 0.25
+                    if angle < 0 { angle += 1 }
+                    hue = angle.truncatingRemainder(dividingBy: 1)
+                    publish()
+                })
+            }
+            .frame(height: 250)
+
+            GeometryReader { proxy in
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12).fill(Color(hue: hue, saturation: 1, brightness: 1))
+                    RoundedRectangle(cornerRadius: 12).fill(LinearGradient(colors: [.white, .clear], startPoint: .leading, endPoint: .trailing))
+                    RoundedRectangle(cornerRadius: 12).fill(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom))
+                    Circle().stroke(.white, lineWidth: 2).background(Circle().fill(.clear))
+                        .frame(width: 18, height: 18)
+                        .position(x: saturation * proxy.size.width,
+                                  y: (1 - brightness) * proxy.size.height)
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    saturation = min(1, max(0, value.location.x / max(1, proxy.size.width)))
+                    brightness = 1 - min(1, max(0, value.location.y / max(1, proxy.size.height)))
+                    publish()
+                })
+            }
+            .frame(height: 150)
+            HStack {
+                Text("Saturation").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(Int(saturation * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.white)
+                Text("Value").font(.caption).foregroundStyle(.secondary).padding(.leading, 12)
+                Text("\(Int(brightness * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.white)
+            }
+        }
+        .onAppear {
+            let ui = UIColor(initialColor)
+            var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
+            ui.getHue(&h, saturation: &s, brightness: &v, alpha: &a)
+            hue = Double(h); saturation = Double(s); brightness = Double(v)
+        }
+    }
+
+    private func publish() { onChange(selected) }
 }
