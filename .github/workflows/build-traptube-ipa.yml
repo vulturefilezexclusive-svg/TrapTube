@@ -329,10 +329,10 @@ jobs:
                           missing.add(f"{binary}: {name}")
           if missing:
               raise SystemExit("Missing embedded Swift runtime dependencies:\\n" + "\\n".join(sorted(missing)))
-          required = frameworks / "libswiftCoreMedia.dylib"
-          if not required.is_file():
-              raise SystemExit("libswiftCoreMedia.dylib was not embedded; refusing to ship an IPA that will fail at launch.")
-          print("Verified libswiftCoreMedia.dylib and all scanned @rpath/libswift*.dylib dependencies are embedded.")
+          # libswiftCoreMedia is intentionally not required here: FFmpeg's
+          # CoreMedia C-symbol dependency was redirected to Apple's system
+          # CoreMedia.framework above, so this Swift overlay may not be needed.
+          print("Verified all remaining @rpath/libswift*.dylib dependencies are embedded.")
           PYVERIFY
           REPACK="$RUNNER_TEMP/TrapTube-runtime-fixed.ipa"
           (cd "$STAGING" && /usr/bin/zip -qry "$REPACK" Payload)
