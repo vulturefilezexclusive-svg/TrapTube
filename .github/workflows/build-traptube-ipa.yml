@@ -61,6 +61,14 @@ jobs:
           path.write_text(source)
           PY
 
+      - name: Add LGPL FFmpegKit Swift package
+        shell: bash
+        run: |
+          set -euo pipefail
+          gem install xcodeproj --no-document
+          ruby ci/patches/AddFFmpegKitPackage.rb work/TrapTube/TrapTube.xcodeproj
+          xcodebuild -resolvePackageDependencies -project work/TrapTube/TrapTube.xcodeproj -scheme TrapTube
+
       - name: Download and validate licensed HTDemucs model package
         shell: bash
         run: |
@@ -152,6 +160,8 @@ jobs:
             exit 4
           fi
           cp "$ATTRIBUTION" "$APP_PATH/HTDemucs-ATTRIBUTION.md"
+          cp "$GITHUB_WORKSPACE/ci/patches/FFmpegKit-LICENSE" "$APP_PATH/FFmpegKit-LICENSE"
+          cp "$GITHUB_WORKSPACE/ci/patches/FFmpegKit-NOTICE.md" "$APP_PATH/FFmpegKit-NOTICE.md"
 
           IPA_PATH="$DIST_DIR/TrapTube-unsigned.ipa"
           '''
@@ -168,6 +178,8 @@ jobs:
           grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/model.mil' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model program missing from IPA." >&2; exit 5; }
           grep -qx 'Payload/TrapTube.app/HTDemucs_SourceSeparation_F32.mlmodelc/coremldata.bin' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: compiled HTDemucs model weights missing from IPA." >&2; exit 5; }
           grep -qx 'Payload/TrapTube.app/HTDemucs-ATTRIBUTION.md' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: HTDemucs attribution missing from IPA." >&2; exit 5; }
+          grep -qx 'Payload/TrapTube.app/FFmpegKit-LICENSE' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: FFmpegKit LGPL license missing from IPA." >&2; exit 5; }
+          grep -qx 'Payload/TrapTube.app/FFmpegKit-NOTICE.md' "$BUILD_ROOT/ipa-files.txt" || { echo "ERROR: FFmpegKit notice missing from IPA." >&2; exit 5; }
           /usr/bin/shasum -a 256 "$IPA_PATH" > "$DIST_DIR/SHA256SUMS.txt"
           '''
           if verify_anchor not in s:
