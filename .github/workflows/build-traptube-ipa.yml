@@ -131,7 +131,8 @@ jobs:
 
 
   build:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_candidate
+    needs: validate
+    if: always() && ((github.event_name == 'push' && needs.validate.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.build_candidate))
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
