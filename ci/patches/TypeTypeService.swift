@@ -144,7 +144,7 @@ struct TypeTypeService {
             throw ServiceError.badResponse(http.statusCode, detail ?? "The download artifact could not be retrieved.")
         }
 
-        let directory = LibraryStore.appDirectory.appendingPathComponent("Downloads", isDirectory: true)
+        let directory = TrapTubeDownloadPaths.downloadsDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let proposed = http.suggestedFilename ?? "\(fallbackTitle).\(http.mimeType?.contains("audio") == true ? "m4a" : "mp4")"
         let safeName = proposed
@@ -232,6 +232,17 @@ struct TypeTypeDownloadJob: Decodable, Identifiable {
     let error: String?
 }
 
+enum TrapTubeDownloadPaths {
+    static var appDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TrapTube", isDirectory: true)
+    }
+
+    static var downloadsDirectory: URL {
+        appDirectory.appendingPathComponent("Downloads", isDirectory: true)
+    }
+}
+
 struct TrapTubeDownloadedMedia: Codable, Identifiable {
     let id: String
     let title: String
@@ -241,9 +252,7 @@ struct TrapTubeDownloadedMedia: Codable, Identifiable {
     let createdAt: Date
 
     var fileURL: URL {
-        LibraryStore.appDirectory
-            .appendingPathComponent("Downloads", isDirectory: true)
-            .appendingPathComponent(fileName)
+        TrapTubeDownloadPaths.downloadsDirectory.appendingPathComponent(fileName)
     }
 }
 
@@ -294,7 +303,7 @@ enum TrapTubeFFmpegError: LocalizedError {
 enum TrapTubeFFmpegProcessor {
     static func execute(_ arguments: [String]) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            FFmpegKit.executeWithArgumentsAsync(arguments, withCompleteCallback: { session in
+            _ = FFmpegKit.executeWithArgumentsAsync(arguments, withCompleteCallback: { session in
                 if ReturnCode.isSuccess(session.getReturnCode()) {
                     continuation.resume()
                 } else {
@@ -318,11 +327,11 @@ final class TrapTubeDownloadManager: ObservableObject {
     private var isRestored = false
 
     private var downloadsDirectory: URL {
-        LibraryStore.appDirectory.appendingPathComponent("Downloads", isDirectory: true)
+        TrapTubeDownloadPaths.downloadsDirectory
     }
 
     private var manifestURL: URL {
-        LibraryStore.appDirectory.appendingPathComponent("downloads.json")
+        TrapTubeDownloadPaths.appDirectory.appendingPathComponent("downloads.json")
     }
 
     private init() { restoreCompleted() }
@@ -506,7 +515,7 @@ final class TrapTubeDownloadManager: ObservableObject {
 
     private func persistCompleted() {
         do {
-            try FileManager.default.createDirectory(at: LibraryStore.appDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: TrapTubeDownloadPaths.appDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(completed)
             try data.write(to: manifestURL, options: .atomic)
         } catch {
