@@ -291,8 +291,8 @@ jobs:
           print("Verified libswiftCoreMedia.dylib and all scanned @rpath/libswift*.dylib dependencies are embedded.")
           PYVERIFY
           REPACK="$RUNNER_TEMP/TrapTube-runtime-fixed.ipa"
-          (cd "$STAGING" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/$REPACK" Payload)
-          mv "$GITHUB_WORKSPACE/$REPACK" "$IPA"
+          (cd "$STAGING" && /usr/bin/zip -qry "$REPACK" Payload)
+          mv "$REPACK" "$IPA"
           /usr/bin/unzip -tq "$IPA"
           /usr/bin/shasum -a 256 "$IPA" > work/TrapTube/dist/SHA256SUMS.txt
 
