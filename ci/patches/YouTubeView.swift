@@ -779,7 +779,14 @@ private struct TrapTubeDownloadsSheet: View {
                                         Spacer()
                                         Text(job.status.capitalized).font(.caption.bold()).foregroundStyle(Color(hex: "F04452"))
                                     }
-                                    ProgressView(value: job.progress).tint(Color(hex: "E50920"))
+                                    if job.totalBytes > 0 {
+                                        ProgressView(value: job.progress).tint(Color(hex: "E50920"))
+                                    } else {
+                                        ProgressView().tint(Color(hex: "E50920"))
+                                    }
+                                    Text(ByteCountFormatter.string(fromByteCount: job.downloadedBytes, countStyle: .file) +
+                                         (job.totalBytes > 0 ? " / " + ByteCountFormatter.string(fromByteCount: job.totalBytes, countStyle: .file) : " received"))
+                                        .font(.caption2.monospacedDigit()).foregroundStyle(Color(hex: "858185"))
                                     HStack {
                                         Text(job.stage.capitalized).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                                         Spacer()
