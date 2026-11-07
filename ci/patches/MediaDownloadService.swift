@@ -471,7 +471,6 @@ struct TrapTubeStreamResolver {
                     label: label, isManifest: needsManifestReader && !segmented, headers: headers, representationID: representationID,
                     streamIndex: nil, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
-                streamIndex += 1
             }
             }
         }
