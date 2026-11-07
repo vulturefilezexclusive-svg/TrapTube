@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, master, feature/native-player-demucs-eq]
+    branches: [main, master, feature/native-player-demucs-eq, feature/ytlite-style-download-quality]
     paths:
       - 'ci/source.zip'
       - 'ci/patches/**'
