@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AVKit
 
 struct YouTubeView: View {
     @EnvironmentObject private var theme: ThemeManager
@@ -305,7 +306,7 @@ private struct TypeTypeWatchSheet: View {
             EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
         }
         .sheet(isPresented: $showTrapTubeMenu) {
-            TrapTubePlayerMenu(title: title, onPlayback: {
+            TrapTubePlayerMenu(title: title, videoURL: url, onPlayback: {
                 showTrapTubeMenu = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showEQ = true }
             })
@@ -564,16 +565,18 @@ private struct TypeTypeWebView: UIViewRepresentable {
 private struct TrapTubePlayerMenu: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
+    let videoURL: URL
     let onPlayback: () -> Void
-    @State private var showDownloadInfo = false
-    @State private var showMenuInfo = false
-    @State private var menuInfoText = ""
+
+    @State private var showDownloads = false
     @State private var showMenuInfo = false
     @State private var menuInfoText = ""
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule().fill(.white.opacity(0.35)).frame(width: 42, height: 5).padding(.top, 10).padding(.bottom, 18)
+            Capsule().fill(.white.opacity(0.35)).frame(width: 42, height: 5)
+                .padding(.top, 10).padding(.bottom, 18)
+
             HStack(spacing: 12) {
                 Image("AppIcon").resizable().scaledToFill().frame(width: 54, height: 54)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -585,29 +588,45 @@ private struct TrapTubePlayerMenu: View {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
                         .frame(width: 38, height: 38).background(.white.opacity(0.12), in: Circle())
-                }.accessibilityLabel("Close player menu")
-            }.padding(.horizontal, 20).padding(.bottom, 14)
+                }
+                .accessibilityLabel("Close player menu")
+            }
+            .padding(.horizontal, 20).padding(.bottom, 14)
+
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    menuRow("Downloads", icon: "arrow.down.to.line") { showDownloadInfo = true }
-                    menuRow("Playback tools", icon: "play.circle", action: onPlayback)
-                    menuRow("Library", icon: "rectangle.stack") { menuInfoText = "Your imported tracks and playlists are available in the Library tab."; showMenuInfo = true }
-                    menuRow("Transcript", icon: "captions.bubble") { menuInfoText = "A transcript appears only when the connected provider supplies caption or transcript data."; showMenuInfo = true }
-                    menuRow("Information", icon: "info.circle") { menuInfoText = "Playback and stream quality are provided by your connected TypeType service."; showMenuInfo = true }
-                }.padding(.horizontal, 20)
+                    menuRow("Downloads", detail: "Video · Audio · Cover art", icon: "arrow.down.to.line") {
+                        showDownloads = true
+                    }
+                    menuRow("Playback tools", detail: "Equalizer · Bass boost · Audio modes", icon: "waveform") {
+                        dismiss()
+                        onPlayback()
+                    }
+                    menuRow("Library", detail: "Your downloaded and imported media", icon: "rectangle.stack") {
+                        menuInfoText = "Your downloaded media and imported tracks are stored in TrapTube's local library."
+                        showMenuInfo = true
+                    }
+                    menuRow("Transcript", detail: "Available captions and transcript tools", icon: "captions.bubble") {
+                        menuInfoText = "Transcript access depends on the captions and transcript data supplied by the connected TypeType instance."
+                        showMenuInfo = true
+                    }
+                    menuRow("Information", detail: "Media and stream information", icon: "info.circle") {
+                        menuInfoText = "Playback and stream information are supplied by your connected TypeType service."
+                        showMenuInfo = true
+                    }
+                }
+                .padding(.horizontal, 20)
             }
-            Button("Cancel") { dismiss() }.font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
+
+            Button("Close") { dismiss() }
+                .font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
         }
         .background(Color(hex: "171618").ignoresSafeArea())
-        .alert("Downloads", isPresented: $showDownloadInfo) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("The connected streaming player does not expose an authorized media download endpoint. You can import audio and video files you own or are licensed to use into your TrapTube library.")
-        }
-        .alert("TrapTube", isPresented: $showMenuInfo) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(menuInfoText)
+        .sheet(isPresented: $showDownloads) {
+            TrapTubeDownloadsSheet(title: title, videoURL: videoURL)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
         }
         .alert("TrapTube", isPresented: $showMenuInfo) {
             Button("OK", role: .cancel) { }
@@ -616,15 +635,300 @@ private struct TrapTubePlayerMenu: View {
         }
     }
 
-    private func menuRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func menuRow(_ title: String, detail: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 18) {
-                Image(systemName: icon).font(.system(size: 23)).foregroundStyle(.white).frame(width: 30)
-                Text(title).font(.headline.bold()).foregroundStyle(.white)
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(Color(hex: "8E8B90"))
-            }.padding(.vertical, 18).contentShape(Rectangle())
-        }.buttonStyle(.plain)
-            .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
+            HStack(spacing: 15) {
+                Image(systemName: icon).font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white).frame(width: 32)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline.bold()).foregroundStyle(.white)
+                    Text(detail).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.caption.bold())
+                    .foregroundStyle(Color(hex: "8E8B90"))
+            }
+            .padding(.vertical, 16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+        }
+    }
+}
+
+private struct TrapTubeDownloadsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var library: LibraryStore
+    @StateObject private var manager = TrapTubeDownloadManager.shared
+
+    let title: String
+    let videoURL: URL
+
+    @State private var mode = "video"
+    @State private var quality = "best"
+    @State private var format = "mp4"
+    @State private var bitrate = "192000"
+    @State private var sponsorBlock = false
+    @State private var subtitles = true
+    @State private var selectedVideo: TrapTubeDownloadedMedia?
+
+    private var modeTitle: String {
+        switch mode {
+        case "audio": return "Audio"
+        case "thumbnail": return "Cover art"
+        default: return "Video"
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("DOWNLOAD MEDIA").font(.caption.bold()).tracking(1.4)
+                            .foregroundStyle(Color(hex: "A6A4A6"))
+                        Text(title).font(.title3.bold()).foregroundStyle(.white).lineLimit(2)
+                        Text("Downloads are processed by the connected TypeType downloader and saved on this device.")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Download type").font(.headline.bold()).foregroundStyle(.white)
+                        Picker("Download type", selection: $mode) {
+                            Text("Video").tag("video")
+                            Text("Audio").tag("audio")
+                            Text("Cover").tag("thumbnail")
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: mode) { _, newMode in
+                            quality = "best"
+                            format = newMode == "audio" ? "m4a" : (newMode == "thumbnail" ? "jpg" : "mp4")
+                        }
+
+                        if mode != "thumbnail" {
+                            Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
+                                Text("Best available").tag("best")
+                                if mode == "video" {
+                                    Text("1080p").tag("1080p")
+                                    Text("720p").tag("720p")
+                                    Text("480p").tag("480p")
+                                    Text("360p").tag("360p")
+                                } else {
+                                    Text("High").tag("high")
+                                    Text("Standard").tag("standard")
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .tint(Color(hex: "F04452"))
+
+                            if mode == "audio" {
+                                Picker("Audio bitrate", selection: $bitrate) {
+                                    Text("320 kbps").tag("320000")
+                                    Text("256 kbps").tag("256000")
+                                    Text("192 kbps").tag("192000")
+                                    Text("128 kbps").tag("128000")
+                                }
+                                .pickerStyle(.menu)
+                                .tint(Color(hex: "F04452"))
+                            }
+                        }
+
+                        Picker("File format", selection: $format) {
+                            if mode == "video" {
+                                Text("MP4").tag("mp4")
+                                Text("MKV").tag("mkv")
+                            } else if mode == "audio" {
+                                Text("M4A").tag("m4a")
+                                Text("MP3").tag("mp3")
+                                Text("Opus").tag("opus")
+                            } else {
+                                Text("JPEG").tag("jpg")
+                                Text("PNG").tag("png")
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(Color(hex: "F04452"))
+
+                        if mode == "video" {
+                            Toggle(isOn: $subtitles) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Include subtitles").font(.subheadline.bold()).foregroundStyle(.white)
+                                    Text("Embed available English captions when supported.")
+                                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                }
+                            }
+                            .tint(Color(hex: "E50920"))
+
+                            Toggle(isOn: $sponsorBlock) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Skip SponsorBlock segments").font(.subheadline.bold()).foregroundStyle(.white)
+                                    Text("Ask the TypeType downloader to omit supported sponsor segments.")
+                                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                }
+                            }
+                            .tint(Color(hex: "E50920"))
+                        }
+
+                        Button {
+                            Task {
+                                await manager.enqueue(
+                                    videoURL: videoURL,
+                                    title: title,
+                                    mode: mode,
+                                    quality: quality,
+                                    format: format,
+                                    bitrate: mode == "audio" ? Int(bitrate) : nil,
+                                    sponsorBlock: sponsorBlock,
+                                    subtitles: subtitles
+                                )
+                            }
+                        } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text("Start \(modeTitle) Download").font(.headline.bold())
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 15)
+                            .background(Color(hex: "E50920"), in: RoundedRectangle(cornerRadius: 15))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(16)
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+
+                    if !manager.jobs.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Download queue").font(.headline.bold()).foregroundStyle(.white)
+                            ForEach(manager.jobs) { job in
+                                VStack(alignment: .leading, spacing: 7) {
+                                    HStack {
+                                        Text(job.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
+                                        Spacer()
+                                        Text(job.status.capitalized).font(.caption.bold()).foregroundStyle(Color(hex: "F04452"))
+                                    }
+                                    ProgressView(value: job.progress).tint(Color(hex: "E50920"))
+                                    HStack {
+                                        Text(job.stage.capitalized).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                        Spacer()
+                                        if job.speedBytesPerSecond > 0 {
+                                            Text(ByteCountFormatter.string(fromByteCount: job.speedBytesPerSecond, countStyle: .file) + "/s")
+                                                .font(.caption.monospacedDigit()).foregroundStyle(Color(hex: "A6A4A6"))
+                                        }
+                                        if job.status == "queued" || job.status == "running" {
+                                            Button("Cancel") { Task { await manager.cancel(job.id) } }
+                                                .font(.caption.bold()).foregroundStyle(Color(hex: "FF7A84"))
+                                        }
+                                    }
+                                    if let error = job.error {
+                                        Text(error).font(.caption).foregroundStyle(Color(hex: "FF7A84"))
+                                    }
+                                }
+                                .padding(12)
+                                .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                            }
+                        }
+                    }
+
+                    if !manager.completed.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Saved on this device").font(.headline.bold()).foregroundStyle(.white)
+                            ForEach(manager.completed) { item in
+                                downloadedRow(item)
+                            }
+                        }
+                    }
+
+                    if let error = manager.lastError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(Color(hex: "FF7A84"))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color(hex: "0C0B0D").ignoresSafeArea())
+            .navigationTitle("Downloads")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }.foregroundStyle(.white)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(item: $selectedVideo) { item in
+            TrapTubeDownloadedVideoPlayer(item: item)
+                .preferredColorScheme(.dark)
+        }
+    }
+
+    @ViewBuilder
+    private func downloadedRow(_ item: TrapTubeDownloadedMedia) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: item.mode == "video" ? "film" : (item.mode == "thumbnail" ? "photo" : "waveform"))
+                .font(.title3).foregroundStyle(Color(hex: "F04452")).frame(width: 30)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2)
+                Text("\\(item.mode.capitalized) · \\(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+            }
+            Spacer(minLength: 4)
+            if item.mode == "video" {
+                Button { selectedVideo = item } label: {
+                    Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(.white)
+                }
+                .accessibilityLabel("Play downloaded video")
+            } else if item.mode == "audio" {
+                Button {
+                    Task { await library.importAudio(from: [item.fileURL]) }
+                } label: {
+                    Image(systemName: "plus.circle.fill").font(.title2).foregroundStyle(.white)
+                }
+                .accessibilityLabel("Add downloaded audio to music library")
+            }
+            Menu {
+                if item.mode == "video" {
+                    Button("Remux to MP4 (fast)") { process(item, .remuxMP4) }
+                    Button("Extract thumbnail") { process(item, .extractThumbnail) }
+                } else if item.mode == "audio" {
+                    Button("Convert to M4A") { process(item, .convertM4A) }
+                    Button("Convert to WAV") { process(item, .convertWAV) }
+                }
+                Button("Delete download", role: .destructive) { manager.remove(item) }
+            } label: {
+                Image(systemName: "ellipsis.circle").font(.title3).foregroundStyle(Color(hex: "A6A4A6"))
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private func process(_ item: TrapTubeDownloadedMedia, _ operation: TrapTubeFFmpegOperation) {
+        Task {
+            do { try await manager.process(item, operation: operation) }
+            catch { manager.lastError = error.localizedDescription }
+        }
+    }
+}
+
+private struct TrapTubeDownloadedVideoPlayer: View {
+    let item: TrapTubeDownloadedMedia
+    @State private var player: AVPlayer
+
+    init(item: TrapTubeDownloadedMedia) {
+        self.item = item
+        _player = State(initialValue: AVPlayer(url: item.fileURL))
+    }
+
+    var body: some View {
+        VideoPlayer(player: player)
+            .background(.black)
+            .ignoresSafeArea()
+            .onAppear { player.play() }
+            .onDisappear { player.pause() }
     }
 }
