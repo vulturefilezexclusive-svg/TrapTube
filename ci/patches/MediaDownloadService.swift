@@ -1000,6 +1000,7 @@ final class TrapTubeDownloadManager: ObservableObject {
     @Published var lastError: String?
     private let resolver = TrapTubeStreamResolver()
     private var workers: [String: Task<Void, Never>] = [:]
+    private var workerTokens: [String: UUID] = [:]
     private var manifestURL: URL { TrapTubeDownloadPaths.appDirectory.appendingPathComponent("downloads.json") }
     private var queueURL: URL { TrapTubeDownloadPaths.appDirectory.appendingPathComponent("queue.json") }
 
@@ -1050,8 +1051,10 @@ final class TrapTubeDownloadManager: ObservableObject {
     private func start(jobID: String, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
                        audio: TrapTubeFlatAsset?, format: String) {
         workers[jobID]?.cancel()
+        let token = UUID()
+        workerTokens[jobID] = token
         workers[jobID] = Task { [weak self] in
-            await self?.run(jobID: jobID, media: media, video: video, audio: audio, format: format)
+            await self?.run(jobID: jobID, workerToken: token, media: media, video: video, audio: audio, format: format)
         }
     }
 
@@ -1061,9 +1064,14 @@ final class TrapTubeDownloadManager: ObservableObject {
         persistQueue()
     }
 
-    private func run(jobID: String, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
+    private func run(jobID: String, workerToken: UUID, media: TrapTubeResolvedMedia, video: TrapTubeFlatAsset?,
                      audio: TrapTubeFlatAsset?, format: String) async {
-        defer { workers[jobID] = nil }
+        defer {
+            if workerTokens[jobID] == workerToken {
+                workers[jobID] = nil
+                workerTokens[jobID] = nil
+            }
+        }
         guard jobs.contains(where: { $0.id == jobID }) else { return }
         updateJob(jobID) { $0.status = "running"; $0.stage = "Downloading streams" }
         do {
@@ -1185,7 +1193,7 @@ final class TrapTubeDownloadManager: ObservableObject {
     private func modeFor(_ id: String) -> String { jobs.first(where: { $0.id == id })?.mode ?? "video" }
 
     func cancel(_ id: String) async {
-        workers[id]?.cancel(); workers[id] = nil
+        workers[id]?.cancel(); workers[id] = nil; workerTokens[id] = nil
         if let i = jobs.firstIndex(where: { $0.id == id }) { jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"; persistQueue() }
     }
 
