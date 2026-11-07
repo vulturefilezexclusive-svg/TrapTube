@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("settings.shortsAutoplay") private var shortsAutoplay = true
     @AppStorage("settings.reduceMotion") private var reduceMotion = false
     @AppStorage("settings.shareDiagnostics") private var shareDiagnostics = false
+    @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
 
     private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
 
@@ -77,8 +78,26 @@ struct SettingsView: View {
                 }
 
                 settingsCard(title: "Streaming quality", icon: "slider.horizontal.3") {
-                    Text("Quality choices are loaded from the active TypeType stream. Open a video and use the in-player Quality menu for available video renditions and the Audio menu for available audio tracks. TrapTube does not display fixed quality levels that the stream does not support.")
+                    Text("Choose the preferred video resolution. TrapTube selects it when the active stream offers that rendition; if it is unavailable, the player uses the highest available rendition below your preference.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    Picker("Preferred video quality", selection: $preferredVideoQuality) {
+                        Text("Auto · Provider default").tag("auto")
+                        Text("2160p · 4K").tag("2160")
+                        Text("1440p · 2K").tag("1440")
+                        Text("1080p · Full HD").tag("1080")
+                        Text("720p · HD").tag("720")
+                        Text("480p · SD").tag("480")
+                        Text("360p").tag("360")
+                    }
+                    .pickerStyle(.menu)
+                    .tint(theme.accent)
+                    HStack {
+                        Text("Preferred resolution")
+                        Spacer()
+                        Text(preferredVideoQuality == "auto" ? "Auto" : "\(preferredVideoQuality)p")
+                            .fontWeight(.semibold).foregroundStyle(theme.accent)
+                    }
+                    .font(.subheadline)
                 }
 
                 settingsCard(title: "Quick setup", icon: "checkmark.circle") {
