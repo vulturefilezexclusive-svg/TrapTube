@@ -24,8 +24,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet numpy
-          python3 tests/reference/dsp_reference_check.py
+          python3 -m venv "$RUNNER_TEMP/traptube-test-venv"
+          source "$RUNNER_TEMP/traptube-test-venv/bin/activate"
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy
+          python tests/reference/dsp_reference_check.py
           node tests/js/bootstrap.test.js
 
       - name: Validate and extract Xcode project
