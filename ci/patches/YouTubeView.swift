@@ -12,11 +12,18 @@ struct YouTubeView: View {
 
     private var homeURL: URL {
         let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
-              ["http", "https"].contains(scheme), url.host != nil else {
+        guard !raw.isEmpty else { return URL(string: "https://www.youtube.com/")! }
+
+        // Accept both fully-qualified URLs and ordinary addresses such as example.com/path.
+        let candidate = raw.contains("://") ? raw : "https://\(raw)"
+        guard var components = URLComponents(string: candidate),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host, !host.isEmpty else {
             return URL(string: "https://www.youtube.com/")!
         }
-        return url
+        components.scheme = scheme
+        return components.url ?? URL(string: "https://www.youtube.com/")!
     }
 
     var body: some View {
