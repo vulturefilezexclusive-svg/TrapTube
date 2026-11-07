@@ -77,6 +77,7 @@ struct TrapTubeDownloadTask: Codable, Identifiable {
     var selectedAudioBitrate: Int? = nil
     var selectedVideoMimeType: String? = nil
     var selectedAudioMimeType: String? = nil
+    var outputFormat: String? = nil
     var partialFileName: String?
     var outputFileName: String?
     var resumeOffset: Int64
@@ -1142,7 +1143,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 selectedVideoHeight: selectedVideo?.height, selectedVideoBitrate: selectedVideo?.bitrate,
                 selectedAudioBitrate: selectedAudio?.bitrate,
                 selectedVideoMimeType: selectedVideo?.mimeType, selectedAudioMimeType: selectedAudio?.mimeType,
-                partialFileName: nil, outputFileName: nil, resumeOffset: 0)
+                outputFormat: format, partialFileName: nil, outputFileName: nil, resumeOffset: 0)
             jobs.insert(job, at: 0)
             persistQueue()
             start(jobID: id, media: media, video: selectedVideo, audio: selectedAudio, format: format)
@@ -1340,7 +1341,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let selectedAudio = restoredAudioAsset(in: media, for: job)
                 let video = job.mode == "audio" ? nil : selectedVideo
                 start(jobID: id, media: media, video: video, audio: selectedAudio,
-                      format: job.mode == "audio" ? "m4a" : "mp4")
+                      format: job.outputFormat ?? (job.mode == "audio" ? "m4a" : "mp4"))
             } catch {
                 lastError = error.localizedDescription
             }
