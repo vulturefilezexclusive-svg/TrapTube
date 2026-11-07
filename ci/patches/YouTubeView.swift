@@ -12,6 +12,8 @@ struct YouTubeView: View {
     @State private var results: [TypeTypeVideo] = []
     @State private var nextPage: String?
     @State private var isLoading = false
+    @State private var isGoogleSigningIn = false
+    @StateObject private var googleAuth = GoogleYouTubeAuth.shared
     @State private var errorMessage: String?
     @State private var selectedVideo: TypeTypeVideo?
     @FocusState private var searchFocused: Bool
@@ -33,6 +35,50 @@ struct YouTubeView: View {
                     Text("Search your music library and browse TypeType videos.")
                         .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
                 }.padding(.horizontal, 18)
+
+                HStack(spacing: 12) {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.title2).foregroundStyle(theme.accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(googleAuth.isSignedIn ? (googleAuth.displayName ?? "Google account connected") : "Your YouTube account")
+                            .font(.subheadline.bold()).foregroundStyle(.white)
+                        Text(googleAuth.isSignedIn ? (googleAuth.email ?? "Connected to Google") : "Connect Google to access your subscriptions")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6")).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    if googleAuth.isSignedIn {
+                        Button("Disconnect") { googleAuth.signOut() }
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 9)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    } else {
+                        Button {
+                            isGoogleSigningIn = true
+                            Task {
+                                await googleAuth.signIn()
+                                isGoogleSigningIn = false
+                            }
+                        } label: {
+                            if isGoogleSigningIn {
+                                ProgressView().tint(.white)
+                            } else {
+                                Text("Sign in")
+                            }
+                        }
+                        .font(.caption.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 15).padding(.vertical, 9)
+                        .background(theme.accent, in: Capsule())
+                        .disabled(isGoogleSigningIn)
+                    }
+                }
+                .padding(13)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12), lineWidth: 1))
+                .padding(.horizontal, 16)
+                if let authError = googleAuth.lastError {
+                    Text(authError).font(.caption).foregroundStyle(Color(hex: "FF7A84"))
+                        .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 20)
+                }
 
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Color(hex: "A6A4A6"))
