@@ -462,9 +462,25 @@ enum TrapTubeFlatTransfer {
 }
 
 enum TrapTubeMP4Box {
-    static func mux(video: URL, audio: URL?, output: URL, videoStreamIndex: Int? = nil, audioStreamIndex: Int? = nil, progress: ((Int64, Double) -> Void)? = nil) async throws {
-        var args = ["-y", "-i", video.absoluteString.hasPrefix("http") ? video.absoluteString : video.path]
-        if let audio { args += ["-i", audio.absoluteString.hasPrefix("http") ? audio.absoluteString : audio.path] }
+    private static func headerArgument(_ headers: [String: String]) -> String {
+        headers.map { "\($0.key): \($0.value)\r\n" }.sorted().joined()
+    }
+
+    static func mux(video: URL, audio: URL?, output: URL, videoStreamIndex: Int? = nil,
+                    audioStreamIndex: Int? = nil, videoHeaders: [String: String] = [:],
+                    audioHeaders: [String: String] = [:],
+                    progress: ((Int64, Double) -> Void)? = nil) async throws {
+        var args = ["-y"]
+        if video.scheme == "http" || video.scheme == "https", !videoHeaders.isEmpty {
+            args += ["-headers", headerArgument(videoHeaders)]
+        }
+        args += ["-i", video.absoluteString.hasPrefix("http") ? video.absoluteString : video.path]
+        if let audio {
+            if (audio.scheme == "http" || audio.scheme == "https"), !audioHeaders.isEmpty {
+                args += ["-headers", headerArgument(audioHeaders)]
+            }
+            args += ["-i", audio.absoluteString.hasPrefix("http") ? audio.absoluteString : audio.path]
+        }
         args += audio == nil
             ? ["-map", videoStreamIndex.map { "0:\($0)" } ?? "0:v?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", output.path]
             : ["-map", videoStreamIndex.map { "0:\($0)" } ?? "0:v:0", "-map", audioStreamIndex.map { "1:\($0)" } ?? "1:a:0", "-c", "copy", "-movflags", "+faststart", output.path]
@@ -473,10 +489,16 @@ enum TrapTubeMP4Box {
     }
 
     static func extractAudio(input: URL, output: URL, format: String, streamIndex: Int? = nil,
+                             headers: [String: String] = [:],
                              progress: ((Int64, Double) -> Void)? = nil) async throws {
         let codec = format == "wav" ? "pcm_s16le" : "aac"
+        var args = ["-y"]
+        if (input.scheme == "http" || input.scheme == "https"), !headers.isEmpty {
+            args += ["-headers", headerArgument(headers)]
+        }
         let inputPath = input.absoluteString.hasPrefix("http") ? input.absoluteString : input.path
-        try await TrapTubeFFmpegProcessor.execute(["-y", "-i", inputPath, "-map", streamIndex.map { "0:\($0)" } ?? "0:a:0?", "-vn", "-c:a", codec, output.path], progress: progress)
+        args += ["-i", inputPath, "-map", streamIndex.map { "0:\($0)" } ?? "0:a:0?", "-vn", "-c:a", codec, output.path]
+        try await TrapTubeFFmpegProcessor.execute(args, progress: progress)
         guard FileManager.default.fileExists(atPath: output.path) else { throw TrapTubeFFmpegError.missingOutput }
     }
 }
@@ -672,9 +694,12 @@ final class TrapTubeDownloadManager: ObservableObject {
                 }
             }
             if modeFor(jobID) == "audio" {
-                try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt, streamIndex: audio?.streamIndex ?? video?.streamIndex, progress: stats)
+                try await TrapTubeMP4Box.extractAudio(input: first, output: outputURL, format: outputExt,
+                    streamIndex: audio?.streamIndex ?? video?.streamIndex, headers: audio?.headers ?? video?.headers ?? [:], progress: stats)
             } else {
-                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL, videoStreamIndex: video?.streamIndex, audioStreamIndex: audio?.streamIndex, progress: stats)
+                try await TrapTubeMP4Box.mux(video: first, audio: inputURLs.count > 1 ? inputURLs[1] : nil, output: outputURL,
+                    videoStreamIndex: video?.streamIndex, audioStreamIndex: audio?.streamIndex,
+                    videoHeaders: video?.headers ?? [:], audioHeaders: audio?.headers ?? [:], progress: stats)
             }
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
             let item = TrapTubeDownloadedMedia(id: UUID().uuidString, title: media.title, fileName: outputName,
