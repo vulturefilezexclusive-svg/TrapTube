@@ -471,7 +471,7 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
       };
       window.__traptubeSetEQ = value => { settings = Object.assign(settings, value || {}); apply(); };
       const attach = () => {
-        const candidate = document.querySelector("main .vds-player video") || document.querySelector(".vds-player video") || document.querySelector("video");
+        const candidate = document.querySelector("video");
         if (!candidate) {
           if (!missingVideoReported && Date.now() - bootstrapStartedAt > 12000) {
             missingVideoReported = true;
@@ -562,43 +562,41 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
         if (command === "pause") video.pause();
         if (command === "seek" && Number.isFinite(Number(value)) && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, Number(value)));
       };
-      const selectors = {video:".typetype-quality-menu", audio:".vds-audio-menu"};
-      window.__traptubeScanMenus = (onlyKind) => Object.entries(selectors).filter(([kind]) => !onlyKind || kind === onlyKind).forEach(([kind, selector]) => {
-        const trigger = document.querySelector(selector + " button");
-        if (!trigger) { post({type:kind === "video" ? "videoQualities" : "audioTracks",items:[]}); return; }
+      const youtubeSettings = () => document.querySelector(".ytp-settings-button");
+      const menuItems = () => Array.from(document.querySelectorAll(".ytp-panel-menu .ytp-menuitem, .ytp-panel-menu [role=menuitemradio]"));
+      const textOf = node => (node.innerText || node.textContent || "").trim().replace(/\\s+/g, " ");
+      const openQualityMenu = callback => {
+        const trigger = youtubeSettings();
+        if (!trigger) { callback([]); return; }
         trigger.click();
         setTimeout(() => {
-          const items = Array.from(document.querySelectorAll(".vds-menu-items [role=radio], .vds-menu-items button"))
-            .map(node => ({label:(node.innerText || node.textContent || "").trim(),selected:node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true"}))
-            .filter(item => item.label.length);
-          trigger.click();
-          post({type:kind === "video" ? "videoQualities" : "audioTracks",items});
-        }, 220);
+          const quality = menuItems().find(node => /^quality(?:\\s|$)/i.test(textOf(node)));
+          if (!quality) { trigger.click(); callback([]); return; }
+          quality.click();
+          setTimeout(() => callback(menuItems().map(node => ({
+            label:textOf(node),
+            selected:node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true" ||
+              node.classList.contains("ytp-menuitem-selected")
+          })).filter(item => /\\d{3,4}p|auto/i.test(item.label))), 180);
+        }, 180);
+      };
+      window.__traptubeScanMenus = () => openQualityMenu(items => {
+        post({type:"videoQualities",items});
+        const trigger = youtubeSettings();
+        if (trigger) trigger.click();
+        post({type:"audioTracks",items:[]});
       });
       window.__traptubeSelectOption = ([kind,label]) => {
-        const trigger = document.querySelector((selectors[kind] || "") + " button");
-        if (!trigger) return;
-        trigger.click();
-        setTimeout(() => {
+        if (kind !== "video") return;
+        openQualityMenu(items => {
           const wanted = String(label).trim();
-          const option = Array.from(document.querySelectorAll(".vds-menu-items [role=radio], .vds-menu-items button"))
-            .find(node => (node.innerText || node.textContent || "").trim() === wanted);
-          if (option) option.click(); else trigger.click();
-          setTimeout(window.__traptubeScanMenus, 150);
-        }, 220);
+          const option = menuItems().find(node => textOf(node) === wanted);
+          if (option) option.click();
+          else { const trigger = youtubeSettings(); if (trigger) trigger.click(); }
+          setTimeout(window.__traptubeScanMenus, 180);
+        });
       };
-      let videoMenuScanned = false, audioMenuScanned = false;
-      new MutationObserver(() => {
-        attach();
-        if (!videoMenuScanned && document.querySelector(".typetype-quality-menu")) {
-          videoMenuScanned = true;
-          setTimeout(() => window.__traptubeScanMenus("video"), 350);
-        }
-        if (!audioMenuScanned && document.querySelector(".vds-audio-menu")) {
-          audioMenuScanned = true;
-          setTimeout(() => window.__traptubeScanMenus("audio"), 350);
-        }
-      }).observe(document.documentElement,{childList:true,subtree:true});
+      new MutationObserver(() => attach()).observe(document.documentElement,{childList:true,subtree:true});
       attach();
       setInterval(() => { attach(); state(); }, 700);
     })();
