@@ -723,13 +723,9 @@ private struct TrapTubeDownloadsSheet: View {
 
                         Picker("File format", selection: $format) {
                             if mode == "video" {
-                                Text("MP4").tag("mp4")
-                                Text("WebM").tag("webm")
-                            } else if mode == "audio" {
-                                Text("M4A").tag("m4a")
-                                Text("Opus").tag("opus")
+                                Text("MP4 · iOS compatible").tag("mp4")
                             } else {
-                                Text("M4A").tag("m4a")
+                                Text("M4A · AAC").tag("m4a")
                             }
                         }
                         .pickerStyle(.menu)
