@@ -74,7 +74,14 @@ jobs:
             echo "WARNING: AppIcon.appiconset was not found; player menu will use the asset fallback."
             exit 0
           fi
-          ICON_SOURCE="$(find "$ICON_SET" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 | xargs -0 ls -S | head -n 1)"
+          ICON_SOURCE="$(python3 - "$ICON_SET" <<'PYICON'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          images = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+          print(max(images, key=lambda p: p.stat().st_size) if images else "")
+          PYICON
+          )"
           if [[ -z "$ICON_SOURCE" ]]; then
             echo "WARNING: AppIcon.appiconset contains no raster image; player menu will use the asset fallback."
             exit 0
