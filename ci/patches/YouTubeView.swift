@@ -290,7 +290,7 @@ private struct TypeTypeWatchSheet: View {
                         Button { showEQ = true } label: {
                             Label("EQ", systemImage: "slider.horizontal.3").font(.subheadline.bold())
                                 .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 9)
-                                .background(.white.opacity(0.12), in: Capsule())
+                                .background(.ultraThinMaterial, in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
                         }
                         if let eqError {
                             Text(eqError).font(.caption2).foregroundStyle(Color(hex: "FF8A8A")).lineLimit(2)
