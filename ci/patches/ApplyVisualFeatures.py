@@ -236,7 +236,7 @@ p.write_text(s)
 root_view = find("RootView.swift")
 root_source = root_view.read_text()
 root_source = root_source.replace("case .home: HomeView()", "case .home: YouTubeView()", 1)
-root_source = root_source.replace("case .youtube: YouTubeView()", "case .youtube: HomeView()", 1)
+# Keep the existing YouTube tab and all other tab destinations unchanged.
 root_view.write_text(root_source)
 
 print("Applied splash, glass surfaces, and audio-reactive visualizer patches.")
