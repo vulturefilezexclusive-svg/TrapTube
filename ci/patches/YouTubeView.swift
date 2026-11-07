@@ -6,6 +6,9 @@ import UIKit
 struct YouTubeView: View {
     @AppStorage("discovery.sourceURL") private var discoverySourceURL = ""
     @State private var selectedWatch: YouTubeWatchItem?
+    @State private var latestVideoURL = URL(string: "https://www.youtube.com/")!
+    @State private var latestVideoTitle = "YouTube video"
+    @State private var showDownloads = false
 
     private var homeURL: URL {
         let raw = discoverySourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18,15 +21,30 @@ struct YouTubeView: View {
 
     var body: some View {
         StreamingHomeWebView(url: homeURL) { url in
+            latestVideoURL = url
             selectedWatch = YouTubeWatchItem(url: url, title: "YouTube video")
         }
         .ignoresSafeArea(edges: .bottom)
-        .sheet(item: $selectedWatch) { item in
+        .overlay(alignment: .topTrailing) {
+            Button { showDownloads = true } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.black.opacity(0.72), in: Circle())
+            }
+            .accessibilityLabel("Open downloads")
+            .padding(.top, 8)
+            .padding(.trailing, 14)
+        }
+        .fullScreenCover(item: $selectedWatch) { item in
             YouTubeWatchSheet(url: item.url, downloadURL: item.url, title: item.title)
+        }
+        .sheet(isPresented: $showDownloads) {
+            TrapTubeDownloadsSheet(title: latestVideoTitle, videoURL: latestVideoURL)
                 .preferredColorScheme(.dark)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
-                .presentationCornerRadius(28)
         }
     }
 }
@@ -118,232 +136,32 @@ private struct YouTubeWatchSheet: View {
     let url: URL
     let downloadURL: URL
     let title: String
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var theme: ThemeManager
-    @EnvironmentObject private var audio: AudioEngineManager
-    @State private var webView: WKWebView?
-    @State private var currentTime = 0.0
-    @State private var duration = 0.0
-    @State private var isPlaying = false
-    @State private var scrubbing = false
-    @State private var scrubValue = 0.0
-    @State private var eqReady = false
-    @State private var eqError: String?
-    @State private var videoQualities: [YouTubePlayerOption] = []
-    @State private var audioTracks: [YouTubePlayerOption] = []
-    @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
-    @State private var showEQ = false
-    @State private var showTrapTubeMenu = false
-    @State private var controlsVisible = true
-    @State private var showDownloads = false
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            YouTubePlayerWebView(url: url, gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain,
-                            onCreated: { webView = $0 }, onMessage: receive)
-            VStack(spacing: 0) {
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
-                            .frame(width: 38, height: 38).background(.ultraThinMaterial, in: Circle()).overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
-                    }
-                    Text(title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button { showTrapTubeMenu = true } label: {
-                        Image(uiImage: UIImage(named: "TrapTubeIcon") ?? UIImage(systemName: "app.fill")!).resizable().scaledToFill().frame(width: 38, height: 38)
-                            .clipShape(RoundedRectangle(cornerRadius: 11))
-                            .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.30), lineWidth: 1))
-                    }.accessibilityLabel("Open TrapTube player menu")
-                    Button { showDownloads = true } label: {
-                        Label("TrapHouse", systemImage: "house.fill")
-                            .font(.caption.weight(.bold)).foregroundStyle(.white)
-                            .padding(.horizontal, 11).padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
-                    }
-                    .accessibilityLabel("Open TrapHouse downloads")
-                }.padding(14).background(.ultraThinMaterial.opacity(0.72))
-                if controlsVisible {
-                    Spacer()
-                    VStack(spacing: 10) {
-                        HStack {
-                            Label("Player controls", systemImage: "waveform")
-                                .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.78))
-                            Spacer()
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
-                            } label: {
-                                Image(systemName: "chevron.down")
-                                    .font(.headline.bold()).foregroundStyle(.white)
-                                    .frame(width: 34, height: 30)
-                                    .background(.ultraThinMaterial, in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
-                            }
-                            .accessibilityLabel("Hide player controls")
-                        }
-                        HStack(spacing: 12) {
-                        Button { command("toggle") } label: {
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.title3.bold()).foregroundStyle(.white).frame(width: 42, height: 42)
-                                .background(.ultraThinMaterial, in: Circle()).overlay(Circle().stroke(theme.accent.opacity(0.8), lineWidth: 1))
-                        }
-                        VStack(spacing: 3) {
-                            Slider(value: Binding(get: { scrubbing ? scrubValue : (duration > 0 ? currentTime / duration : 0) },
-                                                  set: { scrubValue = $0; scrubbing = true }),
-                                   in: 0...1, onEditingChanged: { editing in
-                                if !editing { command("seek", scrubValue * duration); scrubbing = false }
-                            }).tint(theme.accent)
-                            HStack {
-                                Text(timeText(scrubbing ? scrubValue * duration : currentTime))
-                                Spacer()
-                                Text(duration > 0 ? timeText(duration) : "LIVE")
-                            }.font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.75))
-                        }
-                    }
-                    HStack(spacing: 8) {
-                        Button { showEQ = true } label: {
-                            Label("EQ", systemImage: "slider.horizontal.3").font(.subheadline.bold())
-                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 9)
-                                .background(.ultraThinMaterial, in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
-                        }
-                        if let eqError {
-                            Text(eqError).font(.caption2).foregroundStyle(Color(hex: "FF8A8A")).lineLimit(2)
-                        } else if !eqReady {
-                            Text("Connecting EQ…").font(.caption2).foregroundStyle(.white.opacity(0.65))
-                        }
-                        Spacer(minLength: 0)
-                        Menu {
-                            if videoQualities.isEmpty { Text("No selectable video qualities for this stream") }
-                            ForEach(videoQualities) { option in
-                                Button { select(kind: "video", label: option.label) } label: {
-                                    if option.selected { Label(option.label, systemImage: "checkmark") } else { Text(option.label) }
-                                }
-                            }
-                        } label: {
-                            Label("Quality", systemImage: "4k.tv").font(.caption.bold()).foregroundStyle(.white)
-                                .padding(.horizontal, 10).padding(.vertical, 9).background(.white.opacity(0.12), in: Capsule())
-                        }
-                        Menu {
-                            if audioTracks.isEmpty { Text("No alternate audio tracks for this stream") }
-                            ForEach(audioTracks) { option in
-                                Button { select(kind: "audio", label: option.label) } label: {
-                                    if option.selected { Label(option.label, systemImage: "checkmark") } else { Text(option.label) }
-                                }
-                            }
-                        } label: {
-                            Label("Audio track", systemImage: "waveform").font(.caption.bold()).foregroundStyle(.white)
-                                .padding(.horizontal, 10).padding(.vertical, 9).background(.white.opacity(0.12), in: Capsule())
-                        }
-                    }
-                    Text("Choices are read from the active YouTube player; unsupported quality levels are not fabricated.")
-                        .font(.caption2).foregroundStyle(.white.opacity(0.55)).frame(maxWidth: .infinity, alignment: .leading)
-                }
-                    .padding(13)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
-                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.18), lineWidth: 1))
-                    .padding(.horizontal, 10).padding(.bottom, 12)
-                } else {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = true }
-                        } label: {
-                            Label("Show controls", systemImage: "slider.horizontal.3")
-                                .font(.caption.weight(.bold)).foregroundStyle(.white)
-                                .padding(.horizontal, 14).padding(.vertical, 11)
-                                .background(.ultraThinMaterial, in: Capsule())
-                                .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
-                        }
-                        .accessibilityLabel("Show player controls")
-                    }
-                    .padding(.horizontal, 14).padding(.bottom, 14)
-                }
-            }
-        }
-        .sheet(isPresented: $showDownloads) {
-            TrapTubeDownloadsSheet(title: title, videoURL: downloadURL)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(28)
-                .preferredColorScheme(.dark)
-        }
-        .sheet(isPresented: $showEQ) {
-            EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
-        }
-        .sheet(isPresented: $showTrapTubeMenu) {
-            TrapTubePlayerMenu(title: title, videoURL: url, onPlayback: {
-                showTrapTubeMenu = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showEQ = true }
-            })
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .presentationCornerRadius(28)
+        YouTubePlainVideoWebView(url: url)
+            .background(Color.black.ignoresSafeArea())
+            .ignoresSafeArea()
             .preferredColorScheme(.dark)
-        }
-        .onChange(of: audio.eqGains) { _, _ in applyEQ() }
-        .onChange(of: audio.bassBoost) { _, _ in applyEQ() }
-        .onChange(of: audio.masterGain) { _, _ in applyEQ() }
-        .onChange(of: preferredVideoQuality) { _, _ in applyPreferredVideoQuality() }
+    }
+}
+
+private struct YouTubePlainVideoWebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+        webView.isOpaque = false
+        webView.allowsBackForwardNavigationGestures = true
+        webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        return webView
     }
 
-    private func receive(_ body: [String: Any]) {
-        switch body["type"] as? String {
-        case "state":
-            if let value = body["currentTime"] as? Double { currentTime = value }
-            if let value = body["duration"] as? Double { duration = value }
-            if let value = body["paused"] as? Bool { isPlaying = !value }
-        case "eqStatus":
-            eqReady = body["ready"] as? Bool ?? false
-            eqError = body["error"] as? String
-        case "videoQualities":
-            videoQualities = options(body["items"])
-            applyPreferredVideoQuality()
-        case "audioTracks": audioTracks = options(body["items"])
-        case "playerError": eqError = body["message"] as? String
-        default: break
-        }
-    }
-
-    private func options(_ raw: Any?) -> [YouTubePlayerOption] {
-        guard let rows = raw as? [[String: Any]] else { return [] }
-        return rows.compactMap { row in
-            guard let label = row["label"] as? String, !label.isEmpty else { return nil }
-            return YouTubePlayerOption(label: label, selected: row["selected"] as? Bool ?? false)
-        }
-    }
-
-    private func command(_ name: String, _ value: Double = 0) {
-        webView?.evaluateJavaScript("window.__traptubeControl && window.__traptubeControl('\(name)', \(value));")
-    }
-
-    private func select(kind: String, label: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: [kind, label]),
-              let json = String(data: data, encoding: .utf8) else { return }
-        webView?.evaluateJavaScript("window.__traptubeSelectOption && window.__traptubeSelectOption(\(json));")
-    }
-
-    private func applyEQ() {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["gains": audio.eqGains, "bass": audio.bassBoost, "master": audio.masterGain]),
-              let json = String(data: data, encoding: .utf8) else { return }
-        webView?.evaluateJavaScript("window.__traptubeSetEQ && window.__traptubeSetEQ(\(json));")
-    }
-
-    private func applyPreferredVideoQuality() {
-        guard preferredVideoQuality != "auto", let preferredHeight = Int(preferredVideoQuality), !videoQualities.isEmpty else { return }
-        let candidates = videoQualities.compactMap { option -> (YouTubePlayerOption, Int)? in
-            guard let range = option.label.range(of: #"(?:^|\D)(\d{3,4})\s*p?"#, options: .regularExpression) else { return nil }
-            let height = Int(option.label[range].filter { $0.isNumber }) ?? 0
-            return height > 0 ? (option, height) : nil
-        }
-        guard let chosen = candidates.filter({ $0.1 <= preferredHeight }).max(by: { $0.1 < $1.1 })?.0 else { return }
-        guard !chosen.selected else { return }
-        select(kind: "video", label: chosen.label)
-    }
-    private func timeText(_ value: Double) -> String {
-        let seconds = value.isFinite ? max(0, Int(value)) : 0
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
+    func updateUIView(_ webView: WKWebView, context: Context) {}
 }
 
 private struct YouTubePlayerWebView: UIViewRepresentable {
