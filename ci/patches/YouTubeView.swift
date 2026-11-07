@@ -79,10 +79,12 @@ private struct StreamingHomeWebView: UIViewRepresentable {
             return youtube && (target.pathname === '/watch' || target.pathname.startsWith('/shorts/') ||
                                target.pathname.startsWith('/live/'));
           };
-          const postWatch = target => {
+          const postWatch = (target, anchor = null) => {
+            const cardTitle = anchor && (anchor.querySelector('#video-title, h3') || anchor);
             const heading = document.querySelector('h1.ytd-watch-metadata yt-formatted-string');
-            const raw = (heading && heading.textContent) || document.title.replace(/\\s*-\\s*YouTube$/i, '');
-            const title = (raw || 'YouTube video').trim().slice(0, 180);
+            const raw = (cardTitle && (cardTitle.getAttribute('title') || cardTitle.getAttribute('aria-label') || cardTitle.textContent)) ||
+                        (heading && heading.textContent) || document.title.replace(/\\s*-\\s*YouTube$/i, '');
+            const title = (raw || 'YouTube video').replace(/\\s+/g, ' ').trim().slice(0, 180);
             try { window.webkit.messageHandlers.trapHome.postMessage({url: target.href, title}); } catch (_) {}
           };
           document.addEventListener('click', event => {
@@ -93,7 +95,7 @@ private struct StreamingHomeWebView: UIViewRepresentable {
             if (!isWatch(target)) return;
             event.preventDefault();
             event.stopPropagation();
-            postWatch(target);
+            postWatch(target, anchor);
           }, true);
           ['pushState', 'replaceState'].forEach(method => {
             const original = history[method];
