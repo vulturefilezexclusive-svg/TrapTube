@@ -103,7 +103,7 @@ enum TrapTubeWebCookieBridge {
                         referer: URL? = nil) async -> [String: String] {
         var headers = ["User-Agent": userAgent]
         if let referer { headers["Referer"] = referer.absoluteString }
-        if let cookie = await cookieHeader(for: url) { headers["Cookie"] = cookie }
+        if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
         return headers
     }
 }
@@ -516,7 +516,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         var watchRequest = URLRequest(url: watchURL)
         watchRequest.timeoutInterval = 25
         watchRequest.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-        if let cookie = await cookieHeader(for: watchURL) { watchRequest.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: watchURL) { watchRequest.setValue(cookie, forHTTPHeaderField: "Cookie") }
         let (pageData, pageResponse) = try await URLSession.shared.data(for: watchRequest)
         guard let pageHTTP = pageResponse as? HTTPURLResponse, (200..<400).contains(pageHTTP.statusCode),
               let page = String(data: pageData, encoding: .utf8) else { throw TrapTubeResolverError.badResponse }
@@ -534,7 +534,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         playerRequest.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         playerRequest.setValue(watchURL.absoluteString, forHTTPHeaderField: "Referer")
         playerRequest.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-        if let cookie = await cookieHeader(for: watchURL) { playerRequest.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: watchURL) { playerRequest.setValue(cookie, forHTTPHeaderField: "Cookie") }
         let payload: [String: Any] = [
             "videoId": videoID,
             "contentCheckOk": true,
@@ -577,7 +577,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
             var headers = baseHeaders
-            if let cookie = await cookieHeader(for: url) { headers["Cookie"] = cookie }
+            if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
             muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: mime, height: height,
                 bitrate: bitrate, label: row["qualityLabel"] as? String ?? "Muxed", isManifest: false,
                 headers: headers))
@@ -588,7 +588,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
             var headers = baseHeaders
-            if let cookie = await cookieHeader(for: url) { headers["Cookie"] = cookie }
+            if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
             if mime.lowercased().hasPrefix("audio/") {
                 audios.append(TrapTubeFlatAsset(url: url, kind: .audio, mimeType: mime, height: nil,
                     bitrate: bitrate, label: row["audioQuality"] as? String ?? "Audio", isManifest: false,
@@ -637,19 +637,6 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         return String(text[range])
     }
 
-    @MainActor
-    private func cookieHeader(for url: URL) async -> String? {
-        let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
-        }
-        let host = url.host?.lowercased() ?? ""
-        let matching = cookies.filter { cookie in
-            let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            return host == domain || host.hasSuffix("." + domain)
-        }
-        guard !matching.isEmpty else { return nil }
-        return matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-    }
 }
 
 enum TrapTubeFlatTransferError: LocalizedError {
