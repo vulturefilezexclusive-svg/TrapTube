@@ -37,8 +37,14 @@ private enum HTDemucsRuntime {
     static let bins = 2048
     static let frames = (segmentLength + hop - 1) / hop
     static let pad = hop / 2 * 3
+    static let padRight = pad + frames * hop - segmentLength
+    static let paddedLength = pad + segmentLength + padRight
     static let sourceOrder: [Stem] = [.drums, .bass, .other, .vocals]
-    static let window: [Float] = (0..<nFFT).map { 0.5 - 0.5 * cos(2 * Float.pi * Float($0) / Float(nFFT)) }
+    static let window: [Float] = (0..<nFFT).map { 0.5 * (1 - cos(2 * Float.pi * Float($0) / Float(nFFT))) }
+    private static let forwardScale: Float = 1.0 / 128.0
+    private static let inverseScale: Float = 1.0 / 64.0
+    private static let olaEnvelope: Float = 1.5
+    private static let fftSetup: FFTSetup = vDSP_create_fftsetup(12, FFTRadix(kFFTRadix2))!
     static let inverseEnvelope: [Float] = {
         var envelope = [Float](repeating: 0, count: nFFT + hop * (frames + 3))
         for f in 0..<(frames + 4) { for k in 0..<nFFT { envelope[f * hop + k] += window[k] * window[k] } }
