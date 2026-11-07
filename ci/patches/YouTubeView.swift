@@ -568,6 +568,8 @@ private struct TrapTubePlayerMenu: View {
     @State private var showDownloadInfo = false
     @State private var showMenuInfo = false
     @State private var menuInfoText = ""
+    @State private var showMenuInfo = false
+    @State private var menuInfoText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -601,6 +603,11 @@ private struct TrapTubePlayerMenu: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("The connected streaming player does not expose an authorized media download endpoint. You can import audio and video files you own or are licensed to use into your TrapTube library.")
+        }
+        .alert("TrapTube", isPresented: $showMenuInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(menuInfoText)
         }
         .alert("TrapTube", isPresented: $showMenuInfo) {
             Button("OK", role: .cancel) { }
