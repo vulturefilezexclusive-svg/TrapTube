@@ -100,65 +100,6 @@ struct TypeTypeService {
         if token?.isEmpty != false { _ = try await connect() }
     }
 
-    func createDownloadJob(videoURL: URL, options: TypeTypeDownloadOptions) async throws -> TypeTypeCreateDownloadResponse {
-        try await ensureToken()
-        let payload = TypeTypeCreateDownloadRequest(url: videoURL.absoluteString, options: options)
-        let body = try JSONEncoder().encode(payload)
-        return try await request(path: "/api/downloader/jobs", method: "POST", body: body, authenticated: true)
-    }
-
-    func fetchDownloadJob(id: String) async throws -> TypeTypeDownloadJob {
-        try await ensureToken()
-        let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        return try await request(path: "/api/downloader/jobs/\(safeID)", authenticated: true)
-    }
-
-    func cancelDownloadJob(id: String) async throws {
-        try await ensureToken()
-        let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        let _: TypeTypeCancelDownloadResponse = try await request(
-            path: "/api/downloader/jobs/\(safeID)/cancel",
-            method: "POST",
-            authenticated: true
-        )
-    }
-
-    func downloadArtifact(id: String, fallbackTitle: String) async throws -> URL {
-        try await ensureToken()
-        let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        var components = URLComponents(url: Self.baseAddress, resolvingAgainstBaseURL: false)!
-        components.path = "/api/downloader/jobs/\(safeID)/artifact"
-        components.queryItems = [URLQueryItem(name: "download", value: "1")]
-        guard let url = components.url else { throw ServiceError.invalidAddress }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 180
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-
-        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ServiceError.badResponse(-1, "No artifact response was received.")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = try? String(contentsOf: temporaryURL, encoding: .utf8)
-            throw ServiceError.badResponse(http.statusCode, detail ?? "The download artifact could not be retrieved.")
-        }
-
-        let directory = TrapTubeDownloadPaths.downloadsDirectory
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let proposed = http.suggestedFilename ?? "\(fallbackTitle).\(http.mimeType?.contains("audio") == true ? "m4a" : "mp4")"
-        let safeName = proposed
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let destination = directory.appendingPathComponent(safeName.isEmpty ? "\(UUID().uuidString).bin" : safeName)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        return destination
-    }
-
     private func request<T: Decodable>(path: String, method: String = "GET", query: [URLQueryItem] = [], body: Data? = nil, authenticated: Bool = true) async throws -> T {
         var components = URLComponents(url: Self.baseAddress, resolvingAgainstBaseURL: false)!
         components.path = path
@@ -179,57 +120,6 @@ struct TypeTypeService {
         do { return try JSONDecoder().decode(T.self, from: data) }
         catch { throw ServiceError.badResponse(200, "The server response did not match the expected TypeType data format.") }
     }
-}
-
-struct TypeTypeCreateDownloadRequest: Encodable {
-    let url: String
-    let options: TypeTypeDownloadOptions
-}
-
-struct TypeTypeCreateDownloadResponse: Decodable {
-    let id: String
-    let cached: Bool?
-}
-
-private struct TypeTypeCancelDownloadResponse: Decodable {
-    let status: String?
-}
-
-struct TypeTypeDownloadOptions: Encodable {
-    var mode: String
-    var quality: String?
-    var format: String?
-    var bitrate: Int?
-    var height: Int?
-    var allowQualityFallback: Bool = true
-}
-
-struct TypeTypeDownloadJob: Decodable, Identifiable {
-    struct Resolved: Decodable {
-        let videoItag: String?
-        let audioItag: String?
-        let height: Int?
-        let fps: Int?
-        let videoCodec: String?
-        let audioCodec: String?
-        let container: String?
-        let bitrate: Int?
-        let fileName: String?
-    }
-
-    let id: String
-    let url: String
-    let status: String
-    let title: String?
-    let resolved: Resolved?
-    let progressPercent: Int?
-    let downloadedBytes: Int64?
-    let totalBytes: Int64?
-    let speedBytesPerSecond: Int64?
-    let etaSeconds: Int?
-    let stage: String?
-    let errorCode: String?
-    let error: String?
 }
 
 enum TrapTubeDownloadPaths {
