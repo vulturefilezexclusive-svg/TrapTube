@@ -138,6 +138,14 @@ final class StemSeparationService: ObservableObject {
                 try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
                 var result: [Stem: URL] = [:]
                 for separatedStem in separated {
+                    guard separatedStem.left.count == pcm.left.count,
+                          separatedStem.right.count == pcm.right.count else {
+                        throw StemProcessingError.outputWrite("\(separatedStem.kind.rawValue) returned an unexpected output length.")
+                    }
+                    guard separatedStem.left.allSatisfy(\.isFinite),
+                          separatedStem.right.allSatisfy(\.isFinite) else {
+                        throw StemProcessingError.outputWrite("\(separatedStem.kind.rawValue) returned non-finite audio samples.")
+                    }
                     guard let kind = Stem(rawValue: separatedStem.kind.rawValue.capitalized) else { continue }
                     let outputURL = destination.appendingPathComponent("\(kind.rawValue.lowercased()).wav")
                     try Self.writeWAV(left: separatedStem.left, right: separatedStem.right,
