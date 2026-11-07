@@ -252,6 +252,7 @@ struct TrapTubeStreamResolver {
             throw TrapTubeResolverError.badResponse
         }
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let isMasterPlaylist = text.contains("#EXT-X-STREAM-INF")
         var videos: [TrapTubeFlatAsset] = [], audios: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
         var pendingHeight: Int?, pendingBandwidth: Int?, audioGroup: String?
         var audioGroups: [String: URL] = [:]
@@ -267,7 +268,7 @@ struct TrapTubeStreamResolver {
                     pendingHeight = h
                 }
                 audioGroup = attrs["AUDIO"]
-            } else if !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL {
+            } else if isMasterPlaylist && !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL {
                 if pendingHeight != nil || pendingBandwidth != nil {
                     videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
                         height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
