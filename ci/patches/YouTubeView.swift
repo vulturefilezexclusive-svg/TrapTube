@@ -607,11 +607,11 @@ private struct TrapTubePlayerMenu: View {
                         showMenuInfo = true
                     }
                     menuRow("Transcript", detail: "Available captions and transcript tools", icon: "captions.bubble") {
-                        menuInfoText = "Transcript access depends on the captions and transcript data supplied by the connected TypeType instance."
+                        menuInfoText = "Transcript access depends on captions exposed by the selected streaming provider."
                         showMenuInfo = true
                     }
                     menuRow("Information", detail: "Media and stream information", icon: "info.circle") {
-                        menuInfoText = "Playback and stream information are supplied by your connected TypeType service."
+                        menuInfoText = "Playback and stream information depend on the selected provider and exposed media metadata."
                         showMenuInfo = true
                     }
                 }
@@ -685,7 +685,7 @@ private struct TrapTubeDownloadsSheet: View {
                         Text("DOWNLOAD MEDIA").font(.caption.bold()).tracking(1.4)
                             .foregroundStyle(Color(hex: "A6A4A6"))
                         Text(title).font(.title3.bold()).foregroundStyle(.white).lineLimit(2)
-                        Text("Downloads are processed by the connected TypeType downloader and saved on this device.")
+                        Text("TrapTube resolves exposed media streams, downloads supported assets locally, and merges compatible video/audio tracks on this device.")
                             .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                     }
 
@@ -736,7 +736,7 @@ private struct TrapTubeDownloadsSheet: View {
                         .tint(Color(hex: "F04452"))
 
                         if mode == "video" {
-                            Text("Video and audio streams are selected by the TypeType downloader, then muxed into the chosen container.")
+                            Text("TrapTube selects exposed video and audio renditions independently, then muxes compatible tracks into MP4.")
                                 .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                         }
 
@@ -788,8 +788,11 @@ private struct TrapTubeDownloadsSheet: View {
                                                 .font(.caption.monospacedDigit()).foregroundStyle(Color(hex: "A6A4A6"))
                                         }
                                         if job.status == "queued" || job.status == "running" {
-                                            Button("Cancel") { Task { await manager.cancel(job.id) } }
+                                            Button("Pause") { Task { await manager.cancel(job.id) } }
                                                 .font(.caption.bold()).foregroundStyle(Color(hex: "FF7A84"))
+                                        } else if job.status == "paused" {
+                                            Button("Resume") { manager.resume(job.id) }
+                                                .font(.caption.bold()).foregroundStyle(Color(hex: "78D69A"))
                                         }
                                     }
                                     if let error = job.error {
