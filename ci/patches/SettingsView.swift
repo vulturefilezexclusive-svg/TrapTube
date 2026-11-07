@@ -7,6 +7,15 @@ struct SettingsView: View {
     @State private var checkingConnection = false
     @State private var showEqualizer = false
     @StateObject private var stemService = StemSeparationService()
+    @AppStorage("settings.quickSetupComplete") private var quickSetupComplete = true
+    @AppStorage("settings.backgroundPlayback") private var backgroundPlayback = true
+    @AppStorage("settings.autoplay") private var autoplay = false
+    @AppStorage("settings.showCaptions") private var showCaptions = true
+    @AppStorage("settings.keepScreenAwake") private var keepScreenAwake = false
+    @AppStorage("settings.smartCleanup") private var smartCleanup = true
+    @AppStorage("settings.shortsAutoplay") private var shortsAutoplay = true
+    @AppStorage("settings.reduceMotion") private var reduceMotion = false
+    @AppStorage("settings.shareDiagnostics") private var shareDiagnostics = false
 
     private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
 
@@ -71,6 +80,52 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                 }
 
+                settingsCard(title: "Quick setup", icon: "checkmark.circle") {
+                    Text("The important defaults most people set once.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    settingsToggle("Quick setup complete", detail: "Remember this device initial preferences", value: $quickSetupComplete)
+                }
+
+                settingsCard(title: "Watch & player", icon: "play.rectangle") {
+                    settingsToggle("Background playback", detail: "Keep supported local audio playing when you leave the player", value: $backgroundPlayback)
+                    Divider().overlay(.white.opacity(0.1))
+                    settingsToggle("Autoplay next item", detail: "Continue through a local queue", value: $autoplay)
+                    Divider().overlay(.white.opacity(0.1))
+                    settingsToggle("Show captions when available", detail: "Use captions exposed by the video provider", value: $showCaptions)
+                    Divider().overlay(.white.opacity(0.1))
+                    settingsToggle("Keep screen awake in player", detail: "Prevent auto-lock while the player is open", value: $keepScreenAwake)
+                }
+
+                settingsCard(title: "Downloads", icon: "arrow.down.circle") {
+                    infoRow("Storage location", value: "On this device")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Media sources", value: "Files you own or are licensed to use")
+                    Divider().overlay(.white.opacity(0.1))
+                    settingsToggle("Smart library cleanup", detail: "Offer cleanup suggestions for unused imported files", value: $smartCleanup)
+                }
+
+                settingsCard(title: "Library & interface", icon: "rectangle.stack") {
+                    infoRow("Library organization", value: "Tracks · playlists · recently played")
+                    Divider().overlay(.white.opacity(0.1))
+                    settingsToggle("Reduce motion", detail: "Use simpler transitions throughout TrapTube", value: $reduceMotion)
+                }
+
+                settingsCard(title: "Shorts", icon: "rectangle.portrait") {
+                    settingsToggle("Autoplay short videos", detail: "Remember this preference for supported short-video feeds", value: $shortsAutoplay)
+                    Text("Short-video controls appear only when the connected provider supplies a compatible feed.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                }
+
+                settingsCard(title: "Customize TrapTube", icon: "slider.horizontal.3") {
+                    Text("Personalize playback, appearance, and interface behavior. Accent colors below update immediately.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                }
+
+                settingsCard(title: "App & privacy", icon: "lock.shield") {
+                    settingsToggle("Share anonymous diagnostics", detail: "Off by default", value: $shareDiagnostics)
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Local audio", value: "Processed on this device")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Remote video", value: "Handled by your connected provider")
+                }
+
                 settingsCard(title: "Theme colors", icon: "paintpalette.fill") {
                     Text("Choose an accent color. Your selection updates the app immediately.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
@@ -119,6 +174,15 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player).environmentObject(theme).presentationDetents([.large]) }
         .onAppear { stemService.refresh() }
+    }
+
+    private func settingsToggle(_ title: String, detail: String, value: Binding<Bool>) -> some View {
+        Toggle(isOn: value) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                Text(detail).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+            }
+        }.tint(theme.accent)
     }
 
     private func settingsCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
