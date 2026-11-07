@@ -232,19 +232,47 @@ struct TrapTubeStreamResolver {
                 audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
                 supportsSeparateAudioVideo: false)
         }
-        guard ext == "m3u8" || ext == "mpd" || mime.contains("mpegurl") || mime.contains("dash+xml") else {
-            throw TrapTubeResolverError.unsupportedSite
-        }
+        let isHLS = ext == "m3u8" || mime.contains("mpegurl")
+        let isDASH = ext == "mpd" || mime.contains("dash+xml")
         var request = URLRequest(url: source)
         request.httpMethod = "GET"; request.timeoutInterval = 25
         request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        if !isHLS && !isDASH && mime.contains("text/html") {
+            request.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
+        } else if !isHLS && !isDASH {
+            throw TrapTubeResolverError.unsupportedSite
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let manifestResponse = response as? HTTPURLResponse,
               (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
-        if ext == "m3u8" || mime.contains("mpegurl") {
-            return try parseHLS(data: data, source: source, title: title)
+        if isHLS { return try parseHLS(data: data, source: source, title: title) }
+        if isDASH { return try parseDASH(data: data, source: source, title: title) }
+        if let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
+            return try await resolve(candidate, title: title)
         }
-        return try parseDASH(data: data, source: source, title: title)
+        throw TrapTubeResolverError.unsupportedSite
+    }
+
+    private func htmlMediaCandidates(data: Data, baseURL: URL) -> [URL] {
+        guard let html = String(data: data, encoding: .utf8) else { return [] }
+        let patterns = [
+            #"<(?:video|source)[^>]+src=["']([^"']+)["']"#,
+            #"(?:src|href)=["']([^"']+\.(?:m3u8|mpd|mp4|m4v|webm|m4a|mp3|aac)(?:\?[^"']*)?)["']"#
+        ]
+        var candidates: [URL] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let ns = html as NSString
+            for match in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) where match.numberOfRanges > 1 {
+                let raw = ns.substring(with: match.range(at: 1)).replacingOccurrences(of: "&amp;", with: "&")
+                if let url = URL(string: raw, relativeTo: baseURL)?.absoluteURL,
+                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                    candidates.append(url)
+                }
+            }
+        }
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.absoluteString).inserted }
     }
 
     private func parseHLS(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
