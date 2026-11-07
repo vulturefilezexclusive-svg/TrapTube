@@ -1,11 +1,15 @@
 import AVFoundation
 import Foundation
 import Combine
+import Accelerate
 
 @MainActor
 final class AudioEngineManager: ObservableObject {
     static let frequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 10_000, 12_000, 16_000]
     static let presetNames = ["Hip Hop Boost", "Bass Heavy", "Vocal Clarity", "Flat"]
+    private static let visualizerFFTSize = 1024
+    private static let visualizerFFTSetup: FFTSetup = vDSP_create_fftsetup(10, FFTRadix(kFFTRadix2))!
+    private static let visualizerWindow: [Float] = (0..<1024).map { 0.5 * (1 - cos(2 * Float.pi * Float($0) / 1024)) }
 
     @Published private(set) var currentTrack: Track?
     @Published private(set) var isPlaying = false
@@ -17,6 +21,7 @@ final class AudioEngineManager: ObservableObject {
     @Published private(set) var masterGain: Float = 1
     @Published private(set) var currentPreset = "Flat"
     @Published private(set) var visualizerLevels = Array(repeating: Float(0), count: 48)
+    @Published private(set) var visualizerWaveform = Array(repeating: Float(0), count: 48)
     @Published var isShuffled = false
     @Published var repeatsTrack = false
 
@@ -198,30 +203,53 @@ final class AudioEngineManager: ObservableObject {
         masterStage.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
             guard let channels = buffer.floatChannelData else { return }
             let frameCount = Int(buffer.frameLength)
-            guard frameCount > 0 else { return }
+            guard frameCount >= Self.visualizerFFTSize else { return }
             let channelCount = Int(buffer.format.channelCount)
+            let fftSize = Self.visualizerFFTSize
+            var mono = [Float](repeating: 0, count: fftSize)
+            for index in 0..<fftSize {
+                var sample: Float = 0
+                for channel in 0..<channelCount { sample += channels[channel][index] }
+                mono[index] = sample / Float(max(1, channelCount))
+            }
+            var waveform = [Float](repeating: 0, count: 48)
+            for index in 0..<waveform.count {
+                let sourceIndex = index * fftSize / waveform.count
+                waveform[index] = mono[sourceIndex]
+            }
+
+            var windowed = [Float](repeating: 0, count: fftSize)
+            vDSP_vmul(mono, 1, Self.visualizerWindow, 1, &windowed, 1, vDSP_Length(fftSize))
+            var real = [Float](repeating: 0, count: fftSize / 2)
+            var imaginary = [Float](repeating: 0, count: fftSize / 2)
+            real.withUnsafeMutableBufferPointer { realPointer in
+                imaginary.withUnsafeMutableBufferPointer { imaginaryPointer in
+                    var split = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imaginaryPointer.baseAddress!)
+                    windowed.withUnsafeBytes { bytes in
+                        vDSP_ctoz(bytes.baseAddress!.assumingMemoryBound(to: DSPComplex.self), 2, &split, 1, vDSP_Length(fftSize / 2))
+                    }
+                    vDSP_fft_zrip(Self.visualizerFFTSetup, &split, 1, 10, FFTDirection(FFT_FORWARD))
+                }
+            }
+
             let bandCount = 48
-            let framesPerBand = max(1, frameCount / bandCount)
+            let binCount = fftSize / 2
             var levels = [Float](repeating: 0, count: bandCount)
             for band in 0..<bandCount {
-                let start = band * framesPerBand
-                let end = min(frameCount, start + framesPerBand)
-                guard start < end else { continue }
-                var sum: Float = 0
-                var count = 0
-                for channel in 0..<channelCount {
-                    for index in start..<end {
-                        let sample = channels[channel][index]
-                        sum += sample * sample
-                        count += 1
-                    }
+                let low = max(1, Int(pow(Double(binCount), Double(band) / Double(bandCount))))
+                let high = min(binCount, max(low + 1, Int(pow(Double(binCount), Double(band + 1) / Double(bandCount)))))
+                var peak: Float = 0
+                for bin in low..<high {
+                    let magnitude = sqrt(real[bin] * real[bin] + imaginary[bin] * imaginary[bin]) / Float(fftSize)
+                    peak = max(peak, magnitude)
                 }
-                let rms = count > 0 ? sqrt(sum / Float(count)) : 0
-                levels[band] = min(1, max(0, rms * 5.5))
+                levels[band] = min(1, pow(max(0, peak * 7.5), 0.68))
             }
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.visualizerLevels = levels
+                self.visualizerWaveform = waveform
             }
         }
     }
