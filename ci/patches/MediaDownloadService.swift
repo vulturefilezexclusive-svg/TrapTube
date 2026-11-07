@@ -385,11 +385,20 @@ struct TrapTubeStreamResolver {
                 return part
             }
             : [xml]
-        for periodBody in periodBodies {
+        for (periodIndex, periodBody) in periodBodies.enumerated() {
             let periodTagEnd = periodBody.firstIndex(of: ">")
             let periodAttributes = periodTagEnd.map { parseAttributes(String(periodBody[..<$0])) } ?? [:]
+            let periodStart = parseISODuration(periodAttributes["start"] ?? "")
             let periodDuration = parseISODuration(periodAttributes["duration"] ?? "")
-            let durationSeconds = periodDuration > 0 ? periodDuration : mpdDuration
+            let nextPeriodStart: Double? = periodBodies.dropFirst(periodIndex + 1).first.flatMap { nextBody in
+                guard let end = nextBody.firstIndex(of: ">") else { return nil }
+                let attrs = parseAttributes(String(nextBody[..<end]))
+                guard let rawStart = attrs["start"] else { return nil }
+                return parseISODuration(rawStart)
+            }
+            let inferredPeriodDuration = nextPeriodStart.map { max(0, $0 - periodStart) }
+                ?? (mpdDuration > periodStart ? mpdDuration - periodStart : 0)
+            let durationSeconds = periodDuration > 0 ? periodDuration : inferredPeriodDuration
             let periodHeaderEnd = periodBody.range(of: "<AdaptationSet")?.lowerBound ?? periodBody.endIndex
             let periodHeader = String(periodBody[..<periodHeaderEnd])
             let periodTemplate = element("SegmentTemplate", in: periodHeader) ?? mpdTemplate
