@@ -146,7 +146,30 @@ struct TrapTubeDownloadedMedia: Codable, Identifiable {
     }
 }
 
-struct TrapTubeDownloadTask: Identifiable {
+enum TrapTubeAssetKind: String, Codable { case video, audio, muxed }
+
+struct TrapTubeFlatAsset: Codable, Identifiable, Hashable {
+    var id: String { url.absoluteString + "|" + kind.rawValue }
+    let url: URL
+    let kind: TrapTubeAssetKind
+    let mimeType: String
+    let height: Int?
+    let bitrate: Int?
+    let label: String
+    let isManifest: Bool
+    let headers: [String: String]
+}
+
+struct TrapTubeResolvedMedia: Codable {
+    let title: String
+    let sourceURL: URL
+    let videoAssets: [TrapTubeFlatAsset]
+    let audioAssets: [TrapTubeFlatAsset]
+    let muxedAssets: [TrapTubeFlatAsset]
+    let supportsSeparateAudioVideo: Bool
+}
+
+struct TrapTubeDownloadTask: Codable, Identifiable {
     let id: String
     var title: String
     var mode: String
@@ -157,6 +180,238 @@ struct TrapTubeDownloadTask: Identifiable {
     var totalBytes: Int64
     var speedBytesPerSecond: Int64
     var error: String?
+    var sourceURL: URL?
+    var selectedVideoURL: URL?
+    var selectedAudioURL: URL?
+    var partialFileName: String?
+    var outputFileName: String?
+    var resumeOffset: Int64
+}
+
+enum TrapTubeResolverError: LocalizedError {
+    case unsupportedSite, noStreams, unsupportedManifest(String), badResponse
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedSite: return "This website needs a dedicated TrapTube provider adapter. No compatible stream metadata was exposed."
+        case .noStreams: return "No downloadable media streams were exposed by this URL."
+        case .unsupportedManifest(let detail): return detail
+        case .badResponse: return "The media source returned an invalid response."
+        }
+    }
+}
+
+protocol TrapTubeStreamProviderAdapter {
+    func canResolve(_ source: URL) -> Bool
+    func resolve(_ source: URL, title: String) async throws -> TrapTubeResolvedMedia
+}
+
+struct TrapTubeStreamResolver {
+    private let adapters: [any TrapTubeStreamProviderAdapter]
+    init(adapters: [any TrapTubeStreamProviderAdapter] = []) { self.adapters = adapters }
+
+    func resolve(_ source: URL, title: String) async throws -> TrapTubeResolvedMedia {
+        if let adapter = adapters.first(where: { $0.canResolve(source) }) {
+            return try await adapter.resolve(source, title: title)
+        }
+        guard let scheme = source.scheme?.lowercased(), ["http", "https"].contains(scheme), source.host != nil else {
+            throw TrapTubeResolverError.unsupportedSite
+        }
+        let ext = source.pathExtension.lowercased()
+        var head = URLRequest(url: source)
+        head.httpMethod = "HEAD"; head.timeoutInterval = 20
+        head.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        let headResponse = try? await URLSession.shared.data(for: head)
+        let http = headResponse?.1 as? HTTPURLResponse
+        let mime = (http?.mimeType ?? "").lowercased()
+        if mime.hasPrefix("video/") || mime.hasPrefix("audio/") ||
+            ["mp4","m4v","mov","webm","m4a","mp3","aac","wav","flac"].contains(ext) {
+            let kind: TrapTubeAssetKind = mime.hasPrefix("audio/") || ["m4a","mp3","aac","wav","flac"].contains(ext) ? .audio : .muxed
+            let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: mime, height: nil, bitrate: nil,
+                label: kind == .audio ? "Original audio" : "Original media", isManifest: false, headers: [:])
+            return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
+                audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
+                supportsSeparateAudioVideo: false)
+        }
+        guard ext == "m3u8" || ext == "mpd" || mime.contains("mpegurl") || mime.contains("dash+xml") else {
+            throw TrapTubeResolverError.unsupportedSite
+        }
+        var request = URLRequest(url: source)
+        request.httpMethod = "GET"; request.timeoutInterval = 25
+        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let manifestResponse = response as? HTTPURLResponse,
+              (200..<400).contains(manifestResponse.statusCode) else { throw TrapTubeResolverError.badResponse }
+        if ext == "m3u8" || mime.contains("mpegurl") {
+            return try parseHLS(data: data, source: source, title: title)
+        }
+        return try parseDASH(data: data, source: source, title: title)
+    }
+
+    private func parseHLS(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
+        guard let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else {
+            throw TrapTubeResolverError.badResponse
+        }
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var videos: [TrapTubeFlatAsset] = [], audios: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
+        var pendingHeight: Int?, pendingBandwidth: Int?, audioGroup: String?
+        var audioGroups: [String: URL] = [:]
+        for line in lines where !line.isEmpty {
+            if line.hasPrefix("#EXT-X-MEDIA:") && line.contains("TYPE=AUDIO") {
+                let attrs = parseAttributes(String(line.dropFirst("#EXT-X-MEDIA:".count)))
+                if let group = attrs["GROUP-ID"], let uri = attrs["URI"],
+                   let url = URL(string: uri, relativeTo: source)?.absoluteURL { audioGroups[group] = url }
+            } else if line.hasPrefix("#EXT-X-STREAM-INF:") {
+                let attrs = parseAttributes(String(line.dropFirst("#EXT-X-STREAM-INF:".count)))
+                pendingBandwidth = Int(attrs["BANDWIDTH"] ?? "")
+                if let resolution = attrs["RESOLUTION"], let h = Int(resolution.split(separator: "x").last ?? "") {
+                    pendingHeight = h
+                }
+                audioGroup = attrs["AUDIO"]
+            } else if !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL {
+                if pendingHeight != nil || pendingBandwidth != nil {
+                    videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
+                        height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
+                        isManifest: true, headers: [:]))
+                    if let group = audioGroup, let audioURL = audioGroups[group] {
+                        audios.append(TrapTubeFlatAsset(url: audioURL, kind: .audio, mimeType: "application/vnd.apple.mpegurl",
+                            height: nil, bitrate: nil, label: "Audio", isManifest: true, headers: [:]))
+                    } else {
+                        muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
+                            height: pendingHeight, bitrate: pendingBandwidth, label: "Muxed HLS",
+                            isManifest: true, headers: [:]))
+                    }
+                    pendingHeight = nil; pendingBandwidth = nil; audioGroup = nil
+                } else {
+                    muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
+                        height: nil, bitrate: nil, label: "HLS stream", isManifest: true, headers: [:]))
+                }
+            }
+        }
+        if videos.isEmpty && muxed.isEmpty {
+            muxed = [TrapTubeFlatAsset(url: source, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
+                height: nil, bitrate: nil, label: "HLS stream", isManifest: true, headers: [:])]
+        }
+        return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: videos,
+            audioAssets: audios, muxedAssets: muxed, supportsSeparateAudioVideo: !videos.isEmpty && !audios.isEmpty)
+    }
+
+    private func parseDASH(data: Data, source: URL, title: String) throws -> TrapTubeResolvedMedia {
+        guard let xml = String(data: data, encoding: .utf8), xml.contains("<MPD") else {
+            throw TrapTubeResolverError.badResponse
+        }
+        let blocks = xml.components(separatedBy: "<Representation").dropFirst()
+        var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
+        for block in blocks {
+            guard let end = block.range(of: "</Representation>") else { continue }
+            let segment = String(block[..<end.lowerBound])
+            guard let tagEnd = segment.firstIndex(of: ">") else { continue }
+            let attrs = parseAttributes(String(segment[..<tagEnd]))
+            guard let baseStart = segment.range(of: "<BaseURL>"),
+                  let baseEnd = segment.range(of: "</BaseURL>") else { continue }
+            let base = String(segment[baseStart.upperBound..<baseEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: base, relativeTo: source)?.absoluteURL else { continue }
+            let type = (attrs["mimeType"] ?? attrs["contentType"] ?? "").lowercased()
+            let h = Int(attrs["height"] ?? ""), rate = Int(attrs["bandwidth"] ?? "")
+            let kind: TrapTubeAssetKind = type.contains("audio") ? .audio : (type.contains("video") ? .video : .muxed)
+            let asset = TrapTubeFlatAsset(url: url, kind: kind, mimeType: type, height: h, bitrate: rate,
+                label: h.map { "\($0)p" } ?? "DASH media", isManifest: false, headers: [:])
+            switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
+        }
+        guard !video.isEmpty || !audio.isEmpty || !muxed.isEmpty else {
+            throw TrapTubeResolverError.unsupportedManifest("This DASH manifest uses segment templates. A provider-specific adapter is required.")
+        }
+        return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: video, audioAssets: audio,
+            muxedAssets: muxed, supportsSeparateAudioVideo: !video.isEmpty && !audio.isEmpty)
+    }
+
+    private func parseAttributes(_ value: String) -> [String: String] {
+        var result: [String: String] = [:]
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z0-9-]+)=("[^"]*"|[^,]*)"#, options: [.caseInsensitive]) else {
+            return result
+        }
+        let ns = value as NSString
+        for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)) where match.numberOfRanges > 2 {
+            result[ns.substring(with: match.range(at: 1))] =
+                ns.substring(with: match.range(at: 2)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        }
+        return result
+    }
+}
+
+enum TrapTubeFlatTransferError: LocalizedError {
+    case invalidStatus(Int)
+    var errorDescription: String? {
+        switch self { case .invalidStatus(let code): return "Media transfer failed with HTTP \(code)." }
+    }
+}
+
+enum TrapTubeFlatTransfer {
+    static func download(_ asset: TrapTubeFlatAsset, to destination: URL, startingAt offset: Int64 = 0,
+                         progress: @escaping (Int64, Int64, Int64) -> Void) async throws -> URL {
+        var request = URLRequest(url: asset.url)
+        request.timeoutInterval = 180
+        request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        for (key, value) in asset.headers { request.setValue(value, forHTTPHeaderField: key) }
+        if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TrapTubeResolverError.badResponse }
+        if offset > 0 && http.statusCode == 200 {
+            return try await download(asset, to: destination, startingAt: 0, progress: progress)
+        }
+        guard http.statusCode == 200 || http.statusCode == 206 else {
+            throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
+        }
+        let total = http.expectedContentLength > 0 ? http.expectedContentLength + offset : 0
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            FileManager.default.createFile(atPath: destination.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: destination)
+        if offset == 0 { try handle.truncate(atOffset: 0) } else { try handle.seekToEnd() }
+        var received: Int64 = 0, windowBytes: Int64 = 0, windowStart = Date()
+        var buffer = Data()
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                buffer.append(byte); received += 1; windowBytes += 1
+                if buffer.count >= 65536 {
+                    try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true)
+                }
+                if received % 262144 == 0 {
+                    let elapsed = max(0.1, Date().timeIntervalSince(windowStart))
+                    progress(offset + received, total, Int64(Double(windowBytes) / elapsed))
+                    windowBytes = 0; windowStart = Date()
+                }
+            }
+            if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+        progress(offset + received, total, 0)
+        return destination
+    }
+}
+
+enum TrapTubeMP4Box {
+    static func mux(video: URL, audio: URL?, output: URL, progress: ((Int64, Double) -> Void)? = nil) async throws {
+        var args = ["-y", "-i", video.absoluteString.hasPrefix("http") ? video.absoluteString : video.path]
+        if let audio { args += ["-i", audio.absoluteString.hasPrefix("http") ? audio.absoluteString : audio.path] }
+        args += audio == nil
+            ? ["-map", "0:v?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", output.path]
+            : ["-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", output.path]
+        try await TrapTubeFFmpegProcessor.execute(args, progress: progress)
+        guard FileManager.default.fileExists(atPath: output.path) else { throw TrapTubeFFmpegError.missingOutput }
+    }
+
+    static func extractAudio(input: URL, output: URL, format: String,
+                             progress: ((Int64, Double) -> Void)? = nil) async throws {
+        let codec = format == "wav" ? "pcm_s16le" : "aac"
+        let inputPath = input.absoluteString.hasPrefix("http") ? input.absoluteString : input.path
+        try await TrapTubeFFmpegProcessor.execute(["-y", "-i", inputPath, "-vn", "-c:a", codec, output.path], progress: progress)
+        guard FileManager.default.fileExists(atPath: output.path) else { throw TrapTubeFFmpegError.missingOutput }
+    }
 }
 
 enum TrapTubeFFmpegOperation: String, CaseIterable, Identifiable {
