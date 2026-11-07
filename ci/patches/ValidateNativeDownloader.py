@@ -13,6 +13,11 @@ required = {
     "TrapTubeDownloadManager": service,
     "SegmentTemplate": service,
     "SegmentTimeline": service,
+    "Content-Range": service,
+    "Content-Disposition": service,
+    "signatureExtension": service,
+    "availableAudioBitrates": service,
+    "selectedVideoBitrate": service,
     "downloadSegmented": service,
     "parseHLSMediaPlaylist": service,
     "TrapTubeWebCookieBridge": service,
@@ -25,6 +30,7 @@ required = {
     "YouTubeWatchSheet": player,
     "TrapTubeHuePicker": settings,
     "AngularGradient": settings,
+    "availableAudioBitrates": player,
 }
 missing = [name for name, source in required.items() if name not in source]
 if missing:
