@@ -1110,21 +1110,25 @@ final class TrapTubeDownloadManager: ObservableObject {
         }
     }
 
+    private func bestVideoAsset(in assets: [TrapTubeFlatAsset], maximumHeight: Int?) -> TrapTubeFlatAsset? {
+        let sorted = assets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
+        guard let maximumHeight else { return sorted.last }
+        let eligible = sorted.filter { ($0.height ?? 0) <= maximumHeight }
+        return eligible.last ?? sorted.first
+    }
+
     func enqueue(videoURL: URL, title: String, mode: String, quality: String,
                  format: String, bitrate: Int?, height: Int?) async {
         lastError = nil
         do {
             let media = try await resolver.resolve(videoURL, title: title)
             let id = UUID().uuidString
-            let chosenVideo = media.videoAssets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
-                .last(where: { height == nil || ($0.height ?? 0) <= height! }) ?? media.videoAssets.last
+            let chosenVideo = bestVideoAsset(in: media.videoAssets, maximumHeight: height)
             let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets : media.audioAssets
-            let chosenAudio = audioCandidates
-                .filter { bitrate == nil || ($0.bitrate ?? 0) <= bitrate! }
-                .max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
+            let eligibleAudio = audioCandidates.filter { bitrate == nil || ($0.bitrate ?? 0) <= bitrate! }
+            let chosenAudio = eligibleAudio.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 ?? audioCandidates.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
-            let chosenMuxed = media.muxedAssets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
-                .last(where: { height == nil || ($0.height ?? 0) <= height! }) ?? media.muxedAssets.last
+            let chosenMuxed = bestVideoAsset(in: media.muxedAssets, maximumHeight: height)
             let hasSeparatePair = mode != "audio" && chosenVideo != nil && chosenAudio != nil
             let selectedVideo = mode == "audio" ? nil : (hasSeparatePair ? chosenVideo : (chosenMuxed ?? chosenVideo))
             let selectedAudio = mode == "audio" ? (chosenAudio ?? chosenMuxed) : (hasSeparatePair ? chosenAudio : nil)
