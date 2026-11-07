@@ -71,6 +71,7 @@ jobs:
           cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
           python3 ci/patches/KeepImportAction.py work/TrapTube
           python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
+          python3 ci/patches/ValidateNativeDownloader.py "$SERVICES_DIR/MediaDownloadService.swift" "$VIEWS_DIR/YouTubeView.swift" "$VIEWS_DIR/SettingsView.swift"
           python3 - "$COMPONENTS_FILE" <<'PY'
           from pathlib import Path
           import sys
