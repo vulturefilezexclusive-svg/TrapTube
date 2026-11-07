@@ -72,19 +72,46 @@ private struct StreamingHomeWebView: UIViewRepresentable {
         let content = WKUserContentController()
         content.add(context.coordinator, name: "trapHome")
         let script = """
-        document.addEventListener('click', function(event) {
-          const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-          if (!anchor) return;
-          let target;
-          try { target = new URL(anchor.href, location.href); } catch (_) { return; }
-          if (target.hostname.endsWith('youtube.com') &&
-              (target.pathname === '/watch' || target.pathname.startsWith('/shorts/') ||
-               target.pathname.startsWith('/live/'))) {
+        (() => {
+          const isWatch = target => {
+            const host = target.hostname.toLowerCase();
+            const youtube = host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be';
+            return youtube && (target.pathname === '/watch' || target.pathname.startsWith('/shorts/') ||
+                               target.pathname.startsWith('/live/'));
+          };
+          const postWatch = target => {
+            const heading = document.querySelector('h1.ytd-watch-metadata yt-formatted-string');
+            const raw = (heading && heading.textContent) || document.title.replace(/\\s*-\\s*YouTube$/i, '');
+            const title = (raw || 'YouTube video').trim().slice(0, 180);
+            try { window.webkit.messageHandlers.trapHome.postMessage({url: target.href, title}); } catch (_) {}
+          };
+          document.addEventListener('click', event => {
+            const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+            if (!anchor) return;
+            let target;
+            try { target = new URL(anchor.href, location.href); } catch (_) { return; }
+            if (!isWatch(target)) return;
             event.preventDefault();
             event.stopPropagation();
-            window.webkit.messageHandlers.trapHome.postMessage(target.href);
-          }
-        }, true);
+            postWatch(target);
+          }, true);
+          ['pushState', 'replaceState'].forEach(method => {
+            const original = history[method];
+            history[method] = function(state, title, url) {
+              if (url) {
+                try {
+                  const target = new URL(url, location.href);
+                  if (isWatch(target)) { postWatch(target); return; }
+                } catch (_) {}
+              }
+              return original.apply(this, arguments);
+            };
+          });
+          window.addEventListener('popstate', () => {
+            const target = new URL(location.href);
+            if (isWatch(target)) postWatch(target);
+          }, true);
+        })();
         """
         content.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
