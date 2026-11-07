@@ -323,16 +323,20 @@ final class StemSeparationService: ObservableObject {
         let destination = LibraryStore.appDirectory.appendingPathComponent("Stems", isDirectory: true)
             .appendingPathComponent(track.id.uuidString, isDirectory: true)
 
-        job = Task.detached(priority: .userInitiated) { [weak self] in
+        // Hold the main-actor service strongly for the lifetime of this job. The task
+        // releases it as soon as processing finishes, and avoids capturing weak self
+        // through nested concurrently-executing closures.
+        let service = self
+        job = Task.detached(priority: .userInitiated) {
             do {
                 let result = try Self.run(source: source, destination: destination) { value, message in
-                    Task { @MainActor in self?.updateProgress(value, message: message, jobID: jobID) }
+                    Task { @MainActor in service.updateProgress(value, message: message, jobID: jobID) }
                 }
-                await self?.finish(result: result, jobID: jobID)
+                await service.finish(result: result, jobID: jobID)
             } catch is CancellationError {
-                await self?.finishCancelled(jobID: jobID)
+                await service.finishCancelled(jobID: jobID)
             } catch {
-                await self?.finish(error: error.localizedDescription, jobID: jobID)
+                await service.finish(error: error.localizedDescription, jobID: jobID)
             }
         }
     }
