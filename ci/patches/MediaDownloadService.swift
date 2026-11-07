@@ -217,16 +217,7 @@ struct TrapTubeStreamResolver {
         if isDASH || responseMime.contains("dash+xml") || responseExtension == "mpd" {
             return try parseDASH(data: data, source: source, title: title, headers: providerHeaders)
         }
-        let responseMime = ((response as? HTTPURLResponse)?.mimeType ?? mime).lowercased()
-        if responseMime.hasPrefix("video/") || responseMime.hasPrefix("audio/") {
-            let kind: TrapTubeAssetKind = responseMime.hasPrefix("audio/") ? .audio : .muxed
-            let asset = TrapTubeFlatAsset(url: source, kind: kind, mimeType: responseMime, height: nil, bitrate: nil,
-                label: "Original media", isManifest: false, headers: providerHeaders)
-            return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
-                audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
-                supportsSeparateAudioVideo: false)
-        }
-        if responseMime.contains("text/html") || responseMime.isEmpty,
+        if responseMime.contains("text/html") || responseMime.isEmpty || mime.contains("text/html"),
            let candidate = htmlMediaCandidates(data: data, baseURL: source).first {
             return try await resolve(candidate, title: title)
         }
