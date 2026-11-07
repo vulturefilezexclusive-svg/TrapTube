@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @MainActor
 final class ThemeManager: ObservableObject {
@@ -43,7 +44,18 @@ final class ThemeManager: ObservableObject {
     var background: Color { Color(hex: backgroundHex) }
     var primaryText: Color { Color(hex: primaryTextHex) }
     var secondaryText: Color { Color(hex: secondaryTextHex) }
-    var selectedAccent: AccentOption { Self.accents.first(where: { $0.hex == accentHex }) ?? Self.accents[0] }
+    var selectedAccent: AccentOption {
+        Self.accents.first(where: { $0.hex == accentHex }) ??
+        AccentOption(name: "Custom", hex: accentHex)
+    }
+
+    func selectCustomAccent(_ color: Color) {
+        let ui = UIColor(color)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 1
+        ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        accentHex = String(format: "%02X%02X%02X",
+            Int(red * 255), Int(green * 255), Int(blue * 255))
+    }
 
     func selectAccent(_ option: AccentOption) { accentHex = option.hex }
     func reset() { accentHex = "E50920" }
