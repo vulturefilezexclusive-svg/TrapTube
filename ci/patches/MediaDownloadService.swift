@@ -226,14 +226,14 @@ struct TrapTubeStreamResolver {
                 audioGroup = attrs["AUDIO"]
             } else if !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL,
                       pendingHeight != nil || pendingBandwidth != nil {
-                let media = await loadHLSVariant(url, headers: headers)
+                let media = await loadHLSVariant(url, from: source, headers: headers)
                 let videoAsset = TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
                     height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
                     isManifest: media.segmentURLs.isEmpty, headers: headers,
                     initializationURL: media.initializationURL, segmentURLs: media.segmentURLs)
                 videos.append(videoAsset)
                 if let group = audioGroup, let audioURL = audioGroups[group] {
-                    let audioMedia = await loadHLSVariant(audioURL, headers: headers)
+                    let audioMedia = await loadHLSVariant(audioURL, from: source, headers: headers)
                     audios.append(TrapTubeFlatAsset(url: audioURL, kind: .audio, mimeType: "application/vnd.apple.mpegurl",
                         height: nil, bitrate: nil, label: "Audio", isManifest: audioMedia.segmentURLs.isEmpty,
                         headers: headers, initializationURL: audioMedia.initializationURL, segmentURLs: audioMedia.segmentURLs))
@@ -254,10 +254,10 @@ struct TrapTubeStreamResolver {
             audioAssets: audios, muxedAssets: muxed, supportsSeparateAudioVideo: !videos.isEmpty && !audios.isEmpty)
     }
 
-    private func loadHLSVariant(_ url: URL, headers: [String: String]) async -> (initializationURL: URL?, segmentURLs: [URL]) {
+    private func loadHLSVariant(_ url: URL, from source: URL, headers: [String: String]) async -> (initializationURL: URL?, segmentURLs: [URL]) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
-        let requestHeaders = await TrapTubeWebCookieBridge.forwarding(headers, from: url, to: url)
+        let requestHeaders = await TrapTubeWebCookieBridge.forwarding(headers, from: source, to: url)
         requestHeaders.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
