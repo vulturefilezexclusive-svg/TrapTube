@@ -340,7 +340,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let measuredSpeed = rateMeter.update(bytes)
                 Task { @MainActor in
                     guard let self, let i = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-                    self.jobs[i].stage = "Receiving / muxing stream"
+                    self.jobs[i].stage = "Processing stream"
                     self.jobs[i].downloadedBytes = bytes
                     self.jobs[i].speedBytesPerSecond = measuredSpeed
                     self.jobs[i].progress = 0
@@ -362,7 +362,14 @@ final class TrapTubeDownloadManager: ObservableObject {
         } catch is CancellationError {
             if let i = jobs.firstIndex(where: { $0.id == jobID }) { jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"; persistQueue() }
         } catch {
-            if let i = jobs.firstIndex(where: { $0.id == jobID }) { jobs[i].status = "failed"; jobs[i].error = error.localizedDescription; persistQueue() }
+            if let i = jobs.firstIndex(where: { $0.id == jobID }) {
+                if Task.isCancelled {
+                    jobs[i].status = "paused"; jobs[i].stage = "Paused · can resume"
+                } else {
+                    jobs[i].status = "failed"; jobs[i].error = error.localizedDescription
+                }
+                persistQueue()
+            }
         }
     }
 
