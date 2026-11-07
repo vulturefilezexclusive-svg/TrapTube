@@ -50,7 +50,7 @@ struct SettingsView: View {
                 }
 
                 settingsCard(title: "Video discovery", icon: "play.rectangle.fill") {
-                    Text("Choose the website TrapTube opens for its home streaming view. Leave this field empty to use the default home page.")
+                    Text("Choose the website that opens in the TrapTube discovery tab. Leave this field empty to show setup instructions; the Home tab always opens YouTube.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                     HStack(spacing: 9) {
                         Image(systemName: "globe").foregroundStyle(theme.accent)
@@ -70,7 +70,7 @@ struct SettingsView: View {
                     }
                     .padding(13)
                     .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                    Text("Enter a website URL. TrapTube will open that site in the home streaming view; playback and downloads depend on what the site makes available.")
+                    Text("Enter a website URL. It opens inside the TrapTube tab. Playback and downloads depend on the media the selected site makes available.")
                         .font(.caption2).foregroundStyle(Color(hex: "858185"))
                 }
 
