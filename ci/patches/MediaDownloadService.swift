@@ -235,7 +235,6 @@ struct TrapTubeStreamResolver {
     }
 
     private func parseHLSMediaPlaylist(_ lines: [String], source: URL) -> (initializationURL: URL?, segmentURLs: [URL]) {
-        let playlist = lines.joined(separator: "\n")
         let encrypted = lines.contains { line in
             line.hasPrefix("#EXT-X-KEY:") && !line.uppercased().contains("METHOD=NONE")
         }
@@ -740,7 +739,8 @@ enum TrapTubeFlatTransfer {
             try await fetch(segmentURL, name: String(format: "segment-%06d.partial", index))
         }
 
-        let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.mp4")
+        let outputExtension = asset.mimeType.contains("mpegurl") ? (asset.initializationURL == nil ? "ts" : "mp4") : "mp4"
+        let output = directory.appendingPathComponent("\(jobID)-\(assetIndex).segmented.\(outputExtension)")
         if !FileManager.default.fileExists(atPath: output.path) {
             FileManager.default.createFile(atPath: output.path, contents: nil)
         }
