@@ -562,6 +562,7 @@ private struct TypeTypeWebView: UIViewRepresentable {
 
 
 private struct TrapTubePlayerMenu: View {
+    @Environment(\.dismiss) private var dismiss
     let title: String
     let onPlayback: () -> Void
     @State private var showDownloadInfo = false
@@ -577,8 +578,10 @@ private struct TrapTubePlayerMenu: View {
                     Text("TrapTube player").font(.caption.weight(.medium)).foregroundStyle(Color(hex: "A6A4A6"))
                 }
                 Spacer()
-                Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
-                    .frame(width: 38, height: 38).background(.white.opacity(0.12), in: Circle())
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
+                        .frame(width: 38, height: 38).background(.white.opacity(0.12), in: Circle())
+                }.accessibilityLabel("Close player menu")
             }.padding(.horizontal, 20).padding(.bottom, 14)
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
@@ -589,7 +592,7 @@ private struct TrapTubePlayerMenu: View {
                     menuRow("Information", icon: "info.circle") { }
                 }.padding(.horizontal, 20)
             }
-            Text("Cancel").font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
+            Button("Cancel") { dismiss() }.font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
         }
         .background(Color(hex: "171618").ignoresSafeArea())
         .alert("Downloads", isPresented: $showDownloadInfo) {
