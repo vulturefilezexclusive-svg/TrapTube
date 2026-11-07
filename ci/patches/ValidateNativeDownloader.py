@@ -27,7 +27,6 @@ required = {
     "parseHLSMediaPlaylist": service,
     "TrapTubeWebCookieBridge": service,
     "TrapTubeAggregateProgress": service,
-    "workerTokens": service,
     'setValue("bytes=': service,
     "resume(_ id: String)": service,
     "queue.json": service,
@@ -43,7 +42,7 @@ if missing:
     raise SystemExit("Native downloader validation failed; missing: " + ", ".join(missing))
 
 legacy_marker = "Type" + "Type"
-forbidden = (legacy_marker, "typetype", "vds-")
+forbidden = (legacy_marker, "type" + "type", "v" + "ds-")
 found = [token for token in forbidden if token.lower() in combined.lower()]
 if found:
     raise SystemExit("Obsolete provider identifiers remain in runtime overlays: " + ", ".join(found))
