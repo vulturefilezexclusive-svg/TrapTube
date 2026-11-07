@@ -454,12 +454,16 @@ private struct TypeTypeWebView: UIViewRepresentable {
       };
       const apply = () => {
         if (!filters.length || !shelf || !gain) return;
-        hz.forEach((_, i) => filters[i].gain.value = Number(settings.gains[i] || 0));
-        shelf.gain.value = Number(settings.bass || 0);
+        hz.forEach((frequency, i) => {
+          filters[i].frequency.setTargetAtTime(frequency, context.currentTime, 0.015);
+          filters[i].gain.setTargetAtTime(Number(settings.gains[i] || 0), context.currentTime, 0.015);
+          filters[i].Q.setTargetAtTime(1.15, context.currentTime, 0.015);
+        });
+        shelf.gain.setTargetAtTime(Number(settings.bass || 0), context.currentTime, 0.015);
         const peakBoost = Math.max(0, ...settings.gains.map(value => Number(value) || 0)) + Number(settings.bass || 0);
         const headroomDB = -Math.min(18, peakBoost * 0.5);
         const master = Math.max(0, Math.min(2, Number(settings.master ?? 1)));
-        gain.gain.value = master * Math.pow(10, headroomDB / 20);
+        gain.gain.setTargetAtTime(master * Math.pow(10, headroomDB / 20), context.currentTime, 0.015);
       };
       window.__traptubeSetEQ = value => { settings = Object.assign(settings, value || {}); apply(); };
       const attach = () => {
@@ -479,23 +483,42 @@ private struct TypeTypeWebView: UIViewRepresentable {
           if (!AudioContextClass) throw new Error("Web Audio is unavailable in this WebKit runtime.");
           context = new AudioContextClass();
           directSource = context.createMediaElementSource(video);
-          // Keep the stream audible if filter construction fails; EQ status reports the failure.
-          directSource.connect(context.destination);
           filters = hz.map(frequency => {
             const node = context.createBiquadFilter();
-            node.type = "peaking"; node.frequency.value = frequency; node.Q.value = 1;
+            node.type = "peaking";
+            node.frequency.value = frequency;
+            node.Q.value = 1.15;
+            node.gain.value = 0;
             return node;
           });
-          shelf = context.createBiquadFilter(); shelf.type = "lowshelf"; shelf.frequency.value = 90; shelf.Q.value = 0.7;
+          shelf = context.createBiquadFilter();
+          shelf.type = "lowshelf";
+          shelf.frequency.value = 90;
+          shelf.Q.value = 0.7;
           gain = context.createGain();
+          // Route the media element through exactly one audible path. Connecting it
+          // directly to destination and then disconnecting can race the WebKit render
+          // graph and leave the stream silent or bypass the filters.
           let node = directSource;
           filters.forEach(filter => { node.connect(filter); node = filter; });
-          node.connect(shelf); shelf.connect(gain); gain.connect(context.destination);
-          directSource.disconnect(context.destination);
-          video.addEventListener("play", () => { if (context.state === "suspended") context.resume(); state(); });
+          node.connect(shelf);
+          shelf.connect(gain);
+          gain.connect(context.destination);
+          const resumeAudio = () => {
+            if (context && context.state !== "running") {
+              context.resume().catch(error => post({type:"eqStatus",ready:false,error:"Tap Play to activate streaming audio processing: " + error.message}));
+            }
+          };
+          video.addEventListener("play", () => { resumeAudio(); state(); });
+          video.addEventListener("playing", resumeAudio);
+          video.addEventListener("canplay", resumeAudio);
           ["timeupdate","durationchange","play","pause","ended"].forEach(event => video.addEventListener(event, state));
           apply();
-          post({type:"eqStatus", ready:true}); state();
+          // The video may already be playing by the time the MutationObserver finds it.
+          // Resume immediately as well as on subsequent user-initiated playback events.
+          resumeAudio();
+          post({type:"eqStatus", ready:true});
+          state();
         } catch (error) {
           try {
             if (directSource && context) {
@@ -503,6 +526,7 @@ private struct TypeTypeWebView: UIViewRepresentable {
               filters.forEach(node => node.disconnect());
               if (shelf) shelf.disconnect();
               if (gain) gain.disconnect();
+              // Retain audio if EQ setup fails; do not leave a disconnected source.
               directSource.connect(context.destination);
             }
           } catch (_) {}
@@ -512,10 +536,15 @@ private struct TypeTypeWebView: UIViewRepresentable {
       window.__traptubeControl = (command, value) => {
         if (!video) return;
         if (command === "toggle") {
-          if (video.paused) { if (context && context.state === "suspended") context.resume(); video.play().catch(e => post({type:"playerError",message:e.message})); }
-          else video.pause();
+          if (video.paused) {
+            if (context && context.state !== "running") context.resume().catch(() => {});
+            video.play().catch(e => post({type:"playerError",message:e.message}));
+          } else video.pause();
         }
-        if (command === "play") { if (context && context.state === "suspended") context.resume(); video.play().catch(e => post({type:"playerError",message:e.message})); }
+        if (command === "play") {
+          if (context && context.state !== "running") context.resume().catch(() => {});
+          video.play().catch(e => post({type:"playerError",message:e.message}));
+        }
         if (command === "pause") video.pause();
         if (command === "seek" && Number.isFinite(Number(value)) && Number.isFinite(video.duration)) video.currentTime = Math.max(0, Math.min(video.duration, Number(value)));
       };
