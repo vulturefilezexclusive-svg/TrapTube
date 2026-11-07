@@ -1238,16 +1238,18 @@ final class TrapTubeDownloadManager: ObservableObject {
                     ?? media.muxedAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
                     ?? media.muxedAssets.first(where: { $0.height == job.selectedVideoHeight && $0.mimeType == job.selectedVideoMimeType })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
+                    ?? media.videoAssets.filter { job.selectedVideoHeight == nil || ($0.height ?? 0) <= job.selectedVideoHeight! }.max(by: { ($0.height ?? 0) < ($1.height ?? 0) })
+                    ?? media.muxedAssets.filter { job.selectedVideoHeight == nil || ($0.height ?? 0) <= job.selectedVideoHeight! }.max(by: { ($0.height ?? 0) < ($1.height ?? 0) })
                 let selectedAudio = media.audioAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
                     ?? media.audioAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType })
                     ?? media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
                     ?? media.muxedAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
                     ?? media.muxedAssets.first(where: { $0.bitrate == job.selectedAudioBitrate && $0.mimeType == job.selectedAudioMimeType })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
+                    ?? media.audioAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
+                    ?? media.muxedAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 let video = job.mode == "audio" ? nil : selectedVideo
-                let audio = job.mode == "audio"
-                    ? (selectedAudio ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL }))
-                    : selectedAudio
+                let audio = job.mode == "audio" ? selectedAudio : selectedAudio
                 start(jobID: id, media: media, video: video, audio: audio, format: job.mode == "audio" ? "m4a" : "mp4")
             } catch { lastError = error.localizedDescription }
         }
