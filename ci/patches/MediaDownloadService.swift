@@ -1036,6 +1036,7 @@ final class TrapTubeDownloadManager: ObservableObject {
     @Published private(set) var jobs: [TrapTubeDownloadTask] = []
     @Published private(set) var completed: [TrapTubeDownloadedMedia] = []
     @Published private(set) var availableVideoHeights: [Int] = []
+    @Published private(set) var availableAudioBitrates: [Int] = []
     @Published var lastError: String?
     private let resolver = TrapTubeStreamResolver()
     private var workers: [String: Task<Void, Never>] = [:]
@@ -1049,10 +1050,11 @@ final class TrapTubeDownloadManager: ObservableObject {
         do {
             let media = try await resolver.resolve(videoURL, title: title)
             availableVideoHeights = Array(Set((media.videoAssets + media.muxedAssets).compactMap(\.height).filter { $0 > 0 })).sorted(by: >)
-            if availableVideoHeights.isEmpty { availableVideoHeights = [] }
+            availableAudioBitrates = Array(Set((media.audioAssets + media.muxedAssets).compactMap(\.bitrate).filter { $0 > 0 })).sorted(by: >)
             lastError = nil
         } catch {
             availableVideoHeights = []
+            availableAudioBitrates = []
             lastError = error.localizedDescription
         }
     }
@@ -1065,7 +1067,11 @@ final class TrapTubeDownloadManager: ObservableObject {
             let id = UUID().uuidString
             let chosenVideo = media.videoAssets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
                 .last(where: { height == nil || ($0.height ?? 0) <= height! }) ?? media.videoAssets.last
-            let chosenAudio = media.audioAssets.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
+            let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets : media.audioAssets
+            let chosenAudio = audioCandidates
+                .filter { bitrate == nil || ($0.bitrate ?? 0) <= bitrate! }
+                .max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
+                ?? audioCandidates.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
             let chosenMuxed = media.muxedAssets.sorted { ($0.height ?? 0) < ($1.height ?? 0) }
                 .last(where: { height == nil || ($0.height ?? 0) <= height! }) ?? media.muxedAssets.last
             let hasSeparatePair = mode != "audio" && chosenVideo != nil && chosenAudio != nil
