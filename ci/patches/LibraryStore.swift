@@ -2,6 +2,13 @@ import AVFoundation
 import Foundation
 import Combine
 
+/// AVAssetExportSession is used by the cancellation handler and completion closure.
+/// This narrowly scoped box makes that cross-task ownership explicit for Swift concurrency.
+private final class ExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+    init(_ session: AVAssetExportSession) { self.session = session }
+}
+
 extension Notification.Name {
     /// Posted by LibraryStore.delete so playback can release a deleted file. userInfo["id"] is the track UUID.
     static let trapTubeTrackDeleted = Notification.Name("TrapTube.trackDeleted")
@@ -58,17 +65,18 @@ final class LibraryStore: ObservableObject {
                 exporter.outputURL = target
                 exporter.outputFileType = .m4a
                 exporter.shouldOptimizeForNetworkUse = false
+                let exportSession = ExportSessionBox(exporter)
                 await withTaskCancellationHandler {
                     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                        exporter.exportAsynchronously { continuation.resume() }
+                        exportSession.session.exportAsynchronously { continuation.resume() }
                     }
                 } onCancel: {
-                    exporter.cancelExport()
+                    exportSession.session.cancelExport()
                 }
-                switch exporter.status {
+                switch exportSession.session.status {
                 case .completed: break
                 case .cancelled: throw CancellationError()
-                default: throw exporter.error ?? ImportError.exportFailed
+                default: throw exportSession.session.error ?? ImportError.exportFailed
                 }
 
                 let attributes = try fileManager.attributesOfItem(atPath: target.path)
