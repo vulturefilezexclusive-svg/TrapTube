@@ -304,15 +304,15 @@ private struct TypeTypeWatchSheet: View {
         .sheet(isPresented: $showEQ) {
             EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
         }
-        .confirmationDialog("TrapTube player", isPresented: $showTrapTubeMenu, titleVisibility: .visible) {
-            Button("Downloads") { }
-            Button("Playback tools") { showEQ = true }
-            Button("Library") { dismiss() }
-            Button("Transcript") { }
-            Button("Information") { }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("TrapTube player controls for this video.")
+        .sheet(isPresented: $showTrapTubeMenu) {
+            TrapTubePlayerMenu(title: title, onPlayback: {
+                showTrapTubeMenu = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showEQ = true }
+            })
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+            .preferredColorScheme(.dark)
         }
         .onChange(of: audio.eqGains) { _, _ in applyEQ() }
         .onChange(of: audio.bassBoost) { _, _ in applyEQ() }
@@ -558,4 +558,56 @@ private struct TypeTypeWebView: UIViewRepresentable {
       setInterval(() => { attach(); state(); }, 700);
     })();
     """#
+}
+
+
+private struct TrapTubePlayerMenu: View {
+    let title: String
+    let onPlayback: () -> Void
+    @State private var showDownloadInfo = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule().fill(.white.opacity(0.35)).frame(width: 42, height: 5).padding(.top, 10).padding(.bottom, 18)
+            HStack(spacing: 12) {
+                Image("AppIcon").resizable().scaledToFill().frame(width: 54, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline.bold()).foregroundStyle(.white).lineLimit(1)
+                    Text("TrapTube player").font(.caption.weight(.medium)).foregroundStyle(Color(hex: "A6A4A6"))
+                }
+                Spacer()
+                Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
+                    .frame(width: 38, height: 38).background(.white.opacity(0.12), in: Circle())
+            }.padding(.horizontal, 20).padding(.bottom, 14)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    menuRow("Downloads", icon: "arrow.down.to.line") { showDownloadInfo = true }
+                    menuRow("Playback tools", icon: "play.circle", action: onPlayback)
+                    menuRow("Library", icon: "rectangle.stack") { }
+                    menuRow("Transcript", icon: "captions.bubble") { }
+                    menuRow("Information", icon: "info.circle") { }
+                }.padding(.horizontal, 20)
+            }
+            Text("Cancel").font(.headline.bold()).foregroundStyle(.white).padding(.vertical, 18)
+        }
+        .background(Color(hex: "171618").ignoresSafeArea())
+        .alert("Downloads", isPresented: $showDownloadInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("The connected streaming player does not expose an authorized media download endpoint. You can import audio and video files you own or are licensed to use into your TrapTube library.")
+        }
+    }
+
+    private func menuRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 18) {
+                Image(systemName: icon).font(.system(size: 23)).foregroundStyle(.white).frame(width: 30)
+                Text(title).font(.headline.bold()).foregroundStyle(.white)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(Color(hex: "8E8B90"))
+            }.padding(.vertical, 18).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
+    }
 }
