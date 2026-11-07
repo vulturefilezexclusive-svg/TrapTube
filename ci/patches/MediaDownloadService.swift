@@ -707,6 +707,7 @@ enum TrapTubeFlatTransfer {
         var request = URLRequest(url: asset.url)
         request.timeoutInterval = 180
         request.setValue("TrapTube/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         for (key, value) in asset.headers { request.setValue(value, forHTTPHeaderField: key) }
         if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -728,6 +729,12 @@ enum TrapTubeFlatTransfer {
         }
         guard http.statusCode == 200 || http.statusCode == 206 else {
             throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
+        }
+        if http.statusCode == 206, offset > 0,
+           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+           let rangeStart = contentRange.split(separator: " ").last?.split(separator: "-").first,
+           let receivedStart = Int64(rangeStart), receivedStart != offset {
+            throw TrapTubeResolverError.unsupportedManifest("The server returned a mismatched byte range; the partial file was not appended.")
         }
         let effectiveOffset: Int64 = http.statusCode == 206 ? offset : 0
         let total = http.expectedContentLength > 0 ? http.expectedContentLength + effectiveOffset : 0
