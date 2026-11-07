@@ -769,14 +769,23 @@ enum TrapTubeFlatTransfer {
         guard http.statusCode == 200 || http.statusCode == 206 else {
             throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
         }
-        if http.statusCode == 206, offset > 0,
-           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-           let rangeStart = contentRange.split(separator: " ").last?.split(separator: "-").first,
-           let receivedStart = Int64(rangeStart), receivedStart != offset {
-            throw TrapTubeResolverError.unsupportedManifest("The server returned a mismatched byte range; the partial file was not appended.")
-        }
         let effectiveOffset: Int64 = http.statusCode == 206 ? offset : 0
-        let total = http.expectedContentLength > 0 ? http.expectedContentLength + effectiveOffset : 0
+        var total = http.expectedContentLength > 0 ? http.expectedContentLength + effectiveOffset : 0
+        if http.statusCode == 206 {
+            guard let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+                  let rangeValue = contentRange.split(separator: " ").last else {
+                throw TrapTubeResolverError.unsupportedManifest("The server returned a partial response without a valid Content-Range header.")
+            }
+            let rangeParts = rangeValue.split(separator: "/")
+            let bounds = rangeParts.first?.split(separator: "-") ?? []
+            guard bounds.count == 2, let receivedStart = Int64(bounds[0]),
+                  receivedStart == offset else {
+                throw TrapTubeResolverError.unsupportedManifest("The server returned a mismatched byte range; the partial file was not appended.")
+            }
+            if rangeParts.count == 2, let advertisedTotal = Int64(rangeParts[1]), advertisedTotal > 0 {
+                total = advertisedTotal
+            }
+        }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: destination.path) {
             FileManager.default.createFile(atPath: destination.path, contents: nil)
