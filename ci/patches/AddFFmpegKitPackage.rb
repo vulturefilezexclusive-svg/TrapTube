@@ -41,5 +41,25 @@ unless dependency
   frameworks_phase.files << build_file
 end
 
+# The Google auth overlay is copied into the project tree by the workflow.
+# Add it explicitly because this Xcode project uses explicit source-file references.
+if auth_source = ARGV[1]
+  abort "GoogleYouTubeAuth.swift is missing at #{auth_source}" unless File.file?(auth_source)
+  auth_path = File.expand_path(auth_source)
+  auth_ref = project.files.find { |file| File.expand_path(file.real_path.to_s) == auth_path rescue false }
+  unless auth_ref
+    auth_ref = project.new(Xcodeproj::Project::Object::PBXFileReference)
+    auth_ref.path = auth_path
+    auth_ref.source_tree = "<absolute>"
+    auth_ref.last_known_file_type = "sourcecode.swift"
+    auth_ref.name = "GoogleYouTubeAuth.swift"
+    project.main_group.children << auth_ref
+  end
+  unless target.source_build_phase.files_references.include?(auth_ref)
+    target.source_build_phase.add_file_reference(auth_ref)
+  end
+  puts "Added GoogleYouTubeAuth.swift to #{target.name} compile sources."
+end
+
 project.save
 puts "Linked FFmpegKit product ffmpegkit at #{revision} to #{target.name}."
