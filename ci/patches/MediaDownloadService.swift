@@ -684,7 +684,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         ]
 
         for row in muxedRows {
-            guard let rawURL = row["url"] as? String, let url = URL(string: rawURL) else { continue }
+            guard let url = formatURL(from: row) else { continue }
             let mime = (row["mimeType"] as? String ?? "").components(separatedBy: ";").first ?? ""
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
@@ -695,7 +695,7 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
                 headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
         }
         for row in adaptiveRows {
-            guard let rawURL = row["url"] as? String, let url = URL(string: rawURL) else { continue }
+            guard let url = formatURL(from: row) else { continue }
             let mime = (row["mimeType"] as? String ?? "").components(separatedBy: ";").first ?? ""
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
@@ -747,6 +747,28 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         }
         return TrapTubeResolvedMedia(title: resolvedTitle, sourceURL: source, videoAssets: videos,
             audioAssets: audios, muxedAssets: muxed, supportsSeparateAudioVideo: !videos.isEmpty && !audios.isEmpty)
+    }
+
+    private func formatURL(from row: [String: Any]) -> URL? {
+        if let rawURL = row["url"] as? String, let url = URL(string: rawURL) {
+            return url
+        }
+        guard let cipher = row["signatureCipher"] as? String ?? row["cipher"] as? String,
+              var components = URLComponents(string: "https://placeholder.invalid/?\(cipher)"),
+              let items = components.queryItems,
+              let rawURL = items.first(where: { $0.name == "url" })?.value,
+              var media = URLComponents(string: rawURL) else { return nil }
+
+        // Some responses carry an already-computed signature; append only that.
+        // The encrypted "s" parameter requires JavaScript deciphering and is not bypassed here.
+        if let signature = items.first(where: { $0.name == "sig" || $0.name == "signature" })?.value {
+            let parameter = items.first(where: { $0.name == "sp" })?.value ?? "signature"
+            var query = media.queryItems ?? []
+            query.removeAll { $0.name == parameter }
+            query.append(URLQueryItem(name: parameter, value: signature))
+            media.queryItems = query
+        }
+        return media.url
     }
 
     private func videoIdentifier(from url: URL) -> String? {
