@@ -1206,7 +1206,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                 let progressHandler: (Int64, Int64, Int64) -> Void = { [weak self] bytes, total, speed in
                     let snapshot = aggregate.report(bytes: bytes, total: total, speed: speed)
                     Task { @MainActor in
-                        guard let self else { return }
+                        guard let self, self.workerTokens[jobID] == workerToken else { return }
                         self.updateJob(jobID) {
                             $0.downloadedBytes = snapshot.0
                             $0.totalBytes = snapshot.1
@@ -1240,7 +1240,7 @@ final class TrapTubeDownloadManager: ObservableObject {
             let stats: (Int64, Double) -> Void = { [weak self] bytes, _ in
                 let measuredSpeed = rateMeter.update(bytes)
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.workerTokens[jobID] == workerToken else { return }
                     self.updateJob(jobID) {
                         $0.stage = "Processing stream"
                         $0.downloadedBytes = bytes
@@ -1264,6 +1264,7 @@ final class TrapTubeDownloadManager: ObservableObject {
                     videoHeaders: videoAsset?.headers ?? [:], audioHeaders: audioAsset?.headers ?? [:], progress: stats)
             }
 
+            guard workerTokens[jobID] == workerToken else { return }
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.int64Value ?? 0
             let item = TrapTubeDownloadedMedia(id: UUID().uuidString, title: media.title, fileName: outputName,
                 mode: modeFor(jobID), sizeBytes: size, createdAt: Date())
@@ -1277,8 +1278,10 @@ final class TrapTubeDownloadManager: ObservableObject {
                 $0.speedBytesPerSecond = 0
             }
         } catch is CancellationError {
+            guard workerTokens[jobID] == workerToken else { return }
             updateJob(jobID) { $0.status = "paused"; $0.stage = "Paused · can resume" }
         } catch {
+            guard workerTokens[jobID] == workerToken else { return }
             updateJob(jobID) {
                 if Task.isCancelled {
                     $0.status = "paused"
