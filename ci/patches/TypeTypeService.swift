@@ -100,7 +100,7 @@ struct TypeTypeService {
         if token?.isEmpty != false { _ = try await connect() }
     }
 
-    func createDownloadJob(videoURL: URL, options: TypeTypeDownloadOptions) async throws -> TypeTypeDownloadJob {
+    func createDownloadJob(videoURL: URL, options: TypeTypeDownloadOptions) async throws -> TypeTypeCreateDownloadResponse {
         try await ensureToken()
         let payload = TypeTypeCreateDownloadRequest(url: videoURL.absoluteString, options: options)
         let body = try JSONEncoder().encode(payload)
@@ -113,10 +113,14 @@ struct TypeTypeService {
         return try await request(path: "/api/downloader/jobs/\(safeID)", authenticated: true)
     }
 
-    func cancelDownloadJob(id: String) async throws -> TypeTypeDownloadJob {
+    func cancelDownloadJob(id: String) async throws {
         try await ensureToken()
         let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        return try await request(path: "/api/downloader/jobs/\(safeID)/cancel", method: "POST", authenticated: true)
+        let _: TypeTypeCancelDownloadResponse = try await request(
+            path: "/api/downloader/jobs/\(safeID)/cancel",
+            method: "POST",
+            authenticated: true
+        )
     }
 
     func downloadArtifact(id: String, fallbackTitle: String) async throws -> URL {
@@ -180,6 +184,15 @@ struct TypeTypeService {
 struct TypeTypeCreateDownloadRequest: Encodable {
     let url: String
     let options: TypeTypeDownloadOptions
+}
+
+struct TypeTypeCreateDownloadResponse: Decodable {
+    let id: String
+    let cached: Bool?
+}
+
+private struct TypeTypeCancelDownloadResponse: Decodable {
+    let status: String?
 }
 
 struct TypeTypeDownloadOptions: Encodable {
@@ -360,15 +373,15 @@ final class TrapTubeDownloadManager: ObservableObject {
             let remote = try await service.createDownloadJob(videoURL: videoURL, options: options)
             let initial = TrapTubeDownloadTask(
                 id: remote.id,
-                title: remote.title ?? title,
+                title: title,
                 mode: mode,
-                status: remote.status,
-                stage: remote.stage ?? "queued",
-                progress: Double(remote.progressPercent ?? 0) / 100,
-                downloadedBytes: remote.downloadedBytes ?? 0,
-                totalBytes: remote.totalBytes ?? 0,
-                speedBytesPerSecond: remote.speedBytesPerSecond ?? 0,
-                error: remote.error
+                status: "queued",
+                stage: remote.cached == true ? "cached result queued" : "queued",
+                progress: 0,
+                downloadedBytes: 0,
+                totalBytes: 0,
+                speedBytesPerSecond: 0,
+                error: nil
             )
             jobs.insert(initial, at: 0)
             monitorTasks[remote.id] = Task { [weak self] in
@@ -383,7 +396,7 @@ final class TrapTubeDownloadManager: ObservableObject {
         monitorTasks[id]?.cancel()
         monitorTasks[id] = nil
         do {
-            _ = try await service.cancelDownloadJob(id: id)
+            try await service.cancelDownloadJob(id: id)
             updateJob(id) { $0.status = "cancelled"; $0.stage = "cancelled" }
         } catch {
             lastError = error.localizedDescription
