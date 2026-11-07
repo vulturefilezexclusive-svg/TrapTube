@@ -41,9 +41,6 @@ final class LibraryStore: ObservableObject {
                 let asset = AVURLAsset(url: source)
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 guard !audioTracks.isEmpty else { throw ImportError.noAudioTrack }
-                let loadedDuration = try await asset.load(.duration).seconds
-                let duration = loadedDuration.isFinite && loadedDuration > 0 ? loadedDuration : 0
-
                 // Normalize imported formats/codecs to a known iOS-playable AAC/M4A file.
                 // This avoids handing AVAudioEngine files whose container extension or codec
                 // cannot be decoded by AVAudioFile on-device.
