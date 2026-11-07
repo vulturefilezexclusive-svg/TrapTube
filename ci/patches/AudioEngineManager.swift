@@ -130,7 +130,10 @@ final class AudioEngineManager: ObservableObject {
     func setBand(_ index: Int, gain: Float) {
         guard equalizer.bands.indices.contains(index) else { return }
         let clamped = min(max(gain, -12), 12)
-        equalizer.bands[index].gain = clamped
+        let band = equalizer.bands[index]
+        band.filterType = .parametric
+        band.bypass = false
+        band.gain = clamped
         eqGains[index] = clamped
         currentPreset = "Custom"
         updateMasterStage()
@@ -138,6 +141,8 @@ final class AudioEngineManager: ObservableObject {
 
     func setBassBoost(_ gain: Float) {
         let clamped = min(max(gain, 0), 20)
+        bassStage.bands[0].filterType = .lowShelf
+        bassStage.bands[0].bypass = false
         bassStage.bands[0].gain = clamped
         bassBoost = clamped
         updateMasterStage()
@@ -152,11 +157,11 @@ final class AudioEngineManager: ObservableObject {
         let preset: [Float]
         switch name {
         case "Hip Hop Boost":
-            preset = [6, 5, 4, 2, 0, 1, 2, 3, 4, 4, 3, 2, 1, 1, 0, -1]; setBassBoost(5)
+            preset = [10, 9, 7, 4, 1, -1, -1, 0, 2, 3, 3, 2, 1, 1, 0, -1]; setBassBoost(8)
         case "Bass Heavy":
-            preset = [8, 7, 6, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; setBassBoost(10)
+            preset = [12, 11, 9, 6, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; setBassBoost(12)
         case "Vocal Clarity":
-            preset = [-2, -1, 0, 1, 2, 3, 3, 2, 1, 0, 1, 2, 2, 2, 1, 0]; setBassBoost(0)
+            preset = [-3, -2, 0, 3, 5, 6, 6, 4, 2, 0, 1, 2, 2, 2, 1, 0]; setBassBoost(0)
         default:
             preset = Array(repeating: 0, count: 16); setBassBoost(0)
         }
@@ -169,7 +174,7 @@ final class AudioEngineManager: ObservableObject {
     private func configureGraph() {
         engine.attach(playerNode); engine.attach(equalizer); engine.attach(bassStage); engine.attach(masterStage)
         for (index, band) in equalizer.bands.enumerated() {
-            band.filterType = .parametric; band.frequency = Self.frequencies[index]; band.bandwidth = 1; band.gain = 0; band.bypass = false
+            band.filterType = .parametric; band.frequency = Self.frequencies[index]; band.bandwidth = 1.25; band.gain = 0; band.bypass = false
         }
         let bass = bassStage.bands[0]
         bass.filterType = .lowShelf; bass.frequency = 90; bass.bandwidth = 0.7; bass.gain = 0; bass.bypass = false
@@ -178,10 +183,20 @@ final class AudioEngineManager: ObservableObject {
         engine.connect(equalizer, to: bassStage, format: nil)
         engine.connect(bassStage, to: masterStage, format: nil)
         engine.connect(masterStage, to: engine.mainMixerNode, format: nil)
+        engine.mainMixerNode.outputVolume = 1
+        updateMasterStage()
         engineConfigured = true
     }
 
     private func updateMasterStage() {
+        for index in equalizer.bands.indices {
+            let band = equalizer.bands[index]
+            band.bypass = false
+            band.gain = eqGains[index]
+        }
+        let bass = bassStage.bands[0]
+        bass.bypass = false
+        bass.gain = bassBoost
         let peakBoost = max(0, eqGains.max() ?? 0) + bassBoost
         let headroom = -min(18, peakBoost * 0.5)
         let gainDB = masterGain == 0 ? -96 : 20 * log10(masterGain)
@@ -284,7 +299,13 @@ final class AudioEngineManager: ObservableObject {
 
     private func startEngineIfNeeded() throws {
         guard engineConfigured else { throw NSError(domain: "TrapTube.AudioEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "The audio graph is not configured."]) }
-        if !engine.isRunning { engine.prepare(); try engine.start() }
+        if !engine.isRunning {
+            engine.prepare()
+            try engine.start()
+        }
+        // Re-assert every filter after a route change or engine restart. Some
+        // AVAudioEngine graph restarts restore unit defaults unless parameters are reapplied.
+        updateMasterStage()
     }
 
     private func failPlayback(trackName: String, error: Error) {
