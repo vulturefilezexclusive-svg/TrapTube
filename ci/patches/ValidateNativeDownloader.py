@@ -15,6 +15,7 @@ required = {
     "TrapTubeDownloadManager": service,
     "SegmentTemplate": service,
     "SegmentTimeline": service,
+    "inferredPeriodDuration": service,
     "BYTERANGE=": service,
     "rangeAttempt": service,
     "Content-Range": service,
