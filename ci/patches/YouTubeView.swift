@@ -611,9 +611,6 @@ private struct YouTubePlayerWebView: UIViewRepresentable {
           setTimeout(window.__traptubeScanMenus, 180);
         });
       };
-      new MutationObserver(() => attach()).observe(document.documentElement,{childList:true,subtree:true});
-      attach();
-      setInterval(() => { attach(); state(); }, 700);
     })();
     """#
 }
