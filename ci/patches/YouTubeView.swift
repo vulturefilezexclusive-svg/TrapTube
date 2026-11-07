@@ -2,212 +2,50 @@ import SwiftUI
 import WebKit
 import AVKit
 import UIKit
+import SafariServices
 
 struct YouTubeView: View {
-    @EnvironmentObject private var theme: ThemeManager
-    @EnvironmentObject private var library: LibraryStore
-    @State private var query = ""
-    @State private var filter = "All"
-    @State private var feed: [TypeTypeVideo] = []
-    @State private var results: [TypeTypeVideo] = []
-    @State private var nextPage: String?
-    @State private var isLoading = false
-    @State private var isGoogleSigningIn = false
-    @StateObject private var googleAuth = GoogleYouTubeAuth.shared
-    @State private var errorMessage: String?
-    @State private var selectedVideo: TypeTypeVideo?
-    @FocusState private var searchFocused: Bool
+    @State private var didLaunchYouTube = false
+    @State private var showYouTube = false
 
-    private var localResults: [Track] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return [] }
-        return library.tracks.filter { $0.title.localizedCaseInsensitiveContains(term) || $0.artist.localizedCaseInsensitiveContains(term) }
-    }
-
-    private var visibleVideos: [TypeTypeVideo] { query.isEmpty ? feed : results }
+    private let homeURL = URL(string: "https://www.youtube.com/")!
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 18) {
-                BrandHeader().padding(.horizontal, 20)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("TrapTube").font(.largeTitle.bold()).foregroundStyle(.white)
-                    Text("Search your music library and browse TypeType videos.")
-                        .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
-                }.padding(.horizontal, 18)
-
-                HStack(spacing: 12) {
-                    Image(systemName: "person.crop.circle.badge.checkmark")
-                        .font(.title2).foregroundStyle(theme.accent)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(googleAuth.isSignedIn ? (googleAuth.displayName ?? "Google account connected") : "Your YouTube account")
-                            .font(.subheadline.bold()).foregroundStyle(.white)
-                        Text(googleAuth.isSignedIn ? (googleAuth.email ?? "Connected to Google") : "Connect Google to access your subscriptions")
-                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6")).lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    if googleAuth.isSignedIn {
-                        Button("Disconnect") { googleAuth.signOut() }
-                            .font(.caption.bold()).foregroundStyle(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 9)
-                            .background(.ultraThinMaterial, in: Capsule())
-                    } else {
-                        Button {
-                            isGoogleSigningIn = true
-                            Task {
-                                await googleAuth.signIn()
-                                isGoogleSigningIn = false
-                            }
-                        } label: {
-                            if isGoogleSigningIn {
-                                ProgressView().tint(.white)
-                            } else {
-                                Text("Sign in")
-                            }
-                        }
-                        .font(.caption.bold()).foregroundStyle(.white)
-                        .padding(.horizontal, 15).padding(.vertical, 9)
-                        .background(theme.accent, in: Capsule())
-                        .disabled(isGoogleSigningIn)
-                    }
-                }
-                .padding(13)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12), lineWidth: 1))
-                .padding(.horizontal, 16)
-                if let authError = googleAuth.lastError {
-                    Text(authError).font(.caption).foregroundStyle(Color(hex: "FF7A84"))
-                        .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 20)
-                }
-
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(Color(hex: "A6A4A6"))
-                    TextField("Search your library and videos", text: $query)
-                        .focused($searchFocused)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .foregroundStyle(.white)
-                        .onSubmit { Task { await performSearch() } }
-                    if !query.isEmpty {
-                        Button { query = ""; results = []; searchFocused = false } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(Color(hex: "8D898D"))
-                        }
-                    }
-                    Button { Task { await performSearch() } } label: {
-                        Image(systemName: "arrow.right.circle.fill").font(.title2).foregroundStyle(theme.accent)
-                    }
-                    .accessibilityLabel("Search")
-                }
-                .padding(.horizontal, 15).padding(.vertical, 13)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 17))
-                .overlay(RoundedRectangle(cornerRadius: 17).stroke(.white.opacity(0.08), lineWidth: 1))
-                .padding(.horizontal, 16)
-
-                HStack(spacing: 9) {
-                    ForEach(["All", "Local", "Videos"], id: \.self) { item in
-                        Button { filter = item } label: {
-                            Text(item).font(.subheadline.bold()).foregroundStyle(filter == item ? .white : Color(hex: "B5B2B5"))
-                                .padding(.horizontal, 17).padding(.vertical, 9)
-                                .background(filter == item ? theme.accent : .white.opacity(0.07), in: Capsule())
-                        }.buttonStyle(.plain)
-                    }
-                }.padding(.horizontal, 18)
-
-                if !query.isEmpty && filter != "Videos" {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeading(title: "Your music", trailing: "\(localResults.count) tracks")
-                        if localResults.isEmpty {
-                            Text("No matching imported tracks.").font(.subheadline).foregroundStyle(Color(hex: "898589"))
-                        } else {
-                            ForEach(localResults) { track in
-                                TrackRow(track: track, queue: localResults)
-                            }
-                        }
-                    }.padding(.horizontal, 18)
-                }
-
-                if filter != "Local" {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionHeading(title: query.isEmpty ? "Trending on TypeType" : "Video results", trailing: "\(visibleVideos.count) videos")
-                        if isLoading && visibleVideos.isEmpty {
-                            ProgressView("Loading videos…").tint(theme.accent).foregroundStyle(.white).frame(maxWidth: .infinity).padding(.vertical, 28)
-                        } else if visibleVideos.isEmpty {
-                            Text(query.isEmpty ? "No videos are available from this instance right now." : "No matching videos found.")
-                                .font(.subheadline).foregroundStyle(Color(hex: "898589")).padding(.vertical, 10)
-                        } else {
-                            ForEach(visibleVideos) { video in
-                                Button {
-                                    selectedVideo = video
-                                } label: { TypeTypeVideoRow(video: video, tint: theme.accent) }
-                                    .buttonStyle(.plain)
-                            }
-                        }
-                        if let errorMessage {
-                            Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption).foregroundStyle(Color(hex: "FF7A84")).fixedSize(horizontal: false, vertical: true)
-                        }
-                        if !query.isEmpty && !results.isEmpty && nextPage != nil {
-                            Button { Task { await loadMore() } } label: {
-                                Text(isLoading ? "Loading…" : "Load more videos").font(.subheadline.bold())
-                                    .foregroundStyle(.white).frame(maxWidth: .infinity).padding(.vertical, 12)
-                                    .background(theme.accent.opacity(0.85), in: Capsule())
-                            }.disabled(isLoading)
-                        }
-                    }.padding(.horizontal, 18)
-                }
-
-                Text("Video discovery and playback are provided by your TypeType instance. Local audio stays on this device.")
-                    .font(.caption).foregroundStyle(Color(hex: "858185")).padding(.horizontal, 20).padding(.bottom, 20)
-            }
-            .padding(.top, 7)
-        }
-        .refreshable { await loadFeed() }
-        .task { if feed.isEmpty { await loadFeed() } }
-        .sheet(item: $selectedVideo) { video in
-            if let url = TypeTypeService().watchURL(for: video) {
-                TypeTypeWatchSheet(url: url, title: video.title)
-                    .ignoresSafeArea()
-                    .preferredColorScheme(.dark)
-            } else {
-                Text("This video does not have a valid TypeType watch address.")
-                    .padding().presentationDetents([.medium])
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView().tint(.white)
+                Text("Opening YouTube Home").font(.headline).foregroundStyle(.white)
+                Text("Your personalized YouTube feed and account sign-in are provided by YouTube.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.65))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
             }
         }
+        .onAppear {
+            guard !didLaunchYouTube else { return }
+            didLaunchYouTube = true
+            showYouTube = true
+        }
+        .fullScreenCover(isPresented: $showYouTube) {
+            YouTubeSafariView(url: homeURL)
+                .ignoresSafeArea()
+        }
+    }
+}
+
+private struct YouTubeSafariView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let configuration = SFSafariViewController.Configuration()
+        configuration.entersReaderIfAvailable = false
+        let controller = SFSafariViewController(url: url, configuration: configuration)
+        controller.preferredControlTintColor = .systemPurple
+        return controller
     }
 
-    private func loadFeed() async {
-        guard !isLoading else { return }
-        isLoading = true; errorMessage = nil
-        defer { isLoading = false }
-        do {
-            _ = try await TypeTypeService().connect()
-            feed = try await TypeTypeService().trending()
-        } catch { errorMessage = error.localizedDescription }
-    }
-
-    private func performSearch() async {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { results = []; return }
-        isLoading = true; errorMessage = nil; nextPage = nil
-        defer { isLoading = false }
-        do {
-            _ = try await TypeTypeService().connect()
-            let page = try await TypeTypeService().search(query: term)
-            results = page.items
-            nextPage = page.nextpage
-        } catch { results = []; errorMessage = error.localizedDescription }
-    }
-
-    private func loadMore() async {
-        guard let nextPage, !isLoading else { return }
-        isLoading = true; defer { isLoading = false }
-        do {
-            let page = try await TypeTypeService().search(query: query, nextPage: nextPage)
-            results.append(contentsOf: page.items)
-            self.nextPage = page.nextpage
-        } catch { errorMessage = error.localizedDescription }
-    }
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
 
 private struct TypeTypeVideoRow: View {
@@ -250,6 +88,7 @@ private struct TypeTypePlayerOption: Identifiable {
 
 private struct TypeTypeWatchSheet: View {
     let url: URL
+    let downloadURL: URL
     let title: String
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var theme: ThemeManager
@@ -394,7 +233,7 @@ private struct TypeTypeWatchSheet: View {
             }
         }
         .sheet(isPresented: $showDownloads) {
-            TrapTubeDownloadsSheet(title: title, videoURL: url)
+            TrapTubeDownloadsSheet(title: title, videoURL: downloadURL)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(28)
