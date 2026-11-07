@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var connectionStatus: String?
     @State private var checkingConnection = false
     @State private var showEqualizer = false
+    @State private var showCustomization = false
     @StateObject private var stemService = StemSeparationService()
     @AppStorage("settings.quickSetupComplete") private var quickSetupComplete = true
     @AppStorage("settings.backgroundPlayback") private var backgroundPlayback = true
@@ -85,16 +86,6 @@ struct SettingsView: View {
                     settingsToggle("Quick setup complete", detail: "Remember this device initial preferences", value: $quickSetupComplete)
                 }
 
-                settingsCard(title: "Watch & player", icon: "play.rectangle") {
-                    settingsToggle("Background playback", detail: "Keep supported local audio playing when you leave the player", value: $backgroundPlayback)
-                    Divider().overlay(.white.opacity(0.1))
-                    settingsToggle("Autoplay next item", detail: "Continue through a local queue", value: $autoplay)
-                    Divider().overlay(.white.opacity(0.1))
-                    settingsToggle("Show captions when available", detail: "Use captions exposed by the video provider", value: $showCaptions)
-                    Divider().overlay(.white.opacity(0.1))
-                    settingsToggle("Keep screen awake in player", detail: "Prevent auto-lock while the player is open", value: $keepScreenAwake)
-                }
-
                 settingsCard(title: "Downloads", icon: "arrow.down.circle") {
                     infoRow("Storage location", value: "On this device")
                     Divider().overlay(.white.opacity(0.1))
@@ -103,20 +94,29 @@ struct SettingsView: View {
                     settingsToggle("Smart library cleanup", detail: "Offer cleanup suggestions for unused imported files", value: $smartCleanup)
                 }
 
-                settingsCard(title: "Library & interface", icon: "rectangle.stack") {
-                    infoRow("Library organization", value: "Tracks · playlists · recently played")
-                    Divider().overlay(.white.opacity(0.1))
-                    settingsToggle("Reduce motion", detail: "Use simpler transitions throughout TrapTube", value: $reduceMotion)
+                Button {
+                    showCustomization = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Customize TrapTube", systemImage: "slider.horizontal.3")
+                            .font(.headline.bold()).foregroundStyle(.white)
+                        Text("Personalize playback, appearance, and interface behavior.")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        HStack(spacing: 7) {
+                            Text("Open customization")
+                            Image(systemName: "arrow.up.right")
+                        }
+                        .font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.10), lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 20))
                 }
-
-                settingsCard(title: "Shorts", icon: "rectangle.portrait") {
-                    settingsToggle("Autoplay short videos", detail: "Remember this preference for supported short-video feeds", value: $shortsAutoplay)
-                    Text("Short-video controls appear only when the connected provider supplies a compatible feed.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                }
-
-                settingsCard(title: "Customize TrapTube", icon: "slider.horizontal.3") {
-                    Text("Personalize playback, appearance, and interface behavior. Accent colors below update immediately.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .accessibilityHint("Opens playback, appearance, and interface customization settings")
 
                 settingsCard(title: "App & privacy", icon: "lock.shield") {
                     settingsToggle("Share anonymous diagnostics", detail: "Off by default", value: $shareDiagnostics)
@@ -124,38 +124,6 @@ struct SettingsView: View {
                     infoRow("Local audio", value: "Processed on this device")
                     Divider().overlay(.white.opacity(0.1))
                     infoRow("Remote video", value: "Handled by your connected provider")
-                }
-
-                settingsCard(title: "Theme colors", icon: "paintpalette.fill") {
-                    Text("Choose an accent color. Your selection updates the app immediately.")
-                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
-                    LazyVGrid(columns: columns, spacing: 14) {
-                        ForEach(ThemeManager.accents) { option in
-                            Button { theme.selectAccent(option) } label: {
-                                VStack(spacing: 7) {
-                                    ZStack {
-                                        Circle().fill(option.color).frame(width: 42, height: 42)
-                                        if theme.accentHex == option.hex {
-                                            Image(systemName: "checkmark").font(.headline.bold()).foregroundStyle(option.hex == "F4F4F5" || option.hex == "A6A4A6" ? .black : .white)
-                                        }
-                                    }
-                                    Text(option.name).font(.caption2.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                                }
-                                .frame(maxWidth: .infinity).padding(.vertical, 7)
-                                .background(theme.accentHex == option.hex ? .white.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 13))
-                                .overlay(RoundedRectangle(cornerRadius: 13).stroke(theme.accentHex == option.hex ? theme.accent : .white.opacity(0.07), lineWidth: 1))
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("\(option.name) accent color\(theme.accentHex == option.hex ? ", selected" : "")")
-                        }
-                    }
-                    HStack(spacing: 9) {
-                        RoundedRectangle(cornerRadius: 8).fill(theme.accent).frame(width: 28, height: 28)
-                        Text("Live preview · \(theme.selectedAccent.name)").font(.subheadline.bold()).foregroundStyle(.white)
-                        Spacer()
-                        Button("Reset") { theme.reset() }.font(.subheadline.bold()).foregroundStyle(theme.accent)
-                    }.padding(.top, 5)
                 }
 
                 settingsCard(title: "Local library", icon: "externaldrive.fill") {
@@ -173,6 +141,79 @@ struct SettingsView: View {
             .padding(.top, 7).padding(.bottom, 20)
         }
         .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player).environmentObject(theme).presentationDetents([.large]) }
+
+        .sheet(isPresented: $showCustomization) {
+            NavigationStack {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("Choose how TrapTube looks and behaves. Changes are saved automatically.")
+                            .font(.subheadline).foregroundStyle(Color(hex: "A6A4A6"))
+                            .padding(.horizontal, 18)
+
+                        settingsCard(title: "Playback", icon: "play.rectangle") {
+                            settingsToggle("Background playback", detail: "Keep supported local audio playing when you leave the player", value: $backgroundPlayback)
+                            Divider().overlay(.white.opacity(0.1))
+                            settingsToggle("Autoplay next item", detail: "Continue through a local queue", value: $autoplay)
+                            Divider().overlay(.white.opacity(0.1))
+                            settingsToggle("Show captions when available", detail: "Use captions exposed by the video provider", value: $showCaptions)
+                            Divider().overlay(.white.opacity(0.1))
+                            settingsToggle("Keep screen awake in player", detail: "Prevent auto-lock while the player is open", value: $keepScreenAwake)
+                            Divider().overlay(.white.opacity(0.1))
+                            settingsToggle("Autoplay short videos", detail: "Remember this preference for supported short-video feeds", value: $shortsAutoplay)
+                        }
+
+                        settingsCard(title: "Interface", icon: "rectangle.stack") {
+                            settingsToggle("Reduce motion", detail: "Use simpler transitions throughout TrapTube", value: $reduceMotion)
+                        }
+
+                                        settingsCard(title: "Theme colors", icon: "paintpalette.fill") {
+                                            Text("Choose an accent color. Your selection updates the app immediately.")
+                                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                            LazyVGrid(columns: columns, spacing: 14) {
+                                                ForEach(ThemeManager.accents) { option in
+                                                    Button { theme.selectAccent(option) } label: {
+                                                        VStack(spacing: 7) {
+                                                            ZStack {
+                                                                Circle().fill(option.color).frame(width: 42, height: 42)
+                                                                if theme.accentHex == option.hex {
+                                                                    Image(systemName: "checkmark").font(.headline.bold()).foregroundStyle(option.hex == "F4F4F5" || option.hex == "A6A4A6" ? .black : .white)
+                                                                }
+                                                            }
+                                                            Text(option.name).font(.caption2.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                                        }
+                                                        .frame(maxWidth: .infinity).padding(.vertical, 7)
+                                                        .background(theme.accentHex == option.hex ? .white.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 13))
+                                                        .overlay(RoundedRectangle(cornerRadius: 13).stroke(theme.accentHex == option.hex ? theme.accent : .white.opacity(0.07), lineWidth: 1))
+                                                        .contentShape(Rectangle())
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .accessibilityLabel("\(option.name) accent color\(theme.accentHex == option.hex ? ", selected" : "")")
+                                                }
+                                            }
+                                            HStack(spacing: 9) {
+                                                RoundedRectangle(cornerRadius: 8).fill(theme.accent).frame(width: 28, height: 28)
+                                                Text("Live preview · \(theme.selectedAccent.name)").font(.subheadline.bold()).foregroundStyle(.white)
+                                                Spacer()
+                                                Button("Reset") { theme.reset() }.font(.subheadline.bold()).foregroundStyle(theme.accent)
+                                            }.padding(.top, 5)
+                                        }
+                    }
+                    .padding(.top, 16).padding(.bottom, 24)
+                }
+                .background(Color(hex: "080809").ignoresSafeArea())
+                .navigationTitle("Customize TrapTube")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { showCustomization = false }
+                            .fontWeight(.semibold).tint(theme.accent)
+                    }
+                }
+            }
+            .preferredColorScheme(.dark)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .onAppear { stemService.refresh() }
     }
 
