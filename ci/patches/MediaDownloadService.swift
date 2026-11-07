@@ -296,8 +296,13 @@ struct TrapTubeStreamResolver {
         let isMasterPlaylist = text.contains("#EXT-X-STREAM-INF")
         if !isMasterPlaylist {
             let media = parseHLSMediaPlaylist(lines, source: source)
+            guard !media.segmentURLs.isEmpty else {
+                throw TrapTubeResolverError.unsupportedManifest(
+                    "This HLS playlist is encrypted, uses byte-range segments, or is a live/incomplete stream. TrapTube currently downloads clear, complete VOD playlists only."
+                )
+            }
             let asset = TrapTubeFlatAsset(url: source, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
-                height: nil, bitrate: nil, label: "HLS media", isManifest: media.segmentURLs.isEmpty,
+                height: nil, bitrate: nil, label: "HLS media", isManifest: false,
                 headers: headers, initializationURL: media.initializationURL, segmentURLs: media.segmentURLs)
             return TrapTubeResolvedMedia(title: title, sourceURL: source, videoAssets: [],
                 audioAssets: [], muxedAssets: [asset], supportsSeparateAudioVideo: false)
@@ -321,15 +326,25 @@ struct TrapTubeStreamResolver {
             } else if !line.hasPrefix("#"), let url = URL(string: line, relativeTo: source)?.absoluteURL,
                       pendingHeight != nil || pendingBandwidth != nil {
                 let media = await loadHLSVariant(url, from: source, headers: headers)
+                guard !media.segmentURLs.isEmpty else {
+                    throw TrapTubeResolverError.unsupportedManifest(
+                        "An HLS video rendition is encrypted, uses byte ranges, or is not a complete VOD playlist."
+                    )
+                }
                 let videoAsset = TrapTubeFlatAsset(url: url, kind: .video, mimeType: "application/vnd.apple.mpegurl",
                     height: pendingHeight, bitrate: pendingBandwidth, label: pendingHeight.map { "\($0)p" } ?? "Video",
-                    isManifest: media.segmentURLs.isEmpty, headers: headers,
+                    isManifest: false, headers: headers,
                     initializationURL: media.initializationURL, segmentURLs: media.segmentURLs)
                 videos.append(videoAsset)
                 if let group = audioGroup, let audioURL = audioGroups[group] {
                     let audioMedia = await loadHLSVariant(audioURL, from: source, headers: headers)
+                    guard !audioMedia.segmentURLs.isEmpty else {
+                        throw TrapTubeResolverError.unsupportedManifest(
+                            "The HLS audio rendition is encrypted, uses byte ranges, or is not a complete VOD playlist."
+                        )
+                    }
                     audios.append(TrapTubeFlatAsset(url: audioURL, kind: .audio, mimeType: "application/vnd.apple.mpegurl",
-                        height: nil, bitrate: nil, label: "Audio", isManifest: audioMedia.segmentURLs.isEmpty,
+                        height: nil, bitrate: nil, label: "Audio", isManifest: false,
                         headers: headers, initializationURL: audioMedia.initializationURL, segmentURLs: audioMedia.segmentURLs))
                 } else {
                     muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: "application/vnd.apple.mpegurl",
