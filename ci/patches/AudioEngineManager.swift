@@ -16,6 +16,7 @@ final class AudioEngineManager: ObservableObject {
     @Published private(set) var bassBoost: Float = 0
     @Published private(set) var masterGain: Float = 1
     @Published private(set) var currentPreset = "Flat"
+    @Published private(set) var visualizerLevels = Array(repeating: Float(0), count: 48)
     @Published var isShuffled = false
     @Published var repeatsTrack = false
 
@@ -34,6 +35,7 @@ final class AudioEngineManager: ObservableObject {
     private var engineConfigured = false
     private var playbackGeneration = 0
     private var scheduledStartTime: TimeInterval = 0
+    private var visualizerTapInstalled = false
 
     init() { configureGraph() }
 
@@ -183,9 +185,45 @@ final class AudioEngineManager: ObservableObject {
         engine.connect(equalizer, to: bassStage, format: nil)
         engine.connect(bassStage, to: masterStage, format: nil)
         engine.connect(masterStage, to: engine.mainMixerNode, format: nil)
+        installVisualizerTap()
         engine.mainMixerNode.outputVolume = 1
         updateMasterStage()
         engineConfigured = true
+    }
+
+
+    private func installVisualizerTap() {
+        guard !visualizerTapInstalled else { return }
+        visualizerTapInstalled = true
+        masterStage.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
+            guard let channels = buffer.floatChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return }
+            let channelCount = Int(buffer.format.channelCount)
+            let bandCount = 48
+            let framesPerBand = max(1, frameCount / bandCount)
+            var levels = [Float](repeating: 0, count: bandCount)
+            for band in 0..<bandCount {
+                let start = band * framesPerBand
+                let end = min(frameCount, start + framesPerBand)
+                guard start < end else { continue }
+                var sum: Float = 0
+                var count = 0
+                for channel in 0..<channelCount {
+                    for index in start..<end {
+                        let sample = channels[channel][index]
+                        sum += sample * sample
+                        count += 1
+                    }
+                }
+                let rms = count > 0 ? sqrt(sum / Float(count)) : 0
+                levels[band] = min(1, max(0, rms * 5.5))
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.visualizerLevels = levels
+            }
+        }
     }
 
     private func updateMasterStage() {
