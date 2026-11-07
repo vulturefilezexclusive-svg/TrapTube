@@ -210,8 +210,12 @@ struct TrapTubeStreamResolver {
                 audioAssets: kind == .audio ? [asset] : [], muxedAssets: kind == .muxed ? [asset] : [],
                 supportsSeparateAudioVideo: false)
         }
-        if isHLS { return try await parseHLS(data: data, source: source, title: title, headers: providerHeaders) }
-        if isDASH { return try parseDASH(data: data, source: source, title: title, headers: providerHeaders) }
+        if isHLS || responseMime.contains("mpegurl") || responseExtension == "m3u8" {
+            return try await parseHLS(data: data, source: source, title: title, headers: providerHeaders)
+        }
+        if isDASH || responseMime.contains("dash+xml") || responseExtension == "mpd" {
+            return try parseDASH(data: data, source: source, title: title, headers: providerHeaders)
+        }
         let responseMime = ((response as? HTTPURLResponse)?.mimeType ?? mime).lowercased()
         if responseMime.hasPrefix("video/") || responseMime.hasPrefix("audio/") {
             let kind: TrapTubeAssetKind = responseMime.hasPrefix("audio/") ? .audio : .muxed
