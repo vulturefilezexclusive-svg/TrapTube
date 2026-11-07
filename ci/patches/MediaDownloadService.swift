@@ -211,30 +211,38 @@ struct TrapTubeStreamResolver {
             throw TrapTubeResolverError.badResponse
         }
         let usesSegmentTemplate = xml.contains("<SegmentTemplate") || xml.contains("<SegmentList") || xml.contains("<SegmentBase")
-        let blocks = xml.components(separatedBy: "<Representation").dropFirst()
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
-        for (index, block) in blocks.enumerated() {
-            guard let end = block.range(of: "</Representation>") else { continue }
-            let segment = String(block[..<end.lowerBound])
-            guard let tagEnd = segment.firstIndex(of: ">") else { continue }
-            let attrs = parseAttributes(String(segment[..<tagEnd]))
-            let baseStart = segment.range(of: "<BaseURL>")
-            let baseEnd = segment.range(of: "</BaseURL>")
-            let explicitBase: URL? = {
-                guard let baseStart, let baseEnd else { return nil }
-                let raw = String(segment[baseStart.upperBound..<baseEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                return URL(string: raw, relativeTo: source)?.absoluteURL
-            }()
-            let url = usesSegmentTemplate ? source : (explicitBase ?? source)
-            let type = (attrs["mimeType"] ?? attrs["contentType"] ?? "").lowercased()
-            let h = Int(attrs["height"] ?? ""), rate = Int(attrs["bandwidth"] ?? "")
-            let id = attrs["id"]
-            let kind: TrapTubeAssetKind = type.contains("audio") ? .audio : (type.contains("video") ? .video : .muxed)
-            let asset = TrapTubeFlatAsset(url: url, kind: kind, mimeType: type, height: h, bitrate: rate,
-                label: h.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media"),
-                isManifest: usesSegmentTemplate || explicitBase == nil, headers: [:],
-                representationID: id, streamIndex: index)
-            switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
+        var streamIndex = 0
+        let adaptationSets = xml.components(separatedBy: "<AdaptationSet").dropFirst()
+        for adaptation in adaptationSets {
+            guard let adaptationTagEnd = adaptation.firstIndex(of: ">") else { continue }
+            let adaptationAttributes = parseAttributes(String(adaptation[..<adaptationTagEnd]))
+            let inheritedType = (adaptationAttributes["mimeType"] ?? adaptationAttributes["contentType"] ?? "").lowercased()
+            let representations = adaptation.components(separatedBy: "<Representation").dropFirst()
+            for block in representations {
+                guard let end = block.range(of: "</Representation>") else { continue }
+                let segment = String(block[..<end.lowerBound])
+                guard let tagEnd = segment.firstIndex(of: ">") else { continue }
+                let attrs = parseAttributes(String(segment[..<tagEnd]))
+                let baseStart = segment.range(of: "<BaseURL>")
+                let baseEnd = segment.range(of: "</BaseURL>")
+                let explicitBase: URL? = {
+                    guard let baseStart, let baseEnd else { return nil }
+                    let raw = String(segment[baseStart.upperBound..<baseEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    return URL(string: raw, relativeTo: source)?.absoluteURL
+                }()
+                let url = usesSegmentTemplate || explicitBase == nil ? source : explicitBase!
+                let type = (attrs["mimeType"] ?? attrs["contentType"] ?? inheritedType).lowercased()
+                let h = Int(attrs["height"] ?? ""), rate = Int(attrs["bandwidth"] ?? "")
+                let id = attrs["id"]
+                let kind: TrapTubeAssetKind = type.contains("audio") ? .audio : (type.contains("video") ? .video : .muxed)
+                let asset = TrapTubeFlatAsset(url: url, kind: kind, mimeType: type, height: h, bitrate: rate,
+                    label: h.map { "\($0)p" } ?? (kind == .audio ? "DASH audio" : "DASH media"),
+                    isManifest: usesSegmentTemplate || explicitBase == nil, headers: [:],
+                    representationID: id, streamIndex: streamIndex)
+                switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
+                streamIndex += 1
+            }
         }
         guard !video.isEmpty || !audio.isEmpty || !muxed.isEmpty else {
             throw TrapTubeResolverError.unsupportedManifest("The DASH manifest contains no addressable representations.")
