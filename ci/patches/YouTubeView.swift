@@ -748,6 +748,7 @@ private struct TrapTubeDownloadsSheet: View {
                             Picker(mode == "video" ? "Video quality" : "Audio quality", selection: $quality) {
                                 Text("Best available").tag("best")
                                 if mode == "video" {
+                                    Text("Best available").tag("best")
                                     ForEach(manager.availableVideoHeights, id: \.self) { height in
                                         Text("\(height)p").tag("\(height)p")
                                     }
@@ -885,7 +886,13 @@ private struct TrapTubeDownloadsSheet: View {
             if preferredVideoQuality != "auto" {
                 quality = "\(preferredVideoQuality)p"
             }
-            Task { await manager.inspect(videoURL: videoURL, title: title) }
+            Task {
+                await manager.inspect(videoURL: videoURL, title: title)
+                if preferredVideoQuality != "auto" &&
+                    !manager.availableVideoHeights.contains(Int(preferredVideoQuality) ?? -1) {
+                    quality = "best"
+                }
+            }
         }
     }
 
