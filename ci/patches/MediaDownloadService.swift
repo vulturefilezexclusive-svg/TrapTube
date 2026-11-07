@@ -332,7 +332,6 @@ struct TrapTubeStreamResolver {
         let mpdSegmentBase = element("SegmentBase", in: mpdHeader)
         let mpdBase = elementText("BaseURL", in: mpdHeader)
         var video: [TrapTubeFlatAsset] = [], audio: [TrapTubeFlatAsset] = [], muxed: [TrapTubeFlatAsset] = []
-        var streamIndex = 0
         let periodParts = xml.components(separatedBy: "<Period")
         let periodBodies: [String] = periodParts.count > 1
             ? periodParts.dropFirst().map { part in
@@ -470,7 +469,7 @@ struct TrapTubeStreamResolver {
                 let assetURL = segmented || needsManifestReader ? source : resolvedBase
                 let asset = TrapTubeFlatAsset(url: assetURL, kind: kind, mimeType: type, height: height, bitrate: bitrate,
                     label: label, isManifest: needsManifestReader && !segmented, headers: headers, representationID: representationID,
-                    streamIndex: streamIndex, initializationURL: initializationURL, segmentURLs: segmentURLs)
+                    streamIndex: nil, initializationURL: initializationURL, segmentURLs: segmentURLs)
                 switch kind { case .video: video.append(asset); case .audio: audio.append(asset); case .muxed: muxed.append(asset) }
                 streamIndex += 1
             }
