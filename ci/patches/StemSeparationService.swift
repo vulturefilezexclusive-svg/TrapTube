@@ -184,8 +184,14 @@ final class StemSeparationService: ObservableObject {
         let file = try AVAudioFile(forReading: url)
         let sourceFormat = file.processingFormat
         guard sourceFormat.sampleRate.isFinite, sourceFormat.sampleRate > 0,
-              sourceFormat.channelCount > 0, file.length > 0,
-              let source = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+              sourceFormat.channelCount > 0, file.length > 0 else {
+            throw StemProcessingError.unreadableAudio
+        }
+        let duration = Double(file.length) / sourceFormat.sampleRate
+        guard duration <= 8 * 60 else {
+            throw StemProcessingError.outputWrite("For memory safety, HTDemucs FT currently accepts tracks up to 8 minutes long.")
+        }
+        guard let source = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
             throw StemProcessingError.unreadableAudio
         }
         try file.read(into: source)
