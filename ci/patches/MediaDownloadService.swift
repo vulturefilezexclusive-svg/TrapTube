@@ -785,6 +785,7 @@ enum TrapTubeFlatTransferError: LocalizedError {
 
 enum TrapTubeFlatTransfer {
     static func download(_ asset: TrapTubeFlatAsset, to destination: URL, startingAt offset: Int64 = 0,
+                         rangeAttempt: Int = 0,
                          progress: @escaping (Int64, Int64, Int64) -> Void) async throws -> URL {
         var request = URLRequest(url: asset.url)
         request.timeoutInterval = 180
@@ -858,7 +859,11 @@ enum TrapTubeFlatTransfer {
         }
         let finalBytes = effectiveOffset + received
         if total > 0 && finalBytes < total {
-            throw TrapTubeResolverError.unsupportedManifest("The server ended the response before the advertised media length. The partial file was kept; resume the task to continue.")
+            guard rangeAttempt < 16 else {
+                throw TrapTubeResolverError.unsupportedManifest("The server repeatedly returned incomplete byte ranges. The partial file was kept; resume the task to continue.")
+            }
+            return try await download(asset, to: destination, startingAt: finalBytes,
+                                      rangeAttempt: rangeAttempt + 1, progress: progress)
         }
         progress(finalBytes, total, 0)
         return destination
