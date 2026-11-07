@@ -2,6 +2,11 @@ import AVFoundation
 import Foundation
 import Combine
 
+extension Notification.Name {
+    /// Posted by LibraryStore.delete so playback can release a deleted file. userInfo["id"] is the track UUID.
+    static let trapTubeTrackDeleted = Notification.Name("TrapTube.trackDeleted")
+}
+
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var tracks: [Track] = []
@@ -53,11 +58,17 @@ final class LibraryStore: ObservableObject {
                 exporter.outputURL = target
                 exporter.outputFileType = .m4a
                 exporter.shouldOptimizeForNetworkUse = false
-                await withCheckedContinuation { continuation in
-                    exporter.exportAsynchronously { continuation.resume() }
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        exporter.exportAsynchronously { continuation.resume() }
+                    }
+                } onCancel: {
+                    exporter.cancelExport()
                 }
-                guard exporter.status == .completed else {
-                    throw exporter.error ?? ImportError.exportFailed
+                switch exporter.status {
+                case .completed: break
+                case .cancelled: throw CancellationError()
+                default: throw exporter.error ?? ImportError.exportFailed
                 }
 
                 let attributes = try fileManager.attributesOfItem(atPath: target.path)
@@ -87,6 +98,9 @@ final class LibraryStore: ObservableObject {
                     Track(title: title, artist: "Unknown artist", fileName: fileName, duration: verifiedDuration, fileSizeBytes: size),
                     at: 0
                 )
+            } catch is CancellationError {
+                if let destination { try? fileManager.removeItem(at: destination) }
+                messages.append("\(source.lastPathComponent): import cancelled.")
             } catch {
                 if let destination { try? fileManager.removeItem(at: destination) }
                 let nsError = error as NSError
@@ -147,7 +161,10 @@ final class LibraryStore: ObservableObject {
     }
 
     func delete(_ track: Track) {
+        // Tell playback first so the engine releases the file and the UI leaves the "playing" state.
+        NotificationCenter.default.post(name: .trapTubeTrackDeleted, object: nil, userInfo: ["id": track.id])
         try? fileManager.removeItem(at: Self.audioURL(for: track.fileName))
+        try? fileManager.removeItem(at: Self.appDirectory.appendingPathComponent("Stems", isDirectory: true).appendingPathComponent(track.id.uuidString, isDirectory: true))
         tracks.removeAll { $0.id == track.id }
         recentTrackIDs.removeAll { $0 == track.id }
         for index in playlists.indices { playlists[index].trackIDs.removeAll { $0 == track.id } }
@@ -155,10 +172,28 @@ final class LibraryStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: metadataURL), let snapshot = try? JSONDecoder().decode(LibrarySnapshot.self, from: data) else { return }
+        guard fileManager.fileExists(atPath: metadataURL.path) else { return }
+        guard let data = try? Data(contentsOf: metadataURL), let snapshot = try? JSONDecoder().decode(LibrarySnapshot.self, from: data) else {
+            // Never discard an unreadable library silently: keep a copy and tell the user.
+            let backup = metadataURL.deletingLastPathComponent().appendingPathComponent("library.corrupt-\(Int(Date().timeIntervalSince1970)).json")
+            try? fileManager.copyItem(at: metadataURL, to: backup)
+            alertMessage = "The saved library could not be read. A backup copy was kept and the library was reset."
+            return
+        }
         tracks = snapshot.tracks.filter { fileManager.fileExists(atPath: Self.audioURL(for: $0.fileName).path) }
-        playlists = snapshot.playlists
-        recentTrackIDs = snapshot.recentTrackIDs
+        let validIDs = Set(tracks.map(\.id))
+        playlists = snapshot.playlists.map { var list = $0; list.trackIDs.removeAll { !validIDs.contains($0) }; return list }
+        recentTrackIDs = snapshot.recentTrackIDs.filter { validIDs.contains($0) }
+        sweepOrphans()
+    }
+
+    /// Removes audio files no library record points to (e.g. from an interrupted import).
+    private func sweepOrphans() {
+        guard let files = try? fileManager.contentsOfDirectory(at: Self.tracksDirectory, includingPropertiesForKeys: nil) else { return }
+        let referenced = Set(tracks.map(\.fileName))
+        for file in files where file.pathExtension == "m4a" && !referenced.contains(file.lastPathComponent) {
+            try? fileManager.removeItem(at: file)
+        }
     }
 
     private func persist() {

@@ -30,12 +30,91 @@ final class AudioEngineManager: ObservableObject {
     private var engineConfigured = false
     private var playbackGeneration = 0
     private var scheduledStartTime: TimeInterval = 0
+    private var observers: [NSObjectProtocol] = []
+    private var resumeAfterInterruption = false
+    /// Non-library file (e.g. a separated stem) currently routed through the same EQ graph.
+    @Published private(set) var externalFileURL: URL?
 
-    init() { configureGraph() }
+    init() { configureGraph(); observeSystemEvents() }
+
+    deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+
+    private func observeSystemEvents() {
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            MainActor.assumeIsolated { self?.handleInterruption(typeRaw: raw, optionsRaw: options) }
+        })
+        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            MainActor.assumeIsolated { self?.handleRouteChange(reasonRaw: raw) }
+        })
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleEngineConfigurationChange() }
+        })
+        observers.append(center.addObserver(forName: .trapTubeTrackDeleted, object: nil, queue: .main) { [weak self] note in
+            let id = note.userInfo?["id"] as? UUID
+            MainActor.assumeIsolated { self?.handleTrackDeleted(id) }
+        })
+    }
+
+    private func handleInterruption(typeRaw: UInt?, optionsRaw: UInt?) {
+        guard let typeRaw, let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+        if type == .began {
+            resumeAfterInterruption = isPlaying
+            if isPlaying { playerNode.pause(); isPlaying = false }
+        } else if resumeAfterInterruption, AVAudioSession.InterruptionOptions(rawValue: optionsRaw ?? 0).contains(.shouldResume) {
+            resumeAfterInterruption = false
+            do { try configureAudioSession(); try startEngineIfNeeded(); playerNode.play(); isPlaying = true }
+            catch { if let track = currentTrack { failPlayback(trackName: track.title, error: error) } }
+        } else { resumeAfterInterruption = false }
+    }
+
+    private func handleRouteChange(reasonRaw: UInt?) {
+        // Headphones/Bluetooth/AirPlay went away: pause like system players do instead of blasting the speaker.
+        guard let reasonRaw, AVAudioSession.RouteChangeReason(rawValue: reasonRaw) == .oldDeviceUnavailable, isPlaying else { return }
+        playerNode.pause(); isPlaying = false
+    }
+
+    private func handleEngineConfigurationChange() {
+        // Output format/route changed: the engine stopped itself. Restart and resume if we were playing.
+        guard currentTrack != nil else { return }
+        let wasPlaying = isPlaying
+        do { try startEngineIfNeeded(); if wasPlaying { playerNode.play() } }
+        catch { if let track = currentTrack { failPlayback(trackName: track.title, error: error) } }
+    }
+
+    private func handleTrackDeleted(_ id: UUID?) {
+        guard let id else { return }
+        queue.removeAll { $0.id == id }
+        if currentTrack?.id == id {
+            stopPlayback(clearTrack: true)
+            playbackError = "The track you were playing was deleted from the library."
+        } else if let current = currentTrack, let index = queue.firstIndex(where: { $0.id == current.id }) {
+            queueIndex = index
+        }
+    }
+
+    /// Plays a non-library file (e.g. a separated stem) through the same EQ-controlled engine graph.
+    func playFile(at url: URL, title: String) {
+        let track = Track(title: title, artist: "Stem", fileName: url.lastPathComponent, duration: 0, fileSizeBytes: 0)
+        externalFileURL = url
+        queue = [track]; queueIndex = 0
+        start(track, at: 0, autoplay: true)
+    }
+
+    func stop() { stopPlayback(clearTrack: true); externalFileURL = nil }
+
+    /// Called when another player (the TypeType web player) takes over audio output.
+    func pauseForExternalPlayback() {
+        if isPlaying { playerNode.pause(); isPlaying = false }
+    }
 
     var clippingWarning: Bool { masterGain > 1.0 || (eqGains.max() ?? 0) > 6 }
 
     func play(_ track: Track, from tracks: [Track]) {
+        externalFileURL = nil
         queue = tracks
         queueIndex = tracks.firstIndex(where: { $0.id == track.id }) ?? 0
         start(track, at: 0, autoplay: true)
@@ -164,7 +243,7 @@ final class AudioEngineManager: ObservableObject {
         playerNode.stop(); currentFile = nil
         currentTrack = track
         playbackError = nil
-        let fileURL = LibraryStore.audioURL(for: track.fileName).standardizedFileURL
+        let fileURL = (externalFileURL ?? LibraryStore.audioURL(for: track.fileName)).standardizedFileURL
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             failPlayback(trackName: track.title, error: NSError(domain: "TrapTube.Library", code: 404, userInfo: [NSLocalizedDescriptionKey: "The imported audio file is missing from the app's library."]))
             return

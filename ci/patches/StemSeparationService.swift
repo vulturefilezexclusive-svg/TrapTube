@@ -46,12 +46,18 @@ private enum HTDemucsRuntime {
         return envelope[start..<(start + segmentLength)].map { 1 / $0 }
     }()
 
+    static let minimumWeightBytes: Int64 = 50_000_000
+
     static func modelURL() throws -> URL {
-        guard let url = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc"),
-              FileManager.default.fileExists(atPath: url.appendingPathComponent("model.mil").path) &&
-              FileManager.default.fileExists(atPath: url.appendingPathComponent("coremldata.bin").path) else {
+        guard let url = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc") else { throw DemucsError.modelMissing }
+        let fm = FileManager.default
+        for name in ["model.mil", "coremldata.bin"] where !fm.fileExists(atPath: url.appendingPathComponent(name).path) {
             throw DemucsError.modelMissing
         }
+        // The program alone is useless without its weights; verify the real weights file, not just metadata.
+        let weights = url.appendingPathComponent("weights/weight.bin")
+        let size = ((try? fm.attributesOfItem(atPath: weights.path))?[.size] as? NSNumber)?.int64Value ?? 0
+        guard size >= minimumWeightBytes else { throw DemucsError.modelMissing }
         return url
     }
 
@@ -234,9 +240,45 @@ private enum HTDemucsRuntime {
         buffer.frameLength = AVAudioFrameCount(left.count)
         left.withUnsafeBufferPointer { channels[0].update(from: $0.baseAddress!, count: left.count) }
         right.withUnsafeBufferPointer { channels[1].update(from: $0.baseAddress!, count: right.count) }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        try file.write(from: buffer)
+        // Scope the writer so the file is closed (and flushed) before it is re-opened for validation.
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
     }
+
+    /// Re-opens a written stem and returns its peak amplitude; throws if it is short, non-finite or unreadable.
+    static func validateWAV(_ url: URL, expectedFrames: Int) throws -> Float {
+        let file = try AVAudioFile(forReading: url)
+        guard Int(file.length) == expectedFrames else {
+            throw DemucsError.processing("A separated WAV has \(file.length) frames; expected \(expectedFrames). No stems were published.")
+        }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 65_536) else {
+            throw DemucsError.processing("Could not validate a separated WAV.")
+        }
+        var peak: Float = 0
+        while file.framePosition < file.length {
+            try file.read(into: buffer)
+            guard buffer.frameLength > 0, let data = buffer.floatChannelData else { break }
+            for channel in 0..<Int(file.processingFormat.channelCount) {
+                for i in 0..<Int(buffer.frameLength) {
+                    let value = data[channel][i]
+                    guard value.isFinite else { throw DemucsError.processing("A separated WAV contains invalid samples. No stems were published.") }
+                    peak = max(peak, abs(value))
+                }
+            }
+        }
+        return peak
+    }
+}
+
+/// Serialises writers per destination so two jobs can never write the same stem folder.
+private final class DestinationRegistry: @unchecked Sendable {
+    static let shared = DestinationRegistry()
+    private let lock = NSLock()
+    private var paths = Set<String>()
+    func claim(_ path: String) -> Bool { lock.lock(); defer { lock.unlock() }; return paths.insert(path).inserted }
+    func release(_ path: String) { lock.lock(); paths.remove(path); lock.unlock() }
 }
 
 @MainActor
@@ -246,8 +288,8 @@ final class StemSeparationService: ObservableObject {
         var title: String { self == .bundled ? "HTDemucs model bundled" : "Model not installed" }
         var detail: String {
             self == .bundled
-                ? "Model files are present. The Float16 tensor schema and STFT/iSTFT reconstruction are checked when separation starts."
-                : "The licensed HTDemucs Core ML model is missing or incomplete in this installation."
+                ? "Model program and weights are present. The Float16 tensor schema is checked when separation starts."
+                : "The licensed HTDemucs Core ML model is missing or incomplete (program or weights) in this installation."
         }
     }
 
@@ -257,8 +299,8 @@ final class StemSeparationService: ObservableObject {
     @Published private(set) var statusMessage = "Ready"
     @Published private(set) var errorMessage: String?
     @Published private(set) var outputs: [Stem: URL] = [:]
-    @Published private(set) var playingStem: Stem?
-    private var audioPlayer: AVAudioPlayer?
+    private var job: Task<Void, Never>?
+    private var activeJobID: UUID?
 
     init() { refresh() }
 
@@ -270,6 +312,8 @@ final class StemSeparationService: ObservableObject {
     func separate(track: Track) {
         guard !isProcessing else { return }
         guard availability == .bundled else { errorMessage = DemucsError.modelMissing.localizedDescription; return }
+        let jobID = UUID()
+        activeJobID = jobID
         isProcessing = true
         progress = 0
         errorMessage = nil
@@ -279,41 +323,82 @@ final class StemSeparationService: ObservableObject {
         let destination = LibraryStore.appDirectory.appendingPathComponent("Stems", isDirectory: true)
             .appendingPathComponent(track.id.uuidString, isDirectory: true)
 
-        let service = self
-        Task.detached(priority: .userInitiated) {
+        job = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 let result = try Self.run(source: source, destination: destination) { value, message in
-                    Task { @MainActor in service.updateProgress(value, message: message) }
+                    Task { @MainActor in self?.updateProgress(value, message: message, jobID: jobID) }
                 }
-                await service.finish(result: result)
+                await self?.finish(result: result, jobID: jobID)
+            } catch is CancellationError {
+                await self?.finishCancelled(jobID: jobID)
             } catch {
-                await service.finish(error: error.localizedDescription)
+                await self?.finish(error: error.localizedDescription, jobID: jobID)
             }
         }
     }
 
-    private func updateProgress(_ value: Double, message: String) {
-        progress = value
+    func cancel() {
+        guard isProcessing else { return }
+        statusMessage = "Cancelling…"
+        job?.cancel()
+    }
+
+    /// Progress is monotonic and ignored once the job it belongs to has finished, so a late
+    /// asynchronous callback can never move the bar backwards or revive a finished job.
+    private func updateProgress(_ value: Double, message: String, jobID: UUID) {
+        guard jobID == activeJobID, isProcessing, value >= progress else { return }
+        progress = min(value, 0.99)
         statusMessage = message
     }
 
-    private func finish(result: [Stem: URL]) {
+    private func finish(result: [Stem: URL], jobID: UUID) {
+        guard jobID == activeJobID else { return }
+        activeJobID = nil
         outputs = result
         progress = 1
         statusMessage = "Separation complete"
         isProcessing = false
     }
 
-    private func finish(error: String) {
+    private func finish(error: String, jobID: UUID) {
+        guard jobID == activeJobID else { return }
+        activeJobID = nil
         errorMessage = error
         statusMessage = "Separation failed"
         isProcessing = false
     }
 
-    nonisolated private static func run(source: URL, destination: URL, progress: @escaping (Double, String) -> Void) throws -> [Stem: URL] {
+    private func finishCancelled(jobID: UUID) {
+        guard jobID == activeJobID else { return }
+        activeJobID = nil
+        statusMessage = "Separation cancelled"
+        isProcessing = false
+    }
+
+    nonisolated private static func run(source: URL, destination: URL, progress: @escaping @Sendable (Double, String) -> Void) throws -> [Stem: URL] {
+        let fm = FileManager.default
+        let key = destination.standardizedFileURL.path
+        guard DestinationRegistry.shared.claim(key) else {
+            throw DemucsError.processing("These stems are already being generated.")
+        }
+        defer { DestinationRegistry.shared.release(key) }
+
+        // Everything is written to a private staging folder first; the four stems are published
+        // together only after all four exist and validate. Failure/cancel removes the staging folder.
+        let parent = destination.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        if let stale = try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil) {
+            for item in stale where item.lastPathComponent.hasPrefix(".staging-") { try? fm.removeItem(at: item) }
+        }
+        let staging = parent.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        var published = false
+        defer { if !published { try? fm.removeItem(at: staging) } }
+
         try HTDemucsRuntime.validateDSPRoundTrip()
+        try Task.checkCancellation()
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndGPU
+        config.computeUnits = .cpuAndGPU   // Neural Engine is intentionally not requested.
         let model = try MLModel(contentsOf: HTDemucsRuntime.modelURL(), configuration: config)
         let inputNames = Set(model.modelDescription.inputDescriptionsByName.keys)
         let outputNames = Set(model.modelDescription.outputDescriptionsByName.keys)
@@ -337,6 +422,7 @@ final class StemSeparationService: ObservableObject {
         guard left.count <= Int(3 * 60 * HTDemucsRuntime.sampleRate) else {
             throw DemucsError.processing("Songs longer than 3 minutes are blocked to protect iPhone memory. Trim the audio and import it again.")
         }
+        let inputPeak = max(left.reduce(Float.zero) { max($0, abs($1)) }, right.reduce(Float.zero) { max($0, abs($1)) })
         let length = HTDemucsRuntime.segmentLength
         let stride = length * 3 / 4
         let offsets = Array(Swift.stride(from: 0, to: left.count, by: stride))
@@ -346,48 +432,46 @@ final class StemSeparationService: ObservableObject {
         var sumsR = (0..<4).map { _ in [Float](repeating: 0, count: left.count) }
         var weightSums = [Float](repeating: 0, count: left.count)
         for (chunk, offset) in offsets.enumerated() {
+            try Task.checkCancellation()
             let segment = HTDemucsRuntime.segment(of: [left, right], at: offset)
             let valid = min(length, left.count - offset)
             let trim = (length - valid) / 2
-            progress(0.08 + 0.78 * Double(chunk + 1) / Double(offsets.count), "Separating segment \(chunk + 1) of \(offsets.count)…")
-            let output = try HTDemucsRuntime.predict(left: segment[0], right: segment[1], model: model)
-            for stem in 0..<4 { for channel in 0..<2 { for i in 0..<valid {
-                if channel == 0 { sumsL[stem][offset + i] += output[stem][channel][trim + i] * weights[i] }
-                else { sumsR[stem][offset + i] += output[stem][channel][trim + i] * weights[i] }
-            } } }
+            progress(0.08 + 0.78 * Double(chunk) / Double(offsets.count), "Separating segment \(chunk + 1) of \(offsets.count)…")
+            let output = try autoreleasepool { try HTDemucsRuntime.predict(left: segment[0], right: segment[1], model: model) }
+            for stem in 0..<4 { for i in 0..<valid {
+                sumsL[stem][offset + i] += output[stem][0][trim + i] * weights[i]
+                sumsR[stem][offset + i] += output[stem][1][trim + i] * weights[i]
+            } }
             for i in 0..<valid { weightSums[offset + i] += weights[i] }
         }
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        var result: [Stem: URL] = [:]
+        progress(0.88, "Writing stems…")
+        var stagedFiles: [Stem: URL] = [:]
+        var energy: Float = 0
         for index in 0..<4 {
+            try Task.checkCancellation()
             for i in 0..<left.count where weightSums[i] > 0 {
                 sumsL[index][i] /= weightSums[i]
                 sumsR[index][i] /= weightSums[i]
             }
             let stem = HTDemucsRuntime.sourceOrder[index]
-            let url = destination.appendingPathComponent("\(stem.rawValue.lowercased()).wav")
+            let url = staging.appendingPathComponent("\(stem.rawValue.lowercased()).wav")
             try HTDemucsRuntime.writeWAV(left: sumsL[index], right: sumsR[index], url: url)
-            result[stem] = url
+            let peak = try HTDemucsRuntime.validateWAV(url, expectedFrames: left.count)
+            energy = max(energy, peak)
+            stagedFiles[stem] = url
+            // Release this stem's buffers as soon as it is on disk to keep peak memory down.
+            sumsL[index] = []; sumsR[index] = []
         }
-        progress(1, "Separation complete")
+        guard stagedFiles.count == 4 else { throw DemucsError.processing("Not all four stems were generated. Nothing was published.") }
+        if inputPeak > 1e-4 && energy <= 1e-6 {
+            throw DemucsError.processing("Separation produced silent output for a non-silent song. Nothing was published.")
+        }
+        progress(0.96, "Saving stems…")
+        if fm.fileExists(atPath: destination.path) { _ = try fm.replaceItemAt(destination, withItemAt: staging) }
+        else { try fm.moveItem(at: staging, to: destination) }
+        published = true
+        var result: [Stem: URL] = [:]
+        for stem in HTDemucsRuntime.sourceOrder { result[stem] = destination.appendingPathComponent("\(stem.rawValue.lowercased()).wav") }
         return result
-    }
-
-    func play(_ stem: Stem) {
-        stopPlayback()
-        guard let url = outputs[stem] else { return }
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try AVAudioSession.sharedInstance().setActive(true)
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.play()
-            playingStem = stem
-        } catch { errorMessage = "Couldn't play \(stem.rawValue): \(error.localizedDescription)" }
-    }
-
-    func stopPlayback() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        playingStem = nil
     }
 }

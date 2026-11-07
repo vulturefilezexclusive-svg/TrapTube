@@ -3,6 +3,7 @@ import SwiftUI
 struct StemStudioView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var theme: ThemeManager
+    @EnvironmentObject private var audio: AudioEngineManager
     @StateObject private var stemService = StemSeparationService()
     @State private var selectedTrackID: UUID?
 
@@ -76,6 +77,8 @@ struct StemStudioView: View {
                     if stemService.isProcessing {
                         ProgressView(value: stemService.progress)
                             .tint(theme.accent)
+                        Button("Cancel separation") { stemService.cancel() }
+                            .font(.caption.bold()).foregroundStyle(Color(hex: "FF7A84"))
                         Text(stemService.statusMessage)
                             .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                     }
@@ -103,10 +106,10 @@ struct StemStudioView: View {
                                         .foregroundStyle(Color(hex: "B8B4B8"))
                                 }
                                 Button {
-                                    if stemService.playingStem == stem { stemService.stopPlayback() }
-                                    else { stemService.play(stem) }
+                                    if audio.externalFileURL == url, audio.isPlaying { audio.stop() }
+                                    else { audio.playFile(at: url, title: "\(selectedTrack?.title ?? "Stem") – \(stem.rawValue)") }
                                 } label: {
-                                    Image(systemName: stemService.playingStem == stem ? "stop.circle.fill" : "play.circle.fill")
+                                    Image(systemName: audio.externalFileURL == url && audio.isPlaying ? "stop.circle.fill" : "play.circle.fill")
                                         .font(.title2).foregroundStyle(theme.accent)
                                 }
                                 .buttonStyle(.plain)
@@ -116,13 +119,13 @@ struct StemStudioView: View {
                         }
                         .padding(.vertical, 6)
                     }
-                    Text("The four WAV files are saved locally and can be played or shared independently.")
+                    Text("The four WAV files are saved locally. Stem previews play through the shared equalizer; you can also share each file.")
                         .font(.caption).foregroundStyle(Color(hex: "A6A4A6")).padding(.top, 3)
                 }
                 .padding(16).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 20))
                 .padding(.horizontal, 16)
 
-                Text("Processing runs on-device. The model uses CPU inference and can require substantial free memory; longer tracks take longer to process.")
+                Text("Processing runs on-device using the CPU and GPU (the Neural Engine is not used). It needs substantial free memory, and longer tracks take longer to process. Songs over 3 minutes are blocked.")
                     .font(.caption).foregroundStyle(Color(hex: "858185")).padding(.horizontal, 20)
             }
             .padding(.top, 8).padding(.bottom, 22)
@@ -137,7 +140,7 @@ struct StemStudioView: View {
             }
         }
         .onChange(of: selectedTrackID) { _, _ in
-            stemService.stopPlayback()
+            if audio.externalFileURL != nil { audio.stop() }
         }
     }
 }
