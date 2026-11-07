@@ -716,22 +716,15 @@ private struct TrapTubeDownloadsSheet: View {
                                     Text("480p").tag("480p")
                                     Text("360p").tag("360p")
                                 } else {
-                                    Text("High").tag("high")
-                                    Text("Standard").tag("standard")
+                                    Text("Best available source").tag("best")
                                 }
                             }
                             .pickerStyle(.menu)
                             .tint(Color(hex: "F04452"))
 
                             if mode == "audio" {
-                                Picker("Audio bitrate", selection: $bitrate) {
-                                    Text("320 kbps").tag("320000")
-                                    Text("256 kbps").tag("256000")
-                                    Text("192 kbps").tag("192000")
-                                    Text("128 kbps").tag("128000")
-                                }
-                                .pickerStyle(.menu)
-                                .tint(Color(hex: "F04452"))
+                                Text("The highest compatible source audio stream is selected automatically.")
+                                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
                             }
                         }
 
@@ -874,7 +867,7 @@ private struct TrapTubeDownloadsSheet: View {
                 .font(.title3).foregroundStyle(Color(hex: "F04452")).frame(width: 30)
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2)
-                Text("\\(item.mode.capitalized) · \\(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))")
+                Text("\(item.mode.capitalized) · \(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))")
                     .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
             }
             Spacer(minLength: 4)
