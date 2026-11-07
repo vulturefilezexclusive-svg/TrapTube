@@ -1174,7 +1174,7 @@ final class TrapTubeDownloadManager: ObservableObject {
             }
         }
         guard jobs.contains(where: { $0.id == jobID }) else { return }
-        updateJob(jobID) { $0.status = "running"; $0.stage = "Downloading streams" }
+        updateJob(jobID) { $0.status = "running"; $0.stage = "Downloading streams"; $0.error = nil }
         do {
             let dir = TrapTubeDownloadPaths.downloadsDirectory
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
