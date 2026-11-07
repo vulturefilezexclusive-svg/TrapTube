@@ -653,6 +653,14 @@ enum TrapTubeFlatTransfer {
             progress(offset, total, 0)
             return destination
         }
+        if http.statusCode == 416, offset > 0,
+           let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+           let totalString = contentRange.split(separator: "/").last,
+           let expected = Int64(totalString),
+           let actual = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value,
+           actual == expected {
+            return destination
+        }
         guard http.statusCode == 200 || http.statusCode == 206 else {
             throw TrapTubeFlatTransferError.invalidStatus(http.statusCode)
         }
@@ -1069,9 +1077,13 @@ final class TrapTubeDownloadManager: ObservableObject {
         Task {
             do {
                 let media = try await resolver.resolve(source, title: job.title)
-                let selectedVideo = media.videoAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
+                let selectedVideo = media.videoAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
+                    ?? media.videoAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
+                    ?? media.muxedAssets.first(where: { $0.representationID == job.selectedVideoRepresentationID && job.selectedVideoRepresentationID != nil })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedVideoURL && $0.streamIndex == job.selectedVideoStreamIndex })
-                let selectedAudio = media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
+                let selectedAudio = media.audioAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
+                    ?? media.audioAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
+                    ?? media.muxedAssets.first(where: { $0.representationID == job.selectedAudioRepresentationID && job.selectedAudioRepresentationID != nil })
                     ?? media.muxedAssets.first(where: { $0.url == job.selectedAudioURL && $0.streamIndex == job.selectedAudioStreamIndex })
                 let video = job.mode == "audio" ? nil : selectedVideo
                 let audio = job.mode == "audio"
