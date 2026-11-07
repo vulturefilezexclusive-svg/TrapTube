@@ -1282,7 +1282,14 @@ final class TrapTubeDownloadManager: ObservableObject {
             completed = saved.filter { FileManager.default.fileExists(atPath: $0.fileURL.path) }
         }
         if let data = try? Data(contentsOf: queueURL), let saved = try? JSONDecoder().decode([TrapTubeDownloadTask].self, from: data) {
-            jobs = saved.map { job in var copy = job; if copy.status == "running" { copy.status = "paused"; copy.stage = "Paused · resume available" }; return copy }
+            jobs = saved.map { job in
+                var copy = job
+                if copy.status == "running" || copy.status == "queued" {
+                    copy.status = "paused"
+                    copy.stage = "Paused · resume available"
+                }
+                return copy
+            }
         }
     }
 
