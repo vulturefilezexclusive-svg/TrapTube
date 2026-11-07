@@ -1298,8 +1298,11 @@ final class TrapTubeDownloadManager: ObservableObject {
         let candidates = media.videoAssets + media.muxedAssets
         if let representationID = job.selectedVideoRepresentationID,
            let match = candidates.first(where: { $0.representationID == representationID }) { return match }
-        if let mime = job.selectedVideoMimeType,
-           let match = candidates.first(where: { $0.mimeType == mime && $0.height == job.selectedVideoHeight }) { return match }
+        if let mime = job.selectedVideoMimeType, let height = job.selectedVideoHeight,
+           let bitrate = job.selectedVideoBitrate,
+           let match = candidates.first(where: { $0.mimeType == mime && $0.height == height && $0.bitrate == bitrate }) { return match }
+        if let mime = job.selectedVideoMimeType, let height = job.selectedVideoHeight,
+           let match = candidates.first(where: { $0.mimeType == mime && $0.height == height }) { return match }
         if let url = job.selectedVideoURL,
            let match = candidates.first(where: { $0.url == url && $0.streamIndex == job.selectedVideoStreamIndex }) { return match }
         if let height = job.selectedVideoHeight {
