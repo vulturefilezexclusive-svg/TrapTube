@@ -1511,10 +1511,10 @@ final class TrapTubeDownloadManager: ObservableObject {
     }
 
     func process(_ item: TrapTubeDownloadedMedia, operation: TrapTubeFFmpegOperation) async throws {
-        let ext = operation == .convertWAV ? "wav" : (operation == .extractThumbnail ? "jpg" : (operation == .convertM4A ? "m4a" : "mp4"))
+        let ext = operation == .convertWAV ? "wav" : (operation == .convertMP3 ? "mp3" : (operation == .extractThumbnail ? "jpg" : (operation == .convertM4A ? "m4a" : "mp4")))
         let name = "\(UUID().uuidString).\(ext)"
         let output = TrapTubeDownloadPaths.downloadsDirectory.appendingPathComponent(name)
-        if operation == .convertM4A || operation == .convertWAV {
+        if operation == .convertM4A || operation == .convertMP3 || operation == .convertWAV {
             try await TrapTubeMP4Box.extractAudio(input: item.fileURL, output: output, format: ext)
         } else {
             var args = ["-y", "-i", item.fileURL.path]
