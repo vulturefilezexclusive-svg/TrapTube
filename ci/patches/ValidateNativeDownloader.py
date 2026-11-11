@@ -66,6 +66,12 @@ required = {
     "brightness = 1 -": settings,
     "availableAudioBitrates": player,
     "WAV · PCM": player,
+    "TrapTubeYouTubeActionSheet": player,
+    "Open TrapTube video actions": player,
+    "availableVideoCodecs": service,
+    "codec: mode == \"video\" ? codec : nil": player,
+    "case convertMP3": service,
+    "libmp3lame": service,
 }
 missing = [name for name, source in required.items() if name not in source]
 if missing:
