@@ -1222,10 +1222,11 @@ final class TrapTubeDownloadManager: ObservableObject {
             let media = try await resolver.resolve(videoURL, title: title)
             let id = UUID().uuidString
             let wantsNative = mode != "audio"
-            let rawVideoPool = wantsNative ? Self.nativeFirst(media.videoAssets, "video/mp4") : media.videoAssets
-            let rawMuxedPool = media.muxedAssets
-            let videoPool = codec.map { requested in rawVideoPool.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? rawVideoPool
-            let muxedPool = codec.map { requested in rawMuxedPool.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? rawMuxedPool
+            let rawVideoPool = codec.map { requested in media.videoAssets.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? media.videoAssets
+            let rawMuxedPool = codec.map { requested in media.muxedAssets.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? media.muxedAssets
+            let preferredVideoMime = codec == "vp9" ? "video/webm" : "video/mp4"
+            let videoPool = wantsNative ? Self.nativeFirst(rawVideoPool, preferredVideoMime) : rawVideoPool
+            let muxedPool = wantsNative ? Self.nativeFirst(rawMuxedPool, preferredVideoMime) : rawMuxedPool
             if codec != nil && videoPool.isEmpty && muxedPool.isEmpty { throw TrapTubeResolverError.unsupportedManifest("The selected codec is not exposed by this media source.") }
             let chosenVideo = bestVideoAsset(in: videoPool, maximumHeight: height)
             let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets
