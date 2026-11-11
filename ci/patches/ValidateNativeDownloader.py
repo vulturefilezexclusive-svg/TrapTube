@@ -75,6 +75,9 @@ required = {
     "codec: mode == \"video\" ? codec : nil": player,
     "case convertMP3": service,
     "libmp3lame": service,
+    "saveThumbnail(videoID: String": service,
+    "youtubeVideoID": player,
+    "rawMime": service,
 }
 missing = [name for name, source in required.items() if name not in source]
 if missing:
