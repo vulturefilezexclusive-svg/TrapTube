@@ -754,12 +754,13 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
 
         for row in muxedRows {
             guard let url = formatURL(from: row) else { continue }
-            let mime = (row["mimeType"] as? String ?? "").components(separatedBy: ";").first ?? ""
+            let rawMime = row["mimeType"] as? String ?? ""
+            let mime = rawMime.components(separatedBy: ";").first ?? ""
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
             var headers = baseHeaders
             if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
-            muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: mime, height: height,
+            muxed.append(TrapTubeFlatAsset(url: url, kind: .muxed, mimeType: rawMime, height: height,
                 bitrate: bitrate, label: row["qualityLabel"] as? String ?? "Muxed", isManifest: false,
                 headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
         }
@@ -771,11 +772,11 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
             var headers = baseHeaders
             if let cookie = await TrapTubeWebCookieBridge.cookieHeader(for: url) { headers["Cookie"] = cookie }
             if mime.lowercased().hasPrefix("audio/") {
-                audios.append(TrapTubeFlatAsset(url: url, kind: .audio, mimeType: mime, height: nil,
+                audios.append(TrapTubeFlatAsset(url: url, kind: .audio, mimeType: rawMime, height: nil,
                     bitrate: bitrate, label: row["audioQuality"] as? String ?? "Audio", isManifest: false,
                     headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
             } else if mime.lowercased().hasPrefix("video/") {
-                videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: mime, height: height,
+                videos.append(TrapTubeFlatAsset(url: url, kind: .video, mimeType: rawMime, height: height,
                     bitrate: bitrate, label: row["qualityLabel"] as? String ?? height.map { "\($0)p" } ?? "Video",
                     isManifest: false, headers: headers, representationID: (row["itag"] as? Int).map(String.init)))
             }
