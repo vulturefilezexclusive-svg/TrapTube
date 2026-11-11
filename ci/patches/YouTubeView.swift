@@ -275,7 +275,7 @@ private struct TrapTubeYouTubeActionSheet: View {
         .background(.ultraThinMaterial)
         .background(Color(red: 0.075, green: 0.07, blue: 0.08).opacity(0.96))
         .sheet(isPresented: $showDownloadOptions) {
-            TrapTubeDownloadsSheet(title: title, videoURL: videoURL)
+            TrapTubeDownloadOptionsSheet(title: title, videoURL: videoURL)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(28)
@@ -668,6 +668,229 @@ private struct TrapTubePlayerMenu: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
         }
+    }
+}
+
+private struct TrapTubeDownloadOptionsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var manager = TrapTubeDownloadManager.shared
+    let title: String
+    let videoURL: URL
+
+    @State private var streamType = "avc1"
+    @State private var quality = "best"
+    @State private var format = "m4a"
+    @State private var qualityExpanded = true
+    @State private var formatExpanded = false
+    @State private var captionsExpanded = false
+    @State private var saveExpanded = false
+    @State private var isSubmitting = false
+
+    private var isAudio: Bool { streamType == "audio" }
+    private var qualitySummary: String {
+        if isAudio {
+            let kbps = Int(quality.replacingOccurrences(of: "bps", with: "")) ?? 0
+            return quality == "best" ? "Best available audio" : "\(kbps / 1000) kbps"
+        }
+        return quality == "best" ? "Best available" : quality
+    }
+    private var estimatedSize: String { "Size calculated from the selected stream" }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule().fill(.white.opacity(0.42)).frame(width: 40, height: 5)
+                .padding(.top, 10).padding(.bottom, 16)
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline.bold()).foregroundStyle(.white).lineLimit(2)
+                    Text("Download options").font(.caption).foregroundStyle(.white.opacity(0.58))
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.subheadline.bold()).foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 34, height: 34).background(.white.opacity(0.09), in: Circle())
+                }
+            }
+            .padding(.horizontal, 22).padding(.bottom, 14)
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 18) {
+                    VStack(spacing: 0) {
+                        sectionHeader(icon: isAudio ? "music.note" : "play.rectangle", title: "Quality",
+                                      value: isAudio ? "\(qualitySummary) · \(format.uppercased())" : qualitySummary,
+                                      expanded: qualityExpanded) {
+                            qualityExpanded.toggle()
+                        }
+                        if qualityExpanded {
+                            VStack(spacing: 13) {
+                                HStack(spacing: 4) {
+                                    codecButton("avc1", selected: streamType == "avc1") { selectStream("avc1") }
+                                    codecButton("vp9", selected: streamType == "vp9") { selectStream("vp9") }
+                                    codecButton("Audio only", selected: isAudio) { selectStream("audio") }
+                                }
+                                if isAudio {
+                                    ForEach(manager.availableAudioBitrates, id: \.self) { bitrate in
+                                        qualityRow("\(max(1, bitrate / 1000)) kbps · \(format.uppercased())",
+                                                   selected: quality == "\(bitrate)bps") { quality = "\(bitrate)bps" }
+                                    }
+                                    if manager.availableAudioBitrates.isEmpty {
+                                        Text("Audio renditions are being inspected, or none were exposed.")
+                                            .font(.caption).foregroundStyle(.white.opacity(0.58)).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                } else {
+                                    qualityRow("Best available", selected: quality == "best") { quality = "best" }
+                                    ForEach(manager.availableVideoHeights, id: \.self) { height in
+                                        qualityRow("\(height)p", selected: quality == "\(height)p") { quality = "\(height)p" }
+                                    }
+                                    if manager.availableVideoHeights.isEmpty {
+                                        Text("Available resolutions appear after the source exposes its media formats.")
+                                            .font(.caption).foregroundStyle(.white.opacity(0.58)).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 18).padding(.bottom, 14)
+                        }
+                    }
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
+                    if isAudio {
+                        VStack(spacing: 0) {
+                            sectionHeader(icon: "music.note", title: "Format", value: format, expanded: formatExpanded) {
+                                formatExpanded.toggle()
+                            }
+                            if formatExpanded {
+                                qualityRow("m4a", selected: format == "m4a") { format = "m4a" }
+                                    .padding(.horizontal, 18)
+                                qualityRow("mp3", selected: format == "mp3") { format = "mp3" }
+                                    .padding(.horizontal, 18)
+                            }
+                        }
+                        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+                    }
+
+                    VStack(spacing: 0) {
+                        sectionHeader(icon: "captions.bubble", title: "Captions", value: "Don't add captions",
+                                      expanded: captionsExpanded) { captionsExpanded.toggle() }
+                        if captionsExpanded {
+                            Text("Caption export is not currently available through this player integration.")
+                                .font(.caption).foregroundStyle(.white.opacity(0.58))
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(18)
+                        }
+                    }
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
+                    VStack(spacing: 0) {
+                        sectionHeader(icon: "folder", title: "Save in", value: "TrapTube Downloads",
+                                      expanded: saveExpanded) { saveExpanded.toggle() }
+                        if saveExpanded {
+                            Text("Files are saved in TrapTube's on-device Downloads library.")
+                                .font(.caption).foregroundStyle(.white.opacity(0.58))
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(18)
+                        }
+                    }
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
+                    VStack(spacing: 0) {
+                        Button {
+                            guard !isSubmitting else { return }
+                            isSubmitting = true
+                            Task {
+                                await manager.enqueue(
+                                    videoURL: videoURL, title: title,
+                                    mode: isAudio ? "audio" : "video",
+                                    quality: quality, format: isAudio ? format : "mp4",
+                                    bitrate: isAudio && quality != "best" ? Int(quality.replacingOccurrences(of: "bps", with: "")) : nil,
+                                    height: !isAudio && quality != "best" ? Int(quality.replacingOccurrences(of: "p", with: "")) : nil,
+                                    codec: isAudio ? nil : streamType
+                                )
+                                isSubmitting = false
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "arrow.down.to.line")
+                                Text(isSubmitting ? "Resolving stream…" : "Download")
+                                    .font(.headline.bold())
+                                Spacer()
+                                Text(estimatedSize).font(.caption).foregroundStyle(.white.opacity(0.58))
+                            }
+                            .foregroundStyle(.white).padding(18)
+                        }
+                        .disabled(isSubmitting)
+                    }
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
+                    if let error = manager.lastError {
+                        Text(error).font(.caption).foregroundStyle(Color(hex: "FF9B9B"))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if !manager.jobs.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Download queue").font(.headline.bold()).foregroundStyle(.white)
+                            ForEach(manager.jobs.prefix(4)) { job in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(job.title).font(.caption.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                        Spacer()
+                                        Text(job.status.capitalized).font(.caption2).foregroundStyle(.white.opacity(0.6))
+                                    }
+                                    ProgressView(value: job.progress).tint(Color(hex: "E8A0FF"))
+                                }
+                                .padding(12).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 28)
+            }
+        }
+        .background(Color(red: 0.075, green: 0.07, blue: 0.08).ignoresSafeArea())
+        .onAppear { Task { await manager.inspect(videoURL: videoURL, title: title) } }
+    }
+
+    private func selectStream(_ value: String) {
+        streamType = value
+        quality = "best"
+        format = value == "audio" ? "m4a" : "mp4"
+    }
+
+    private func codecButton(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(.subheadline.bold()).foregroundStyle(selected ? .white : .white.opacity(0.7))
+                .frame(maxWidth: .infinity).frame(height: 40)
+                .background(selected ? Color.white.opacity(0.28) : Color.white.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sectionHeader(icon: String, title: String, value: String, expanded: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 13) {
+                Image(systemName: icon).font(.system(size: 21, weight: .medium)).frame(width: 28)
+                Text(title).font(.headline.weight(.medium))
+                Spacer(minLength: 8)
+                Text(value).font(.subheadline).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption.bold()).foregroundStyle(.white.opacity(0.65))
+            }
+            .foregroundStyle(.white).padding(.horizontal, 17).frame(minHeight: 62)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+    }
+
+    private func qualityRow(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(label).font(.body).foregroundStyle(.white.opacity(0.76))
+                Spacer()
+                if selected { Image(systemName: "checkmark").font(.headline.bold()).foregroundStyle(Color(hex: "D9A0FF")) }
+            }
+            .frame(minHeight: 58).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
     }
 }
 
