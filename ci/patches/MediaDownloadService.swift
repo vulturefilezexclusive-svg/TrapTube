@@ -1185,6 +1185,31 @@ final class TrapTubeDownloadManager: ObservableObject {
 
     private init() { restore() }
 
+    func saveThumbnail(videoID: String, title: String) async throws {
+        try FileManager.default.createDirectory(at: TrapTubeDownloadPaths.downloadsDirectory,
+                                                withIntermediateDirectories: true)
+        var imageData: Data?
+        for quality in ["maxresdefault", "hqdefault"] {
+            guard let url = URL(string: "https://i.ytimg.com/vi/\(videoID)/\(quality).jpg") else { continue }
+            if let (data, response) = try? await URLSession.shared.data(from: url),
+               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+               http.mimeType?.lowercased().hasPrefix("image/") == true {
+                imageData = data
+                break
+            }
+        }
+        guard let imageData, !imageData.isEmpty else {
+            throw TrapTubeResolverError.unsupportedManifest("YouTube did not provide a downloadable thumbnail image.")
+        }
+        let fileName = "\(UUID().uuidString).jpg"
+        let destination = TrapTubeDownloadPaths.downloadsDirectory.appendingPathComponent(fileName)
+        try imageData.write(to: destination, options: .atomic)
+        let item = TrapTubeDownloadedMedia(id: UUID().uuidString, title: "\(title) · Thumbnail",
+            fileName: fileName, mode: "thumbnail", sizeBytes: Int64(imageData.count), createdAt: Date())
+        completed.insert(item, at: 0)
+        persistCompleted()
+    }
+
     func inspect(videoURL: URL, title: String) async {
         do {
             let media = try await resolver.resolve(videoURL, title: title)
