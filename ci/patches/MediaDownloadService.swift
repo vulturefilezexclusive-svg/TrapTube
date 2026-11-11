@@ -811,7 +811,8 @@ struct TrapTubeYouTubeAdapter: TrapTubeStreamProviderAdapter {
         }
         for row in adaptiveRows {
             guard let url = formatURL(from: row) else { continue }
-            let mime = (row["mimeType"] as? String ?? "").components(separatedBy: ";").first ?? ""
+            let rawMime = row["mimeType"] as? String ?? ""
+            let mime = rawMime.components(separatedBy: ";").first ?? ""
             let height = row["height"] as? Int
             let bitrate = row["bitrate"] as? Int
             var headers = baseHeaders
