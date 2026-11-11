@@ -251,8 +251,20 @@ private struct TrapTubeYouTubeActionSheet: View {
                     showDownloadOptions = true
                 }
                 actionRow("Save image", icon: "photo", detail: nil) {
-                    message = "A thumbnail image is not currently available from the official YouTube player interface."
-                    showMessage = true
+                    guard let videoID = youtubeVideoID else {
+                        message = "TrapTube couldn't identify this video's thumbnail."
+                        showMessage = true
+                        return
+                    }
+                    Task {
+                        do {
+                            try await TrapTubeDownloadManager.shared.saveThumbnail(videoID: videoID, title: title)
+                            message = "Thumbnail saved to TrapTube Downloads."
+                        } catch {
+                            message = error.localizedDescription
+                        }
+                        showMessage = true
+                    }
                 }
                 actionRow("Save captions", icon: "captions.bubble", detail: nil) {
                     message = "Caption export is not exposed by the current official player integration."
@@ -284,6 +296,17 @@ private struct TrapTubeYouTubeActionSheet: View {
         .alert("TrapTube", isPresented: $showMessage) {
             Button("OK", role: .cancel) { }
         } message: { Text(message ?? "") }
+    }
+
+    private var youtubeVideoID: String? {
+        let host = videoURL.host?.lowercased() ?? ""
+        if host == "youtu.be" { return videoURL.pathComponents.dropFirst().first }
+        let components = URLComponents(url: videoURL, resolvingAgainstBaseURL: false)
+        if let id = components?.queryItems?.first(where: { $0.name == "v" })?.value, !id.isEmpty { return id }
+        if ["shorts", "live", "embed"].contains(videoURL.pathComponents.dropFirst().first ?? "") {
+            return videoURL.pathComponents.dropFirst(2).first
+        }
+        return nil
     }
 
     private func actionRow(_ label: String, icon: String, detail: String?, action: @escaping () -> Void) -> some View {
