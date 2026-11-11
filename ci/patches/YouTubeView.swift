@@ -190,6 +190,7 @@ private struct YouTubeWatchSheet: View {
     let url: URL
     let downloadURL: URL
     let title: String
+    @State private var showActionSheet = false
 
     var body: some View {
         YouTubePlayerWebView(
@@ -200,9 +201,106 @@ private struct YouTubeWatchSheet: View {
             onCreated: { _ in },
             onMessage: { _ in }
         )
+        .overlay(alignment: .topTrailing) {
+            Button { showActionSheet = true } label: {
+                Image(systemName: "play.circle")
+                    .font(.system(size: 23, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.black.opacity(0.48), in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 1))
+            }
+            .accessibilityLabel("Open TrapTube video actions")
+            .padding(.top, 54)
+            .padding(.trailing, 18)
+        }
+        .sheet(isPresented: $showActionSheet) {
+            TrapTubeYouTubeActionSheet(title: title, videoURL: downloadURL)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(.dark)
+        }
         .background(Color.black.ignoresSafeArea())
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+    }
+}
+
+private struct TrapTubeYouTubeActionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let videoURL: URL
+    @State private var showDownloadOptions = false
+    @State private var message: String?
+    @State private var showMessage = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule().fill(.white.opacity(0.48)).frame(width: 38, height: 5)
+                .padding(.top, 11).padding(.bottom, 19)
+            HStack {
+                Text("\(title)".isEmpty ? "Video actions" : title)
+                    .font(.headline.weight(.bold)).foregroundStyle(.white)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 22).padding(.bottom, 14)
+            VStack(spacing: 0) {
+                actionRow("Download", icon: "play.rectangle", detail: nil) {
+                    showDownloadOptions = true
+                }
+                actionRow("Save image", icon: "photo", detail: nil) {
+                    message = "A thumbnail image is not currently available from the official YouTube player interface."
+                    showMessage = true
+                }
+                actionRow("Save captions", icon: "captions.bubble", detail: nil) {
+                    message = "Caption export is not exposed by the current official player integration."
+                    showMessage = true
+                }
+                actionRow("Copy information", icon: "doc.on.doc", detail: nil) {
+                    UIPasteboard.general.string = "\(title)\n\(videoURL.absoluteString)"
+                    message = "Video title and link copied."
+                    showMessage = true
+                }
+                actionRow("Play in…", icon: "play.circle", detail: nil) {
+                    UIApplication.shared.open(videoURL)
+                    dismiss()
+                }
+            }
+            .padding(.horizontal, 16)
+            Spacer(minLength: 10)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+        .background(Color(red: 0.075, green: 0.07, blue: 0.08).opacity(0.96))
+        .sheet(isPresented: $showDownloadOptions) {
+            TrapTubeDownloadsSheet(title: title, videoURL: videoURL)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(.dark)
+        }
+        .alert("TrapTube", isPresented: $showMessage) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(message ?? "") }
+    }
+
+    private func actionRow(_ label: String, icon: String, detail: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon).font(.system(size: 22, weight: .medium))
+                    .frame(width: 30).foregroundStyle(.white)
+                Text(label).font(.system(size: 18, weight: .medium)).foregroundStyle(.white)
+                Spacer()
+                if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(.horizontal, 16).frame(height: 64)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
     }
 }
 
