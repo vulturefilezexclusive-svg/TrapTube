@@ -680,8 +680,10 @@ private struct TrapTubeDownloadsSheet: View {
     let videoURL: URL
 
     @State private var mode = "video"
+    @State private var codec = "avc1"
     @State private var quality = "best"
     @State private var format = "mp4"
+    @State private var captionChoice = "none"
     @AppStorage("video.preferredQuality") private var preferredVideoQuality = "auto"
     @State private var selectedVideo: TrapTubeDownloadedMedia?
 
@@ -702,16 +704,26 @@ private struct TrapTubeDownloadsSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Download type").font(.headline.bold()).foregroundStyle(.white)
-                        Picker("Download type", selection: $mode) {
-                            Text("Video").tag("video")
-                            Text("Audio").tag("audio")
+                        Text("Quality").font(.headline.bold()).foregroundStyle(.white)
+                        Picker("Codec and output", selection: Binding(
+                            get: { mode == "audio" ? "audio" : codec },
+                            set: { value in
+                                mode = value == "audio" ? "audio" : "video"
+                                if value != "audio" { codec = value }
+                                quality = "best"
+                                format = mode == "audio" ? "m4a" : "mp4"
+                            }
+                        )) {
+                            Text("avc1").tag("avc1")
+                            Text("vp9").tag("vp9")
+                            Text("Audio only").tag("audio")
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: mode) { _, newMode in
-                            quality = newMode == "video" && preferredVideoQuality != "auto"
-                                ? "\(preferredVideoQuality)p" : "best"
-                            format = newMode == "audio" ? "m4a" : "mp4"
+                        .tint(Color(hex: "F04452"))
+                        if mode == "video" && !manager.availableVideoCodecs.isEmpty &&
+                            !manager.availableVideoCodecs.contains(codec) {
+                            Text("This codec is not exposed for the selected video. Choose another codec.")
+                                .font(.caption).foregroundStyle(Color(hex: "FF9B9B"))
                         }
 
                         if mode == "video" || mode == "audio" {
@@ -741,6 +753,7 @@ private struct TrapTubeDownloadsSheet: View {
                                 Text("MP4 · iOS compatible").tag("mp4")
                             } else {
                                 Text("M4A · AAC").tag("m4a")
+                                Text("MP3").tag("mp3")
                                 Text("WAV · PCM").tag("wav")
                             }
                         }
@@ -763,7 +776,8 @@ private struct TrapTubeDownloadsSheet: View {
                                     bitrate: mode == "audio" && quality != "best"
                                         ? Int(quality.replacingOccurrences(of: "bps", with: "")) : nil,
                                     height: mode == "video" && quality != "best"
-                                        ? Int(quality.replacingOccurrences(of: "p", with: "")) : nil
+                                        ? Int(quality.replacingOccurrences(of: "p", with: "")) : nil,
+                                    codec: mode == "video" ? codec : nil
                                 )
                             }
                         } label: {
