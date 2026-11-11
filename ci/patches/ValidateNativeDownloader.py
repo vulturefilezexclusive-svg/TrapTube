@@ -6,6 +6,12 @@ service, player, settings = map(lambda value: Path(value).read_text(), sys.argv[
 combined = "\n".join((service, player, settings))
 required = {
     "TrapTubeStreamResolver": service,
+    "TrapTubeProviderRegistry": service,
+    "static var builtIn": service,
+    "func registering(_ adapter:": service,
+    "func removing(providerIdentifier:": service,
+    "func adapter(for source: URL)": service,
+    "providerIdentifier": service,
     "TrapTubeYouTubeAdapter": service,
     "formatURL(from row:": service,
     "signatureCipher": service,
