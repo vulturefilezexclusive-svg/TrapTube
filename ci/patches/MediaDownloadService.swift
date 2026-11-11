@@ -144,13 +144,58 @@ enum TrapTubeWebCookieBridge {
 }
 
 protocol TrapTubeStreamProviderAdapter {
+    var providerIdentifier: String { get }
     func canResolve(_ source: URL) -> Bool
     func resolve(_ source: URL, title: String) async throws -> TrapTubeResolvedMedia
 }
 
+extension TrapTubeStreamProviderAdapter {
+    var providerIdentifier: String { String(describing: Self.self) }
+}
+
+/// Immutable provider registry. Add a provider by registering an adapter; the resolver
+/// remains independent of provider-specific parsing and authentication.
+struct TrapTubeProviderRegistry {
+    private(set) var adapters: [any TrapTubeStreamProviderAdapter]
+
+    static var builtIn: TrapTubeProviderRegistry {
+        TrapTubeProviderRegistry(adapters: [
+            TrapTubeYouTubeAdapter()
+        ])
+    }
+
+    init(adapters: [any TrapTubeStreamProviderAdapter] = []) {
+        self.adapters = adapters
+    }
+
+    func registering(_ adapter: any TrapTubeStreamProviderAdapter) -> TrapTubeProviderRegistry {
+        var next = adapters.filter { $0.providerIdentifier != adapter.providerIdentifier }
+        next.append(adapter)
+        return TrapTubeProviderRegistry(adapters: next)
+    }
+
+    func removing(providerIdentifier: String) -> TrapTubeProviderRegistry {
+        TrapTubeProviderRegistry(adapters: adapters.filter {
+            $0.providerIdentifier != providerIdentifier
+        })
+    }
+
+    func adapter(for source: URL) -> (any TrapTubeStreamProviderAdapter)? {
+        adapters.first(where: { $0.canResolve(source) })
+    }
+}
+
 struct TrapTubeStreamResolver {
-    private let adapters: [any TrapTubeStreamProviderAdapter]
-    init(adapters: [any TrapTubeStreamProviderAdapter] = [TrapTubeYouTubeAdapter()]) { self.adapters = adapters }
+    private let registry: TrapTubeProviderRegistry
+
+    init(registry: TrapTubeProviderRegistry = .builtIn) {
+        self.registry = registry
+    }
+
+    // Compatibility initializer for internal manifest parsing and existing call sites.
+    init(adapters: [any TrapTubeStreamProviderAdapter]) {
+        self.registry = TrapTubeProviderRegistry(adapters: adapters)
+    }
 
     private func boundedGET(_ request: URLRequest, limit: Int) async throws -> (Data, URLResponse) {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -165,7 +210,7 @@ struct TrapTubeStreamResolver {
 
     func resolve(_ source: URL, title: String, depth: Int = 0) async throws -> TrapTubeResolvedMedia {
         guard depth < 3 else { throw TrapTubeResolverError.unsupportedSite }
-        if let adapter = adapters.first(where: { $0.canResolve(source) }) {
+        if let adapter = registry.adapter(for: source) {
             return try await adapter.resolve(source, title: title)
         }
         guard let scheme = source.scheme?.lowercased(), ["http", "https"].contains(scheme), source.host != nil else {
