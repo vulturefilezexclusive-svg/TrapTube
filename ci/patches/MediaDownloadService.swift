@@ -1041,7 +1041,7 @@ enum TrapTubeMP4Box {
     static func extractAudio(input: URL, output: URL, format: String, streamIndex: Int? = nil,
                              headers: [String: String] = [:],
                              progress: ((Int64, Double) -> Void)? = nil) async throws {
-        let codec = format == "wav" ? "pcm_s16le" : "aac"
+        let codec = format == "wav" ? "pcm_s16le" : (format == "mp3" ? "libmp3lame" : "aac")
         var args = ["-y"]
         if (input.scheme == "http" || input.scheme == "https"), !headers.isEmpty {
             args += ["-headers", headerArgument(headers)]
@@ -1056,6 +1056,7 @@ enum TrapTubeMP4Box {
 enum TrapTubeFFmpegOperation: String, CaseIterable, Identifiable {
     case remuxMP4
     case convertM4A
+    case convertMP3
     case convertWAV
     case extractThumbnail
 
@@ -1064,6 +1065,7 @@ enum TrapTubeFFmpegOperation: String, CaseIterable, Identifiable {
         switch self {
         case .remuxMP4: return "Remux to MP4 (no re-encode)"
         case .convertM4A: return "Convert audio to M4A"
+        case .convertMP3: return "Convert audio to MP3"
         case .convertWAV: return "Convert audio to WAV"
         case .extractThumbnail: return "Extract thumbnail"
         }
@@ -1170,6 +1172,7 @@ final class TrapTubeDownloadManager: ObservableObject {
     @Published private(set) var completed: [TrapTubeDownloadedMedia] = []
     @Published private(set) var availableVideoHeights: [Int] = []
     @Published private(set) var availableAudioBitrates: [Int] = []
+    @Published private(set) var availableVideoCodecs: [String] = []
     @Published var lastError: String?
     private let resolver = TrapTubeStreamResolver()
     private var workers: [String: Task<Void, Never>] = [:]
@@ -1186,10 +1189,13 @@ final class TrapTubeDownloadManager: ObservableObject {
             let media = try await resolver.resolve(videoURL, title: title)
             availableVideoHeights = Array(Set((media.videoAssets + media.muxedAssets).compactMap(\.height).filter { $0 > 0 })).sorted(by: >)
             availableAudioBitrates = Array(Set((media.audioAssets + media.muxedAssets).compactMap(\.bitrate).filter { $0 > 0 })).sorted(by: >)
+            let codecText = (media.videoAssets + media.muxedAssets).map { $0.mimeType.lowercased() }.joined(separator: " ")
+            availableVideoCodecs = [("avc1", codecText.contains("avc1")), ("vp9", codecText.contains("vp9"))].compactMap { $0.1 ? $0.0 : nil }
             lastError = nil
         } catch {
             availableVideoHeights = []
             availableAudioBitrates = []
+            availableVideoCodecs = []
             lastError = error.localizedDescription
         }
     }
@@ -1210,20 +1216,24 @@ final class TrapTubeDownloadManager: ObservableObject {
     }
 
     func enqueue(videoURL: URL, title: String, mode: String, quality: String,
-                 format: String, bitrate: Int?, height: Int?) async {
+                 format: String, bitrate: Int?, height: Int?, codec: String? = nil) async {
         lastError = nil
         do {
             let media = try await resolver.resolve(videoURL, title: title)
             let id = UUID().uuidString
             let wantsNative = mode != "audio"
-            let videoPool = wantsNative ? Self.nativeFirst(media.videoAssets, "video/mp4") : media.videoAssets
+            let rawVideoPool = wantsNative ? Self.nativeFirst(media.videoAssets, "video/mp4") : media.videoAssets
+            let rawMuxedPool = media.muxedAssets
+            let videoPool = codec.map { requested in rawVideoPool.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? rawVideoPool
+            let muxedPool = codec.map { requested in rawMuxedPool.filter { $0.mimeType.localizedCaseInsensitiveContains(requested) } } ?? rawMuxedPool
+            if codec != nil && videoPool.isEmpty && muxedPool.isEmpty { throw TrapTubeResolverError.unsupportedManifest("The selected codec is not exposed by this media source.") }
             let chosenVideo = bestVideoAsset(in: videoPool, maximumHeight: height)
             let audioCandidates = media.audioAssets.isEmpty ? media.muxedAssets
                 : (wantsNative ? Self.nativeFirst(media.audioAssets, "audio/mp4") : media.audioAssets)
             let eligibleAudio = audioCandidates.filter { bitrate == nil || ($0.bitrate ?? 0) <= bitrate! }
             let chosenAudio = eligibleAudio.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
                 ?? audioCandidates.max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) })
-            let chosenMuxed = bestVideoAsset(in: media.muxedAssets, maximumHeight: height)
+            let chosenMuxed = bestVideoAsset(in: muxedPool, maximumHeight: height)
             let separatePairIsBest = chosenVideo != nil && chosenAudio != nil &&
                 (chosenMuxed == nil || (chosenVideo?.height ?? 0) >= (chosenMuxed?.height ?? 0))
             let hasSeparatePair = mode != "audio" && separatePairIsBest
