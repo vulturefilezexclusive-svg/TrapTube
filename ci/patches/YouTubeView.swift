@@ -2,50 +2,58 @@ import SwiftUI
 import WebKit
 import AVKit
 import UIKit
-import SafariServices
 
 struct YouTubeView: View {
-    @State private var didLaunchYouTube = false
-    @State private var showYouTube = false
-
     private let homeURL = URL(string: "https://www.youtube.com/")!
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 14) {
-                ProgressView().tint(.white)
-                Text("Opening YouTube Home").font(.headline).foregroundStyle(.white)
-                Text("Your personalized YouTube feed and account sign-in are provided by YouTube.")
-                    .font(.caption).foregroundStyle(.white.opacity(0.65))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28)
-            }
-        }
-        .onAppear {
-            guard !didLaunchYouTube else { return }
-            didLaunchYouTube = true
-            showYouTube = true
-        }
-        .fullScreenCover(isPresented: $showYouTube) {
-            YouTubeSafariView(url: homeURL)
-                .ignoresSafeArea()
-        }
+        YouTubeEmbeddedWebView(url: homeURL)
+            .background(Color.black.ignoresSafeArea())
+            .ignoresSafeArea(edges: .top)
+            .preferredColorScheme(.dark)
     }
 }
 
-private struct YouTubeSafariView: UIViewControllerRepresentable {
+/// Hosts the real YouTube website inside the TrapTube tab. YouTube owns its
+/// feed, navigation, sign-in flow, watch page, and player controls; TrapTube
+/// does not draw a second player UI over the site.
+private struct YouTubeEmbeddedWebView: UIViewRepresentable {
     let url: URL
 
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        let configuration = SFSafariViewController.Configuration()
-        configuration.entersReaderIfAvailable = false
-        let controller = SFSafariViewController(url: url, configuration: configuration)
-        controller.preferredControlTintColor = .systemPurple
-        return controller
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = [.audio, .video]
+
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.isOpaque = false
+        view.backgroundColor = .black
+        view.scrollView.backgroundColor = .black
+        view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.allowsBackForwardNavigationGestures = true
+        view.allowsLinkPreview = true
+        view.navigationDelegate = context.coordinator
+        view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        return view
     }
 
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        if uiView.url == nil {
+            uiView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // Keep YouTube's own navigation and watch-page transitions in this
+            // same WKWebView so the original player experience is preserved.
+            decisionHandler(.allow)
+        }
+    }
 }
 
 private struct TypeTypeVideoRow: View {
