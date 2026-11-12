@@ -1,0 +1,500 @@
+From 4310ba60fada0915836468cee2b380aef0042244 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.invalid>
+Date: Thu, 12 Nov 2026 02:56:46 +0000
+Subject: [PATCH] Stem load: stderr capture, weight-size validation,
+ FT->standard fallback, unload; add AVPlayer tap EQ for local
+ video/progressive streams
+
+---
+ ci/patches/AudioEngineManager.swift       | 221 +++++++++++++++++++++-
+ ci/patches/StemSeparationService.swift    | 131 +++++++++++--
+ tests/reference/tap_eq_reference_check.py |  21 ++
+ 3 files changed, 358 insertions(+), 15 deletions(-)
+ create mode 100644 tests/reference/tap_eq_reference_check.py
+
+diff --git a/ci/patches/AudioEngineManager.swift b/ci/patches/AudioEngineManager.swift
+index ad2883d..6c975fc 100644
+--- a/ci/patches/AudioEngineManager.swift
++++ b/ci/patches/AudioEngineManager.swift
+@@ -2,6 +2,9 @@ import AVFoundation
+ import Foundation
+ import Combine
+ import Accelerate
++import MediaToolbox
++import AudioToolbox
++import os
+ 
+ private enum TrapTubeVisualizerDSP {
+     static let fftSize = 1024
+@@ -270,6 +273,8 @@ final class AudioEngineManager: ObservableObject {
+         let headroom = -min(18, peakBoost * 0.5)
+         let gainDB = masterGain == 0 ? -96 : 20 * log10(masterGain)
+         masterStage.globalGain = max(-96, min(12, gainDB + headroom))
++        // Mirror the same settings into the AVPlayer audio tap (local video, progressive streams).
++        TrapTubeTapEQ.shared.update(gains: eqGains, bass: bassBoost, master: masterGain)
+     }
+ 
+     private func start(_ track: Track, at time: TimeInterval, autoplay: Bool) {
+@@ -392,4 +397,218 @@ final class AudioEngineManager: ObservableObject {
+         isPlaying = false
+         if clearTrack { currentTrack = nil; currentTime = 0; duration = 0; scheduledStartTime = 0 }
+     }
+-}
+\ No newline at end of file
++}
++
++// MARK: - Shared EQ for AVPlayer playback (local video files and progressive streams)
++
++/// The same 16 bands + bass shelf + master gain as the AVAudioEngine EQ, applied inside an
++/// MTAudioProcessingTap so it also works for anything played through AVPlayer.
++/// Limits: HLS (.m3u8) streams and DRM-protected media do not expose their audio to a tap, and the
++/// official YouTube player renders audio itself, so those cannot be equalised this way.
++final class TrapTubeTapEQ: @unchecked Sendable {
++    static let shared = TrapTubeTapEQ()
++    static let bandFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 10_000, 12_000, 16_000]
++    static let sectionCount = 17   // 16 peaking bands + 1 bass low-shelf
++
++    // Shared values: [0..<16] band gains (dB), [16] bass shelf (dB), [17] linear master gain.
++    private let lock: UnsafeMutablePointer<os_unfair_lock>
++    private let values: UnsafeMutablePointer<Float>
++    private var version: UInt64 = 1
++
++    private init() {
++        lock = .allocate(capacity: 1); lock.initialize(to: os_unfair_lock())
++        values = .allocate(capacity: 18); values.initialize(repeating: 0, count: 18)
++        values[17] = 1
++    }
++
++    func update(gains: [Float], bass: Float, master: Float) {
++        guard gains.count == 16 else { return }
++        os_unfair_lock_lock(lock)
++        for index in 0..<16 { values[index] = gains[index] }
++        values[16] = bass
++        // Same headroom rule as AudioEngineManager.updateMasterStage().
++        let peakBoost = max(0, gains.max() ?? 0) + bass
++        let headroom = -min(18, peakBoost * 0.5)
++        let gainDB: Float = master == 0 ? -96 : 20 * log10(master)
++        let totalDB = max(-96, min(12, gainDB + headroom))
++        values[17] = powf(10, totalDB / 20)
++        version &+= 1
++        os_unfair_lock_unlock(lock)
++    }
++
++    /// Render-thread read. Returns false (keep the previous settings) if the lock is busy.
++    fileprivate func copyValues(into destination: UnsafeMutablePointer<Float>) -> UInt64? {
++        guard os_unfair_lock_trylock(lock) else { return nil }
++        defer { os_unfair_lock_unlock(lock) }
++        destination.update(from: values, count: 18)
++        return version
++    }
++
++    /// Adds the shared EQ to a player item. Returns false when the item has no tappable audio track.
++    @MainActor
++    @discardableResult
++    func attach(to item: AVPlayerItem) async -> Bool {
++        guard let tracks = try? await item.asset.loadTracks(withMediaType: .audio), let track = tracks.first else { return false }
++        let state = TapState()
++        var callbacks = MTAudioProcessingTapCallbacks(
++            version: kMTAudioProcessingTapCallbacksVersion_0,
++            clientInfo: Unmanaged.passRetained(state).toOpaque(),
++            init: tapInit, finalize: tapFinalize, prepare: tapPrepare, unprepare: tapUnprepare, process: tapProcess)
++        var tap: Unmanaged<MTAudioProcessingTap>?
++        let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
++        guard status == noErr, let tap else {
++            Unmanaged<TapState>.passUnretained(state).release()   // balance passRetained: finalize never runs on failure
++            return false
++        }
++        let parameters = AVMutableAudioMixInputParameters(track: track)
++        parameters.audioTapProcessor = tap.takeRetainedValue()
++        let mix = AVMutableAudioMix()
++        mix.inputParameters = [parameters]
++        item.audioMix = mix
++        return true
++    }
++}
++
++/// Per-tap DSP state. Everything the render thread touches is allocated up front in `prepare`.
++fileprivate final class TapState {
++    private var setup: vDSP_biquad_Setup?
++    private var delays: UnsafeMutablePointer<Float>?
++    private var coefficients: UnsafeMutablePointer<Double>?
++    private var snapshot: UnsafeMutablePointer<Float>?
++    private var sampleRate = 44_100.0
++    private var channels = 0
++    private var isFloat32 = false
++    private var interleaved = true
++    private var appliedVersion: UInt64 = 0
++    private var preamp: Float = 1
++    private let delayLength = 2 * TrapTubeTapEQ.sectionCount + 2
++
++    func prepare(_ format: AudioStreamBasicDescription) {
++        release()
++        sampleRate = format.mSampleRate
++        channels = Int(format.mChannelsPerFrame)
++        isFloat32 = format.mFormatID == kAudioFormatLinearPCM
++            && (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32
++        interleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
++        guard isFloat32, channels > 0, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
++        let count = TrapTubeTapEQ.sectionCount
++        coefficients = .allocate(capacity: 5 * count)
++        for section in 0..<count { Self.identity(coefficients! + section * 5) }
++        setup = vDSP_biquad_CreateSetupD(coefficients!, vDSP_Length(count))
++        delays = .allocate(capacity: delayLength * channels); delays!.initialize(repeating: 0, count: delayLength * channels)
++        snapshot = .allocate(capacity: 18); snapshot!.initialize(repeating: 0, count: 18); snapshot![17] = 1
++        appliedVersion = 0
++    }
++
++    func release() {
++        if let setup { vDSP_biquad_DestroySetupD(setup) }
++        setup = nil
++        delays?.deallocate(); delays = nil
++        coefficients?.deallocate(); coefficients = nil
++        snapshot?.deallocate(); snapshot = nil
++    }
++
++    deinit { release() }
++
++    func process(_ list: UnsafeMutablePointer<AudioBufferList>, frames: Int) {
++        guard let setup, let delays, let coefficients, let snapshot, frames > 0 else { return }
++        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot), version != appliedVersion {
++            Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
++            vDSP_biquad_SetCoefficientsDouble(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
++            preamp = snapshot[17]
++            appliedVersion = version
++        }
++        var gain = preamp
++        let buffers = UnsafeMutableAudioBufferListPointer(list)
++        if interleaved {
++            for buffer in buffers {
++                guard let raw = buffer.mData else { continue }
++                let data = raw.assumingMemoryBound(to: Float.self)
++                let stride = max(1, Int(buffer.mNumberChannels))
++                for channel in 0..<min(stride, channels) {
++                    let start = data + channel
++                    vDSP_biquad(setup, delays + channel * delayLength, start, vDSP_Stride(stride), start, vDSP_Stride(stride), vDSP_Length(frames))
++                    vDSP_vsmul(start, vDSP_Stride(stride), &gain, start, vDSP_Stride(stride), vDSP_Length(frames))
++                }
++            }
++        } else {
++            for (channel, buffer) in buffers.enumerated() where channel < channels {
++                guard let raw = buffer.mData else { continue }
++                let data = raw.assumingMemoryBound(to: Float.self)
++                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
++                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
++            }
++        }
++    }
++
++    private static func identity(_ section: UnsafeMutablePointer<Double>) {
++        section[0] = 1; section[1] = 0; section[2] = 0; section[3] = 0; section[4] = 0
++    }
++
++    /// RBJ cookbook biquads in vDSP order [b0, b1, b2, a1, a2], normalised by a0.
++    /// Peaking bands use Q = 1.4142 (about one octave); the bass shelf is a low shelf at 90 Hz, Q = 0.7.
++    private static func design(into out: UnsafeMutablePointer<Double>, sampleRate: Double, values: UnsafeMutablePointer<Float>) {
++        for band in 0..<16 {
++            let section = out + band * 5
++            let gain = Double(values[band])
++            let f0 = Double(TrapTubeTapEQ.bandFrequencies[band])
++            guard abs(gain) > 0.01, f0 < sampleRate * 0.45 else { identity(section); continue }
++            let a = pow(10, gain / 40), w = 2 * Double.pi * f0 / sampleRate
++            let alpha = sin(w) / (2 * 1.4142), c = cos(w)
++            let a0 = 1 + alpha / a
++            section[0] = (1 + alpha * a) / a0; section[1] = -2 * c / a0; section[2] = (1 - alpha * a) / a0
++            section[3] = -2 * c / a0;          section[4] = (1 - alpha / a) / a0
++        }
++        let shelf = out + 16 * 5
++        let bass = Double(values[16])
++        guard bass > 0.01 else { identity(shelf); return }
++        let a = pow(10, bass / 40), w = 2 * Double.pi * 90 / sampleRate
++        let c = cos(w), alpha = sin(w) / (2 * 0.7), s = 2 * a.squareRoot() * alpha
++        let a0 = (a + 1) + (a - 1) * c + s
++        shelf[0] = a * ((a + 1) - (a - 1) * c + s) / a0
++        shelf[1] = 2 * a * ((a - 1) - (a + 1) * c) / a0
++        shelf[2] = a * ((a + 1) - (a - 1) * c - s) / a0
++        shelf[3] = -2 * ((a - 1) + (a + 1) * c) / a0
++        shelf[4] = ((a + 1) + (a - 1) * c - s) / a0
++    }
++}
++
++private let tapInit: MTAudioProcessingTapInitCallback = { _, clientInfo, storageOut in
++    storageOut.pointee = clientInfo
++}
++private let tapFinalize: MTAudioProcessingTapFinalizeCallback = { tap in
++    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
++}
++private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
++    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().prepare(format.pointee)
++}
++private let tapUnprepare: MTAudioProcessingTapUnprepareCallback = { tap in
++    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().release()
++}
++private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
++    guard MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut) == noErr else { return }
++    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
++        .process(bufferList, frames: Int(framesOut.pointee))
++}
++
++/// Plays any local audio/video file or progressive URL through AVPlayer with the shared EQ attached.
++/// Bind `player` to a `VideoPlayer` or `AVPlayerViewController`.
++@MainActor
++final class TrapTubeEQMediaPlayer: ObservableObject {
++    let player = AVPlayer()
++    @Published private(set) var equalizerActive = false
++
++    func play(url: URL) {
++        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
++        try? AVAudioSession.sharedInstance().setActive(true)
++        let item = AVPlayerItem(url: url)
++        equalizerActive = false
++        player.replaceCurrentItem(with: item)
++        Task {
++            equalizerActive = await TrapTubeTapEQ.shared.attach(to: item)   // false for HLS/DRM: plays unequalised
++            player.play()
++        }
++    }
++
++    func stop() { player.pause(); player.replaceCurrentItem(with: nil); equalizerActive = false }
++}
+diff --git a/ci/patches/StemSeparationService.swift b/ci/patches/StemSeparationService.swift
+index 20b9eb1..10ddec9 100644
+--- a/ci/patches/StemSeparationService.swift
++++ b/ci/patches/StemSeparationService.swift
+@@ -2,6 +2,8 @@ import Foundation
+ import AVFoundation
+ import Combine
+ import Demucs
++import Metal
++import os
+ 
+ enum Stem: String, CaseIterable, Identifiable, Sendable {
+     case drums = "Drums", bass = "Bass", other = "Other", vocals = "Vocals"
+@@ -17,12 +19,13 @@ enum Stem: String, CaseIterable, Identifiable, Sendable {
+ }
+ 
+ enum StemProcessingError: LocalizedError, Sendable {
+-    case unreadableAudio, invalidSampleRate, modelDownload, outputWrite(String)
++    case unreadableAudio, invalidSampleRate, modelDownload, outputWrite(String), modelLoad(String)
+     var errorDescription: String? {
+         switch self {
++        case .modelLoad(let detail): return "Model loading failed. \(detail)"
+         case .unreadableAudio: return "TrapTube could not decode this audio file into stereo PCM."
+         case .invalidSampleRate: return "The imported file has an invalid sample rate."
+-        case .modelDownload: return "The enhanced HTDemucs FT model is not downloaded yet."
++        case .modelDownload: return "No usable HTDemucs model is downloaded yet. Tap Download first."
+         case .outputWrite(let detail): return detail
+         }
+     }
+@@ -37,15 +40,80 @@ private enum TrapTubeDemucsCache {
+     }()
+ }
+ 
++/// Rust prints panic messages to stderr, which iOS discards. This copies stderr into memory
++/// while a model loads, so a "worker panicked" error can show the real panic text on screen.
++private final class StderrCapture: @unchecked Sendable {
++    private let lock = NSLock()
++    private var captured = Data()
++    private var saved: Int32 = -1
++    private var pipe: Pipe?
++
++    func start() {
++        let pipe = Pipe()
++        self.pipe = pipe
++        saved = dup(STDERR_FILENO)
++        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
++        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
++            let chunk = handle.availableData
++            guard let self, !chunk.isEmpty else { return }
++            self.lock.lock(); self.captured.append(chunk); self.lock.unlock()
++            if self.saved >= 0 { chunk.withUnsafeBytes { _ = Darwin.write(self.saved, $0.baseAddress, chunk.count) } }
++        }
++    }
++
++    /// Restores stderr and returns the last ~3 KB that was written while capturing.
++    func stop() -> String {
++        if saved >= 0 { dup2(saved, STDERR_FILENO); close(saved); saved = -1 }
++        if let pipe {
++            pipe.fileHandleForReading.readabilityHandler = nil
++            try? pipe.fileHandleForWriting.close()
++            if let rest = try? pipe.fileHandleForReading.readToEnd(), !rest.isEmpty {
++                lock.lock(); captured.append(rest); lock.unlock()
++            }
++        }
++        pipe = nil
++        lock.lock(); defer { lock.unlock() }
++        return String(decoding: captured.suffix(3_000), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
++    }
++}
++
++/// The two weight files TrapTube can use. FT (333 MB) is best quality; the standard four-stem
++/// model (84 MB) needs far less memory and is the automatic fallback.
++private enum TrapTubeModel {
++    static let primary = DemucsModel.fineTunedAll
++    static let fallback = DemucsModel.fourStem
++    /// Heuristic, not measured: below this much free app memory, prefer the small model first.
++    static let fineTunedMemoryFloor = 2_000_000_000
++
++    static func label(_ model: DemucsModel) -> String { model == fallback ? "HTDemucs standard" : "HTDemucs FT" }
++    static func minimumBytes(_ model: DemucsModel) -> Int64 { model == fallback ? 70_000_000 : 280_000_000 }
++
++    /// `isDownloaded` only checks that a file exists, so a partial or empty download passes it.
++    /// A file far smaller than the published size is deleted so it can be downloaded again.
++    static func isUsable(_ model: DemucsModel) -> Bool {
++        guard DemucsEngine.isDownloaded(model), let url = DemucsEngine.downloadedFileURL(for: model) else { return false }
++        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
++        if size < minimumBytes(model) { _ = DemucsEngine.deleteDownload(model); return false }
++        return true
++    }
++
++    static var memoryIsTight: Bool {
++        let available = os_proc_available_memory()
++        return available > 0 && available < fineTunedMemoryFloor
++    }
++
++    static func downloadTarget() -> DemucsModel { memoryIsTight ? fallback : primary }
++}
++
+ @MainActor
+ final class StemSeparationService: ObservableObject {
+     enum Availability: Equatable {
+         case bundled, missingModel
+-        var title: String { self == .bundled ? "HTDemucs FT ready" : "Enhanced model needs download" }
++        var title: String { self == .bundled ? "HTDemucs ready" : "Model needs download" }
+         var detail: String {
+             self == .bundled
+-                ? "Fine-tuned four-stem model is cached on this device. Metal GPU inference runs locally."
+-                : "Download the 333 MB HTDemucs FT model once. TrapTube caches it locally and reuses it for future separations."
++                ? "A four-stem model is cached on this device. Metal GPU inference runs locally; if the large model fails to load, the smaller one is used automatically."
++                : "Download the HTDemucs model once (333 MB, or 84 MB on low-memory devices). TrapTube caches it locally and reuses it."
+         }
+     }
+ 
+@@ -66,7 +134,7 @@ final class StemSeparationService: ObservableObject {
+     }
+ 
+     func refresh() {
+-        availability = DemucsEngine.isDownloaded(.fineTunedAll) ? .bundled : .missingModel
++        availability = (TrapTubeModel.isUsable(TrapTubeModel.primary) || TrapTubeModel.isUsable(TrapTubeModel.fallback)) ? .bundled : .missingModel
+     }
+ 
+     func downloadModel() {
+@@ -74,10 +142,11 @@ final class StemSeparationService: ObservableObject {
+         isDownloading = true
+         downloadProgress = 0
+         errorMessage = nil
+-        statusMessage = "Downloading enhanced model…"
++        statusMessage = "Downloading model…"
++        let target = TrapTubeModel.downloadTarget()
+         Task.detached(priority: .utility) {
+             do {
+-                try await DemucsEngine.download(.fineTunedAll) { update in
++                try await DemucsEngine.download(target) { update in
+                     Task { @MainActor in
+                         self.downloadProgress = update.fraction
+                         self.statusMessage = "Downloading model · \(Int(update.fraction * 100))%"
+@@ -93,8 +162,8 @@ final class StemSeparationService: ObservableObject {
+     private func finishDownload() {
+         isDownloading = false
+         downloadProgress = 1
+-        availability = DemucsEngine.isDownloaded(.fineTunedAll) ? .bundled : .missingModel
+-        statusMessage = availability == .bundled ? "Enhanced model ready" : "Model download incomplete"
++        refresh()
++        statusMessage = availability == .bundled ? "Model ready" : "Model download incomplete or too small; try again"
+     }
+ 
+     private func failDownload(_ message: String) {
+@@ -120,12 +189,13 @@ final class StemSeparationService: ObservableObject {
+             .appendingPathComponent(track.id.uuidString, isDirectory: true)
+ 
+         Task.detached(priority: .userInitiated) {
++            let engine = DemucsEngine()
+             do {
+                 let pcm = try Self.readStereo(source)
+-                let engine = DemucsEngine()
+-                await self.updateProgress(0.03, message: "Loading enhanced model…")
+-                try await engine.load(.fineTunedAll)
+-                try await engine.warmup()
++                await self.updateProgress(0.03, message: "Loading model…")
++                _ = try await Self.loadEngine(engine) { message in
++                    Task { @MainActor in self.updateProgress(0.03, message: message) }
++                }
+                 let separated = try await engine.separate(
+                     left: pcm.left,
+                     right: pcm.right,
+@@ -155,13 +225,46 @@ final class StemSeparationService: ObservableObject {
+                 guard result.count == Stem.allCases.count else {
+                     throw StemProcessingError.outputWrite("The enhanced model did not return all four expected stems.")
+                 }
++                _ = await engine.unload()
+                 await self.finish(result: result)
+             } catch {
++                _ = await engine.unload()
+                 await self.finish(error: error.localizedDescription)
+             }
+         }
+     }
+ 
++    /// Loads and warms up a model, trying the preferred one first and the other as a fallback.
++    /// Every failure keeps its stderr text, so a Rust panic message reaches the screen.
++    nonisolated private static func loadEngine(_ engine: DemucsEngine, report: @escaping @Sendable (String) -> Void) async throws -> DemucsModel {
++        guard MTLCreateSystemDefaultDevice() != nil else {
++            throw StemProcessingError.modelLoad("This device did not provide a Metal GPU, which HTDemucs needs.")
++        }
++        let order = TrapTubeModel.memoryIsTight
++            ? [TrapTubeModel.fallback, TrapTubeModel.primary]
++            : [TrapTubeModel.primary, TrapTubeModel.fallback]
++        let candidates = order.filter { TrapTubeModel.isUsable($0) }
++        guard !candidates.isEmpty else { throw StemProcessingError.modelDownload }
++
++        var failures: [String] = []
++        for model in candidates {
++            report("Loading \(TrapTubeModel.label(model))…")
++            let capture = StderrCapture()
++            capture.start()
++            do {
++                _ = try await engine.load(model)
++                try await engine.warmup()
++                _ = capture.stop()
++                return model
++            } catch {
++                let log = capture.stop()
++                _ = await engine.unload()
++                failures.append("\(TrapTubeModel.label(model)): \(error.localizedDescription)" + (log.isEmpty ? "" : "\n\(log)"))
++            }
++        }
++        throw StemProcessingError.modelLoad(failures.joined(separator: "\n\n"))
++    }
++
+     private func updateProgress(_ value: Double, message: String) {
+         progress = min(1, max(0, value))
+         statusMessage = message
+diff --git a/tests/reference/tap_eq_reference_check.py b/tests/reference/tap_eq_reference_check.py
+new file mode 100644
+index 0000000..34dc131
+--- /dev/null
++++ b/tests/reference/tap_eq_reference_check.py
+@@ -0,0 +1,21 @@
++import numpy as np
++def peaking(fs,f0,gain_db,q):
++    A=10**(gain_db/40); w=2*np.pi*f0/fs; al=np.sin(w)/(2*q); c=np.cos(w)
++    b=[1+al*A,-2*c,1-al*A]; a=[1+al/A,-2*c,1-al/A]
++    return [x/a[0] for x in b],[x/a[0] for x in a]
++def lowshelf(fs,f0,gain_db,q):
++    A=10**(gain_db/40); w=2*np.pi*f0/fs; c=np.cos(w); al=np.sin(w)/(2*q); s=2*np.sqrt(A)*al
++    b0=A*((A+1)-(A-1)*c+s); b1=2*A*((A-1)-(A+1)*c); b2=A*((A+1)-(A-1)*c-s)
++    a0=(A+1)+(A-1)*c+s; a1=-2*((A-1)+(A+1)*c); a2=(A+1)+(A-1)*c-s
++    return [b0/a0,b1/a0,b2/a0],[1,a1/a0,a2/a0]
++def mag(b,a,fs,f):
++    z=np.exp(-1j*2*np.pi*f/fs); return abs((b[0]+b[1]*z+b[2]*z*z)/(a[0]+a[1]*z+a[2]*z*z))
++fs=44100
++for f0 in [32,1000,16000]:
++    b,a=peaking(fs,f0,9,1.4142); print("peak",f0,"gain dB at f0:",round(20*np.log10(mag(b,a,fs,f0)),3))
++b,a=lowshelf(fs,90,10,0.7); print("lowshelf dc dB:",round(20*np.log10(mag(b,a,fs,1)),3),"hf dB:",round(20*np.log10(mag(b,a,fs,10000)),3))
++b,a=peaking(fs,1000,0,1.4142); print("zero-gain is identity:",np.allclose(b,a))
++# stability of all 16 at 48k with +12
++fr=[32,64,125,250,500,1000,2000,3000,4000,5000,6000,7000,8000,10000,12000,16000]
++for fs in (44100,48000):
++    ok=all(np.all(np.abs(np.roots(peaking(fs,f,12,1.4142)[1]))<1) for f in fr if f<0.45*fs); print(fs,"stable:",ok)
+-- 
+2.43.0
+
