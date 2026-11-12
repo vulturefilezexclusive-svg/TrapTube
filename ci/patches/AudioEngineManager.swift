@@ -454,14 +454,14 @@ final class TrapTubeTapEQ: @unchecked Sendable {
             version: kMTAudioProcessingTapCallbacksVersion_0,
             clientInfo: Unmanaged.passRetained(state).toOpaque(),
             init: tapInit, finalize: tapFinalize, prepare: tapPrepare, unprepare: tapUnprepare, process: tapProcess)
-        var tap: Unmanaged<MTAudioProcessingTap>?
+        var tap: MTAudioProcessingTap?
         let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
         guard status == noErr, let tap else {
             Unmanaged<TapState>.passUnretained(state).release()   // balance passRetained: finalize never runs on failure
             return false
         }
         let parameters = AVMutableAudioMixInputParameters(track: track)
-        parameters.audioTapProcessor = tap.takeRetainedValue()
+        parameters.audioTapProcessor = tap
         let mix = AVMutableAudioMix()
         mix.inputParameters = [parameters]
         item.audioMix = mix
