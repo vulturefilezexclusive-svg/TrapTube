@@ -740,18 +740,30 @@ private struct TrapTubeDownloadsSheet: View {
 
 private struct TrapTubeDownloadedVideoPlayer: View {
     let item: TrapTubeDownloadedMedia
-    @State private var player: AVPlayer
-
-    init(item: TrapTubeDownloadedMedia) {
-        self.item = item
-        _player = State(initialValue: AVPlayer(url: item.fileURL))
-    }
+    @EnvironmentObject private var audio: AudioEngineManager
+    @StateObject private var mediaPlayer = TrapTubeEQMediaPlayer()
 
     var body: some View {
-        VideoPlayer(player: player)
-            .background(.black)
-            .ignoresSafeArea()
-            .onAppear { player.play() }
-            .onDisappear { player.pause() }
+        ZStack(alignment: .topLeading) {
+            VideoPlayer(player: mediaPlayer.player)
+                .background(.black)
+                .ignoresSafeArea()
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                Text(mediaPlayer.equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM")
+            }
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.72), in: Capsule())
+            .padding(.top, 12)
+            .padding(.leading, 12)
+        }
+        .onAppear { mediaPlayer.play(url: item.fileURL) }
+        .onChange(of: audio.eqGains) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.bassBoost) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.masterGain) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onDisappear { mediaPlayer.stop() }
     }
 }
