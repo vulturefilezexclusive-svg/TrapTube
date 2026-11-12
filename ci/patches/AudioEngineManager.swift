@@ -2,6 +2,9 @@ import AVFoundation
 import Foundation
 import Combine
 import Accelerate
+import MediaToolbox
+import AudioToolbox
+import os
 
 private enum TrapTubeVisualizerDSP {
     static let fftSize = 1024
@@ -270,6 +273,8 @@ final class AudioEngineManager: ObservableObject {
         let headroom = -min(18, peakBoost * 0.5)
         let gainDB = masterGain == 0 ? -96 : 20 * log10(masterGain)
         masterStage.globalGain = max(-96, min(12, gainDB + headroom))
+        // Mirror the same settings into the AVPlayer audio tap (local video, progressive streams).
+        TrapTubeTapEQ.shared.update(gains: eqGains, bass: bassBoost, master: masterGain)
     }
 
     private func start(_ track: Track, at time: TimeInterval, autoplay: Bool) {
@@ -392,4 +397,218 @@ final class AudioEngineManager: ObservableObject {
         isPlaying = false
         if clearTrack { currentTrack = nil; currentTime = 0; duration = 0; scheduledStartTime = 0 }
     }
+}
+
+// MARK: - Shared EQ for AVPlayer playback (local video files and progressive streams)
+
+/// The same 16 bands + bass shelf + master gain as the AVAudioEngine EQ, applied inside an
+/// MTAudioProcessingTap so it also works for anything played through AVPlayer.
+/// Limits: HLS (.m3u8) streams and DRM-protected media do not expose their audio to a tap, and the
+/// official YouTube player renders audio itself, so those cannot be equalised this way.
+final class TrapTubeTapEQ: @unchecked Sendable {
+    static let shared = TrapTubeTapEQ()
+    static let bandFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 10_000, 12_000, 16_000]
+    static let sectionCount = 17   // 16 peaking bands + 1 bass low-shelf
+
+    // Shared values: [0..<16] band gains (dB), [16] bass shelf (dB), [17] linear master gain.
+    private let lock: UnsafeMutablePointer<os_unfair_lock>
+    private let values: UnsafeMutablePointer<Float>
+    private var version: UInt64 = 1
+
+    private init() {
+        lock = .allocate(capacity: 1); lock.initialize(to: os_unfair_lock())
+        values = .allocate(capacity: 18); values.initialize(repeating: 0, count: 18)
+        values[17] = 1
+    }
+
+    func update(gains: [Float], bass: Float, master: Float) {
+        guard gains.count == 16 else { return }
+        os_unfair_lock_lock(lock)
+        for index in 0..<16 { values[index] = gains[index] }
+        values[16] = bass
+        // Same headroom rule as AudioEngineManager.updateMasterStage().
+        let peakBoost = max(0, gains.max() ?? 0) + bass
+        let headroom = -min(18, peakBoost * 0.5)
+        let gainDB: Float = master == 0 ? -96 : 20 * log10(master)
+        let totalDB = max(-96, min(12, gainDB + headroom))
+        values[17] = powf(10, totalDB / 20)
+        version &+= 1
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Render-thread read. Returns false (keep the previous settings) if the lock is busy.
+    fileprivate func copyValues(into destination: UnsafeMutablePointer<Float>) -> UInt64? {
+        guard os_unfair_lock_trylock(lock) else { return nil }
+        defer { os_unfair_lock_unlock(lock) }
+        destination.update(from: values, count: 18)
+        return version
+    }
+
+    /// Adds the shared EQ to a player item. Returns false when the item has no tappable audio track.
+    @MainActor
+    @discardableResult
+    func attach(to item: AVPlayerItem) async -> Bool {
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .audio), let track = tracks.first else { return false }
+        let state = TapState()
+        var callbacks = MTAudioProcessingTapCallbacks(
+            version: kMTAudioProcessingTapCallbacksVersion_0,
+            clientInfo: Unmanaged.passRetained(state).toOpaque(),
+            init: tapInit, finalize: tapFinalize, prepare: tapPrepare, unprepare: tapUnprepare, process: tapProcess)
+        var tap: Unmanaged<MTAudioProcessingTap>?
+        let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
+        guard status == noErr, let tap else {
+            Unmanaged<TapState>.passUnretained(state).release()   // balance passRetained: finalize never runs on failure
+            return false
+        }
+        let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTapProcessor = tap.takeRetainedValue()
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [parameters]
+        item.audioMix = mix
+        return true
+    }
+}
+
+/// Per-tap DSP state. Everything the render thread touches is allocated up front in `prepare`.
+fileprivate final class TapState {
+    private var setup: vDSP_biquad_Setup?
+    private var delays: UnsafeMutablePointer<Float>?
+    private var coefficients: UnsafeMutablePointer<Double>?
+    private var snapshot: UnsafeMutablePointer<Float>?
+    private var sampleRate = 44_100.0
+    private var channels = 0
+    private var isFloat32 = false
+    private var interleaved = true
+    private var appliedVersion: UInt64 = 0
+    private var preamp: Float = 1
+    private let delayLength = 2 * TrapTubeTapEQ.sectionCount + 2
+
+    func prepare(_ format: AudioStreamBasicDescription) {
+        release()
+        sampleRate = format.mSampleRate
+        channels = Int(format.mChannelsPerFrame)
+        isFloat32 = format.mFormatID == kAudioFormatLinearPCM
+            && (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32
+        interleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+        guard isFloat32, channels > 0, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
+        let count = TrapTubeTapEQ.sectionCount
+        coefficients = .allocate(capacity: 5 * count)
+        for section in 0..<count { Self.identity(coefficients! + section * 5) }
+        setup = vDSP_biquad_CreateSetupD(coefficients!, vDSP_Length(count))
+        delays = .allocate(capacity: delayLength * channels); delays!.initialize(repeating: 0, count: delayLength * channels)
+        snapshot = .allocate(capacity: 18); snapshot!.initialize(repeating: 0, count: 18); snapshot![17] = 1
+        appliedVersion = 0
+    }
+
+    func release() {
+        if let setup { vDSP_biquad_DestroySetupD(setup) }
+        setup = nil
+        delays?.deallocate(); delays = nil
+        coefficients?.deallocate(); coefficients = nil
+        snapshot?.deallocate(); snapshot = nil
+    }
+
+    deinit { release() }
+
+    func process(_ list: UnsafeMutablePointer<AudioBufferList>, frames: Int) {
+        guard let setup, let delays, let coefficients, let snapshot, frames > 0 else { return }
+        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot), version != appliedVersion {
+            Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
+            vDSP_biquad_SetCoefficientsDouble(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
+            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        var gain = preamp
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        if interleaved {
+            for buffer in buffers {
+                guard let raw = buffer.mData else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                let stride = max(1, Int(buffer.mNumberChannels))
+                for channel in 0..<min(stride, channels) {
+                    let start = data + channel
+                    vDSP_biquad(setup, delays + channel * delayLength, start, vDSP_Stride(stride), start, vDSP_Stride(stride), vDSP_Length(frames))
+                    vDSP_vsmul(start, vDSP_Stride(stride), &gain, start, vDSP_Stride(stride), vDSP_Length(frames))
+                }
+            }
+        } else {
+            for (channel, buffer) in buffers.enumerated() where channel < channels {
+                guard let raw = buffer.mData else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
+                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
+            }
+        }
+    }
+
+    private static func identity(_ section: UnsafeMutablePointer<Double>) {
+        section[0] = 1; section[1] = 0; section[2] = 0; section[3] = 0; section[4] = 0
+    }
+
+    /// RBJ cookbook biquads in vDSP order [b0, b1, b2, a1, a2], normalised by a0.
+    /// Peaking bands use Q = 1.4142 (about one octave); the bass shelf is a low shelf at 90 Hz, Q = 0.7.
+    private static func design(into out: UnsafeMutablePointer<Double>, sampleRate: Double, values: UnsafeMutablePointer<Float>) {
+        for band in 0..<16 {
+            let section = out + band * 5
+            let gain = Double(values[band])
+            let f0 = Double(TrapTubeTapEQ.bandFrequencies[band])
+            guard abs(gain) > 0.01, f0 < sampleRate * 0.45 else { identity(section); continue }
+            let a = pow(10, gain / 40), w = 2 * Double.pi * f0 / sampleRate
+            let alpha = sin(w) / (2 * 1.4142), c = cos(w)
+            let a0 = 1 + alpha / a
+            section[0] = (1 + alpha * a) / a0; section[1] = -2 * c / a0; section[2] = (1 - alpha * a) / a0
+            section[3] = -2 * c / a0;          section[4] = (1 - alpha / a) / a0
+        }
+        let shelf = out + 16 * 5
+        let bass = Double(values[16])
+        guard bass > 0.01 else { identity(shelf); return }
+        let a = pow(10, bass / 40), w = 2 * Double.pi * 90 / sampleRate
+        let c = cos(w), alpha = sin(w) / (2 * 0.7), s = 2 * a.squareRoot() * alpha
+        let a0 = (a + 1) + (a - 1) * c + s
+        shelf[0] = a * ((a + 1) - (a - 1) * c + s) / a0
+        shelf[1] = 2 * a * ((a - 1) - (a + 1) * c) / a0
+        shelf[2] = a * ((a + 1) - (a - 1) * c - s) / a0
+        shelf[3] = -2 * ((a - 1) + (a + 1) * c) / a0
+        shelf[4] = ((a + 1) + (a - 1) * c - s) / a0
+    }
+}
+
+private let tapInit: MTAudioProcessingTapInitCallback = { _, clientInfo, storageOut in
+    storageOut.pointee = clientInfo
+}
+private let tapFinalize: MTAudioProcessingTapFinalizeCallback = { tap in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
+}
+private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().prepare(format.pointee)
+}
+private let tapUnprepare: MTAudioProcessingTapUnprepareCallback = { tap in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().release()
+}
+private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
+    guard MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut) == noErr else { return }
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+        .process(bufferList, frames: Int(framesOut.pointee))
+}
+
+/// Plays any local audio/video file or progressive URL through AVPlayer with the shared EQ attached.
+/// Bind `player` to a `VideoPlayer` or `AVPlayerViewController`.
+@MainActor
+final class TrapTubeEQMediaPlayer: ObservableObject {
+    let player = AVPlayer()
+    @Published private(set) var equalizerActive = false
+
+    func play(url: URL) {
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let item = AVPlayerItem(url: url)
+        equalizerActive = false
+        player.replaceCurrentItem(with: item)
+        Task {
+            equalizerActive = await TrapTubeTapEQ.shared.attach(to: item)   // false for HLS/DRM: plays unequalised
+            player.play()
+        }
+    }
+
+    func stop() { player.pause(); player.replaceCurrentItem(with: nil); equalizerActive = false }
 }
