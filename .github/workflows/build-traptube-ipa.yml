@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, master, feature/native-player-demucs-eq]
+    branches: [main, master, feature/native-player-demucs-eq, claude-stem-fix-import]
     paths:
       - 'ci/source.zip'
       - 'ci/patches/**'
@@ -341,10 +341,6 @@ jobs:
           APP_PATH="$STAGING/Payload/TrapTube.app"
           test -d "$APP_PATH/Frameworks" || { echo "ERROR: app Frameworks directory missing."; exit 6; }
           EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")
-          # FFmpegKit's libavcodec was incorrectly linked to the Swift CoreMedia
-          # overlay for a C symbol that is exported by Apple's CoreMedia framework.
-          # Redirect that load command to the actual system framework before embedding
-          # Swift runtime dependencies.
           FIXED_COREMEDIA=0
           while IFS= read -r -d '' BINARY; do
             if /usr/bin/otool -L "$BINARY" 2>/dev/null | grep -Fq '@rpath/libswiftCoreMedia.dylib'; then
@@ -360,8 +356,6 @@ jobs:
             echo "ERROR: No bundled binary referenced @rpath/libswiftCoreMedia.dylib; expected FFmpeg linkage was not found." >&2
             exit 7
           fi
-          echo "Corrected $FIXED_COREMEDIA bundled binary/binaries to use Apple's CoreMedia framework."
-          # Verify the incorrect provider is gone and the system CoreMedia dependency is present.
           python3 - "$APP_PATH/Frameworks" <<'PYCOREMEDIA'
           from pathlib import Path
           import subprocess, sys
@@ -393,7 +387,6 @@ jobs:
             --scan-folder "$APP_PATH/Frameworks" \
             --destination "$APP_PATH/Frameworks" \
             --platform iphoneos
-          # Fail early if any bundled binary still references an absent Swift runtime dylib.
           python3 - "$APP_PATH" <<'PYVERIFY'
           from pathlib import Path
           import subprocess, sys
@@ -417,9 +410,6 @@ jobs:
                           missing.add(f"{binary}: {name}")
           if missing:
               raise SystemExit("Missing embedded Swift runtime dependencies:\\n" + "\\n".join(sorted(missing)))
-          # libswiftCoreMedia is intentionally not required here: FFmpeg's
-          # CoreMedia C-symbol dependency was redirected to Apple's system
-          # CoreMedia.framework above, so this Swift overlay may not be needed.
           print("Verified all remaining @rpath/libswift*.dylib dependencies are embedded.")
           PYVERIFY
           REPACK="$RUNNER_TEMP/TrapTube-runtime-fixed.ipa"
