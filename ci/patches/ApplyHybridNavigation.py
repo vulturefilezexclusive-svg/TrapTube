@@ -2064,4 +2064,1263 @@ s = rep_all(s, "LinearGradient(colors: [Color(hex: \"FF303B\"), Color(hex: \"A90
             "LinearGradient(colors: [theme.accent, theme.accent.opacity(0.62)]", "home gradient accents")
 p.write_text(s)
 
+
+# =====================================================================
+# Round 3 - dead mod button fix, persistent playback + mini player,
+# in-player stream EQ with proof of attachment, functional streaming
+# quality presets, and an OLED dark mode switch.
+#
+# Item 1 diagnosis (from the shipped code): the script-message handler
+# registration was CORRECT - TrapTubeModInstaller.install ran on the
+# configuration both WKWebViews were created with, and both hosts
+# observed the shared center and presented the sheet. The failure was
+# in the page: the button lived INSIDE #movie_player, where the mobile
+# player's full-surface gesture/chrome layers sit above it and swallow
+# taps, and the click path had no fallback - a failed postMessage was
+# swallowed by the never-throw handler and nothing else could happen.
+# Fix: buttons are attached to document.body with position:fixed over
+# the player's rect (recomputed on resize/scroll/SPA changes), handle
+# touchstart AND click, and fall back to a traptube-mod:// /
+# traptube-eq:// navigation that the coordinators intercept.
+#
+# Item 2 diagnosis: RootView switches tabs with a `switch` over
+# @State selectedTab, so the inactive tab's whole hierarchy - including
+# the WKWebView - is destroyed on every tab switch. Fix:
+# TrapTubePlayerSession owns both watch web views for the app's
+# lifetime; the host representables return the session's view and
+# their dismantleUIView is a no-op, and the RootView mini player
+# re-parents the SAME web view into a bar above the tab bar.
+# =====================================================================
+
+def splice_between(source, start_marker, end_marker, replacement, label):
+    if replacement in source:
+        return source
+    if start_marker not in source:
+        raise SystemExit("round3 splice start missing: " + label)
+    i = source.index(start_marker)
+    j = source.index(end_marker, i)
+    return source[:i] + replacement + source[j:]
+
+
+def splice_function(source, anchor, new_text, label):
+    if new_text in source:
+        return source
+    if anchor not in source:
+        raise SystemExit("round3 function anchor missing: " + label)
+    i = source.index(anchor)
+    brace = source.index("{", i)
+    depth = 0
+    k = brace
+    in_str = False
+    esc = False
+    in_comment = False
+    while k < len(source):
+        ch = source[k]
+        nxt = source[k + 1] if k + 1 < len(source) else ""
+        if in_comment:
+            if ch == "\n":
+                in_comment = False
+        elif in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == "/" and nxt == "/":
+                in_comment = True
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        k += 1
+    if depth != 0:
+        raise SystemExit("round3 function brace match failed: " + label)
+    return source[:i] + new_text + source[k + 1:]
+
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# --- Item 1+3+4: replace the installer (new body-fixed buttons with a
+# scheme fallback, EQ graph script, page-world quality script, and the
+# trapTubeEQ / trapTubeState handlers registered alongside trapTubeMod).
+NEW_INSTALLER = r'''enum TrapTubeModInstaller {
+    static func install(into configuration: WKWebViewConfiguration) {
+        let controller = configuration.userContentController
+        controller.add(TrapTubeModScriptHandler.shared, name: "trapTubeMod")
+        controller.add(TrapTubeWebEQScriptHandler.shared, name: "trapTubeEQ")
+        controller.add(TrapTubeWatchStateHandler.shared, name: "trapTubeState")
+        controller.addUserScript(WKUserScript(source: scriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: TrapTubeWebEQInstaller.scriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: TrapTubeQualityInstaller.scriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .page))
+    }
+
+    private static var scriptSource: String {
+        let colors = TrapTubeAccentColors.currentGradientHex
+        return #"""
+        (() => {
+          if (window.__trapTubeModInstalled) return;
+          window.__trapTubeModInstalled = true;
+          var MOD_ID = "traptube-mod-btn";
+          var EQ_ID = "traptube-eq-btn";
+          var modBtn = null;
+          var eqBtn = null;
+          function currentVideoID() {
+            try {
+              var params = new URLSearchParams(window.location.search);
+              var v = params.get("v");
+              if (v) return v;
+              var match = window.location.pathname.match(/\/shorts\/([\w-]{6,})/);
+              if (match) return match[1];
+              var canonical = document.querySelector("link[rel='canonical']");
+              if (canonical && canonical.href) {
+                var m2 = canonical.href.match(/[?&]v=([\w-]{6,})/);
+                if (m2) return m2[1];
+              }
+            } catch (e) {}
+            return null;
+          }
+          function playerRect() {
+            var p = document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
+            if (!p) return null;
+            var r = p.getBoundingClientRect();
+            if (!r || r.width < 60 || r.height < 60) return null;
+            return r;
+          }
+          function post(name, payload) {
+            try {
+              var handlers = window.webkit && window.webkit.messageHandlers;
+              var h = handlers && handlers[name];
+              if (h) { h.postMessage(payload); return true; }
+            } catch (e) {}
+            return false;
+          }
+          function fireMod() {
+            var id = currentVideoID();
+            if (!id) return;
+            var payload = { videoID: id, title: document.title || "", url: window.location.href };
+            if (!post("trapTubeMod", payload)) {
+              try {
+                window.location.href = "traptube-mod://open?v=" + encodeURIComponent(id) + "&t=" + encodeURIComponent(document.title || "");
+              } catch (e) {}
+            }
+          }
+          function fireEQ() {
+            if (!post("trapTubeEQ", { action: "open" })) {
+              try { window.location.href = "traptube-eq://open"; } catch (e) {}
+            }
+          }
+          function makeButton(id, label, fontSize, fire) {
+            var btn = document.createElement("button");
+            btn.id = id;
+            btn.type = "button";
+            btn.setAttribute("aria-label", id === MOD_ID ? "TrapTube menu" : "TrapTube stream EQ");
+            btn.textContent = label;
+            btn.style.cssText = "position:fixed;z-index:2147483647;width:40px;height:40px;border-radius:12px;border:1px solid rgba(255,255,255,0.4);background:linear-gradient(135deg,\#(colors.0),\#(colors.1));color:#ffffff;font-size:" + fontSize + ";font-weight:900;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.5);padding:0;margin:0;pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;";
+            var lastFire = 0;
+            function handler(ev) {
+              try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+              var now = Date.now();
+              if (now - lastFire < 700) return;
+              lastFire = now;
+              fire();
+            }
+            btn.addEventListener("touchstart", handler, { passive: false });
+            btn.addEventListener("click", handler);
+            document.body.appendChild(btn);
+            return btn;
+          }
+          function ensure() {
+            try {
+              if (!document.body) return;
+              if (modBtn && !document.contains(modBtn)) modBtn = null;
+              if (eqBtn && !document.contains(eqBtn)) eqBtn = null;
+              if (!modBtn) modBtn = makeButton(MOD_ID, "↓", "19px", fireMod);
+              if (!eqBtn) eqBtn = makeButton(EQ_ID, "EQ", "12px", fireEQ);
+              var id = currentVideoID();
+              var r = id ? playerRect() : null;
+              if (!r) {
+                modBtn.style.display = "none";
+                eqBtn.style.display = "none";
+                return;
+              }
+              var top = Math.max(0, r.top + 54);
+              modBtn.style.display = "flex";
+              eqBtn.style.display = "flex";
+              modBtn.style.left = (r.right - 50) + "px";
+              modBtn.style.top = top + "px";
+              eqBtn.style.left = (r.right - 98) + "px";
+              eqBtn.style.top = top + "px";
+            } catch (e) {}
+          }
+          function reportState() {
+            try {
+              var id = currentVideoID();
+              var v = document.querySelector("#movie_player video") || document.querySelector("video");
+              var title = (document.title || "").replace(/ - YouTube$/, "");
+              post("trapTubeState", { videoID: id || "", title: title, playing: !!(v && !v.paused && !v.ended) });
+            } catch (e) {}
+          }
+          function tick() { ensure(); reportState(); }
+          function start() {
+            tick();
+            try {
+              new MutationObserver(function () { ensure(); }).observe(document.documentElement, { childList: true, subtree: true });
+            } catch (e) {}
+            setInterval(tick, 1500);
+            window.addEventListener("resize", ensure);
+            window.addEventListener("scroll", ensure, true);
+            document.addEventListener("yt-navigate-finish", function () { setTimeout(tick, 60); });
+            document.addEventListener("play", reportState, true);
+            document.addEventListener("pause", reportState, true);
+          }
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", start);
+          } else {
+            start();
+          }
+        })()
+        """#
+    }
+}
+'''
+s = splice_between(s, "enum TrapTubeModInstaller {", "\n// MARK: InnerTube stream resolution", NEW_INSTALLER, "mod installer round 3")
+
+# --- Item 1: both coordinators intercept the fallback schemes.
+s = rep_all(s, """        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(.allow)
+        }""",
+            """        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if TrapTubePlayerSession.shared.handleNavigationAction(navigationAction, webView: webView) {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }""", "coordinator scheme interception")
+p.write_text(s)
+
+# --- Item 2: both watch web views are now created once and owned by
+# TrapTubePlayerSession; the representables return the shared view and
+# never dismantle it, so tab switches cannot kill playback.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+HOME_MAKE = """    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []"""
+HOME_NEW = """    func makeUIView(context: Context) -> WKWebView {
+        let view = TrapTubePlayerSession.shared.webView(for: .home) {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .default()
+            configuration.allowsInlineMediaPlayback = true
+            configuration.mediaTypesRequiringUserActionForPlayback = []
+            TrapTubeModInstaller.install(into: configuration)
+            let created = WKWebView(frame: .zero, configuration: configuration)
+            // Present as mobile Safari: Google refuses to run its sign-in flow
+            // for the default WKWebView user agent ("browser may not be secure").
+            created.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+            created.isOpaque = false
+            created.backgroundColor = .black
+            created.scrollView.backgroundColor = .black
+            created.underPageBackgroundColor = .black
+            // Let the web view use the full safe area so the page header is
+            // not pinned underneath the status bar.
+            created.scrollView.contentInsetAdjustmentBehavior = .automatic
+            created.allowsBackForwardNavigationGestures = true
+            return created
+        }
+        view.navigationDelegate = context.coordinator
+        context.coordinator.webView = view
+        onCreated(view)
+        if TrapTubePlayerSession.shared.claimInitialLoad(for: .home) {
+            view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        }
+        return view
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        // TrapTubePlayerSession owns this web view for the app's lifetime.
+        // Leaving it in place here keeps any playing stream alive while the
+        // session re-parents it into the mini player (or back to this tab);
+        // SwiftUI destroying it on a tab switch is what stopped playback.
+    }"""
+s = splice_function(s, HOME_MAKE, HOME_NEW, "home makeUIView session-owned")
+
+ACCOUNT_MAKE = """    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        TrapTubeModInstaller.install(into: configuration)"""
+ACCOUNT_NEW = """    func makeUIView(context: Context) -> WKWebView {
+        let view = TrapTubePlayerSession.shared.webView(for: .you) {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .default()
+            configuration.allowsInlineMediaPlayback = true
+            TrapTubeModInstaller.install(into: configuration)
+            let created = WKWebView(frame: .zero, configuration: configuration)
+            // Same mobile-Safari identity as the Home tab so the signed-in
+            // session and the account surface behave identically.
+            created.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+            created.isOpaque = false
+            created.backgroundColor = .black
+            created.scrollView.backgroundColor = .black
+            created.underPageBackgroundColor = .black
+            // Full safe area: the account header must clear the status bar.
+            created.scrollView.contentInsetAdjustmentBehavior = .automatic
+            created.allowsBackForwardNavigationGestures = true
+            return created
+        }
+        view.navigationDelegate = context.coordinator
+        context.coordinator.webView = view
+        if TrapTubePlayerSession.shared.claimInitialLoad(for: .you) {
+            view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        }
+        return view
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        // See YouTubeHomeWebView: the session owns the web view so playback
+        // survives tab switches via the RootView mini player.
+    }"""
+s = splice_function(s, ACCOUNT_MAKE, ACCOUNT_NEW, "account makeUIView session-owned")
+
+# --- Item 3: both hosts observe the EQ center and present the EQ sheet
+# exactly like the mod sheet.
+s = rep(s, "    @ObservedObject private var homeModCenter = TrapTubeModCenter.shared\n",
+        "    @ObservedObject private var homeModCenter = TrapTubeModCenter.shared\n    @ObservedObject private var homeEQCenter = TrapTubeWebEQCenter.shared\n",
+        "home EQ center wiring")
+s = rep(s, """        .sheet(item: $homeModCenter.activeRequest) { request in
+            TrapTubeModSheet(request: request)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }""",
+        """        .sheet(item: $homeModCenter.activeRequest) { request in
+            TrapTubeModSheet(request: request)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }
+        .sheet(item: $homeEQCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }""", "home EQ sheet")
+s = rep(s, "    @ObservedObject private var modCenter = TrapTubeModCenter.shared\n",
+        "    @ObservedObject private var modCenter = TrapTubeModCenter.shared\n    @ObservedObject private var eqCenter = TrapTubeWebEQCenter.shared\n",
+        "account EQ center wiring")
+s = rep(s, """        .sheet(item: $modCenter.activeRequest) { request in
+            TrapTubeModSheet(request: request)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }""",
+        """        .sheet(item: $modCenter.activeRequest) { request in
+            TrapTubeModSheet(request: request)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }
+        .sheet(item: $eqCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }""", "account EQ sheet")
+
+# --- Item 5 (Home surface): the Home backdrop follows the OLED switch.
+s = rep(s, "Color(red: 0.025, green: 0.025, blue: 0.035).ignoresSafeArea()",
+        "(theme.oledEnabled ? Color.black : Color(red: 0.025, green: 0.025, blue: 0.035)).ignoresSafeArea()",
+        "home backdrop OLED")
+
+# --- Item 4: the quality cap picks the download sheet's defaults.
+s = rep(s, "            return info.muxed.first { $0.itag == selectedVideoItag } ?? info.muxed.first",
+        "            return info.muxed.first { $0.itag == selectedVideoItag } ?? info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first",
+        "download sheet cap default")
+s = rep(s, "        if selectedVideoItag == nil { selectedVideoItag = info.muxed.first?.itag }",
+        "        if selectedVideoItag == nil { selectedVideoItag = (info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first)?.itag }",
+        "download sheet cap applyDefaults")
+p.write_text(s)
+
+# --- Round 3 types, appended to YouTubeView.swift.
+ROUND3_SWIFT = r'''
+// MARK: - Round 3: player session, stream EQ, quality caps
+
+enum TrapTubeHostTab: Hashable {
+    case home
+    case you
+}
+
+/// Owns the two watch web views for the whole app lifetime. RootView's
+/// tab switch destroys and recreates SwiftUI hierarchies, so anything
+/// the views own dies with them - the session is what keeps a stream
+/// (and its web view) alive across tab switches, and it re-parents the
+/// SAME web view into the mini player instead of recreating it.
+final class TrapTubePlayerSession: ObservableObject {
+    static let shared = TrapTubePlayerSession()
+
+    private var webViews: [TrapTubeHostTab: WKWebView] = [:]
+    private var initialLoadClaimed: Set<TrapTubeHostTab> = []
+
+    @Published private(set) var watchHost: TrapTubeHostTab?
+    @Published private(set) var watchVideoID: String?
+    @Published private(set) var watchTitle: String = ""
+    @Published private(set) var watchIsPlaying: Bool = false
+    private var dismissedVideoID: String?
+
+    private init() {}
+
+    func webView(for host: TrapTubeHostTab, builder: () -> WKWebView) -> WKWebView {
+        if let existing = webViews[host] { return existing }
+        let created = builder()
+        webViews[host] = created
+        return created
+    }
+
+    func webViewIfExists(for host: TrapTubeHostTab) -> WKWebView? { webViews[host] }
+
+    func host(for webView: WKWebView?) -> TrapTubeHostTab? {
+        guard let webView else { return nil }
+        return webViews.first { $0.value === webView }?.key
+    }
+
+    func claimInitialLoad(for host: TrapTubeHostTab) -> Bool {
+        if initialLoadClaimed.contains(host) { return false }
+        initialLoadClaimed.insert(host)
+        return true
+    }
+
+    /// Fallback channel for the injected player buttons: if the script
+    /// message handler is unavailable in the page, the buttons navigate
+    /// to traptube-mod:// / traptube-eq:// and both coordinators land
+    /// here. Returns true when the navigation was handled (and must be
+    /// cancelled).
+    func handleNavigationAction(_ action: WKNavigationAction, webView: WKWebView) -> Bool {
+        guard let url = action.request.url, let scheme = url.scheme else { return false }
+        if scheme == "traptube-mod" {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let videoID = items.first { $0.name == "v" }?.value ?? ""
+            let title = items.first { $0.name == "t" }?.value ?? ""
+            if !videoID.isEmpty {
+                TrapTubeModCenter.shared.present(videoID: videoID, pageTitle: title)
+            }
+            return true
+        }
+        if scheme == "traptube-eq" {
+            TrapTubeWebEQCenter.shared.present(host: host(for: webView))
+            return true
+        }
+        return false
+    }
+
+    func reportWatchState(host: TrapTubeHostTab, videoID: String, title: String, playing: Bool) {
+        if !videoID.isEmpty {
+            if videoID == dismissedVideoID { return }
+            dismissedVideoID = nil
+            watchHost = host
+            watchVideoID = videoID
+            if !title.isEmpty { watchTitle = title }
+            watchIsPlaying = playing
+        } else if watchHost == host {
+            watchHost = nil
+            watchVideoID = nil
+            watchIsPlaying = false
+        }
+    }
+
+    func togglePlay() {
+        guard let host = watchHost, let view = webViews[host] else { return }
+        view.evaluateJavaScript("(() => { var v = document.querySelector('video'); if (!v) return; if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function(){}); } else { v.pause(); } })()")
+        watchIsPlaying.toggle()
+    }
+
+    func closeMini() {
+        guard let host = watchHost else { return }
+        webViews[host]?.evaluateJavaScript("(() => { var v = document.querySelector('video'); if (v) v.pause(); })()")
+        dismissedVideoID = watchVideoID
+        watchHost = nil
+        watchVideoID = nil
+        watchIsPlaying = false
+    }
+
+    func applyQualityCapToAll() {
+        let cap = TrapTubeStreamingQuality.cap
+        for (_, view) in webViews {
+            view.evaluateJavaScript("window.__trapTubeSetQualityCap && window.__trapTubeSetQualityCap(\(cap))", in: .page) { _ in }
+        }
+    }
+
+    func applyWebEQToAll() {
+        let json = TrapTubeWebEQ.shared.settingsJSON
+        for (_, view) in webViews {
+            view.evaluateJavaScript("window.__traptubeWebSetEQ && window.__traptubeWebSetEQ(\(json))")
+        }
+    }
+
+    func requestEQStatus(for host: TrapTubeHostTab) {
+        webViews[host]?.evaluateJavaScript("window.__traptubeWebEQReport && window.__traptubeWebEQReport()")
+    }
+}
+
+final class TrapTubeWatchStateHandler: NSObject, WKScriptMessageHandler {
+    static let shared = TrapTubeWatchStateHandler()
+    private override init() { super.init() }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "trapTubeState",
+              let body = message.body as? [String: Any],
+              let host = TrapTubePlayerSession.shared.host(for: message.webView) else { return }
+        let videoID = body["videoID"] as? String ?? ""
+        let title = body["title"] as? String ?? ""
+        let playing = (body["playing"] as? NSNumber)?.boolValue ?? false
+        DispatchQueue.main.async {
+            TrapTubePlayerSession.shared.reportWatchState(host: host, videoID: videoID, title: title, playing: playing)
+        }
+    }
+}
+
+final class TrapTubeWebEQScriptHandler: NSObject, WKScriptMessageHandler {
+    static let shared = TrapTubeWebEQScriptHandler()
+    private override init() { super.init() }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "trapTubeEQ",
+              let body = message.body as? [String: Any] else { return }
+        let host = TrapTubePlayerSession.shared.host(for: message.webView)
+        if (body["action"] as? String) == "open" {
+            TrapTubeWebEQCenter.shared.present(host: host)
+        }
+        if (body["type"] as? String) == "eqStatus" {
+            TrapTubeWebEQCenter.shared.updateStatus(host: host, body: body)
+        }
+    }
+}
+
+struct TrapTubeWebEQRequest: Identifiable {
+    let host: TrapTubeHostTab
+    var id: String { host == .home ? "eq-home" : "eq-you" }
+}
+
+struct TrapTubeWebEQStatus {
+    var state: String = "unknown"
+    var level: Double = 0
+    var message: String = ""
+}
+
+final class TrapTubeWebEQCenter: ObservableObject {
+    static let shared = TrapTubeWebEQCenter()
+    @Published var activeRequest: TrapTubeWebEQRequest?
+    @Published private(set) var statuses: [TrapTubeHostTab: TrapTubeWebEQStatus] = [:]
+    private init() {}
+
+    func present(host: TrapTubeHostTab?) {
+        DispatchQueue.main.async {
+            self.activeRequest = TrapTubeWebEQRequest(host: host ?? .you)
+        }
+    }
+
+    func updateStatus(host: TrapTubeHostTab?, body: [String: Any]) {
+        guard let host else { return }
+        var status = TrapTubeWebEQStatus()
+        status.state = body["state"] as? String ?? "unknown"
+        status.level = (body["level"] as? NSNumber)?.doubleValue ?? 0
+        status.message = body["message"] as? String ?? ""
+        DispatchQueue.main.async { self.statuses[host] = status }
+    }
+}
+
+/// The stream EQ's settings (page-graph model mirrors the TypeType
+/// watch sheet's WebAudio graph: 16 peaking bands, a 90 Hz lowshelf
+/// for bass, and a master gain with boost headroom compensation).
+final class TrapTubeWebEQ: ObservableObject {
+    static let shared = TrapTubeWebEQ()
+    static let frequencies = [32, 64, 125, 250, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 10000, 12000, 16000]
+
+    @Published var enabled: Bool { didSet { persist(); TrapTubePlayerSession.shared.applyWebEQToAll() } }
+    @Published var gains: [Double] { didSet { persist(); TrapTubePlayerSession.shared.applyWebEQToAll() } }
+    @Published var bass: Double { didSet { persist(); TrapTubePlayerSession.shared.applyWebEQToAll() } }
+    @Published var master: Double { didSet { persist(); TrapTubePlayerSession.shared.applyWebEQToAll() } }
+    @Published var presetName: String { didSet { persist() } }
+
+    private init() {
+        let defaults = UserDefaults.standard
+        enabled = defaults.object(forKey: "TrapTube.WebEQ.Enabled") as? Bool ?? true
+        let raw = defaults.array(forKey: "TrapTube.WebEQ.Gains") ?? []
+        let parsed = raw.compactMap { ($0 as? NSNumber)?.doubleValue }
+        gains = parsed.count == 16 ? parsed : [Double](repeating: 0, count: 16)
+        bass = defaults.object(forKey: "TrapTube.WebEQ.Bass") as? Double ?? 0
+        master = defaults.object(forKey: "TrapTube.WebEQ.Master") as? Double ?? 1
+        presetName = defaults.string(forKey: "TrapTube.WebEQ.Preset") ?? "Flat"
+    }
+
+    private func persist() {
+        let defaults = UserDefaults.standard
+        defaults.set(enabled, forKey: "TrapTube.WebEQ.Enabled")
+        defaults.set(gains, forKey: "TrapTube.WebEQ.Gains")
+        defaults.set(bass, forKey: "TrapTube.WebEQ.Bass")
+        defaults.set(master, forKey: "TrapTube.WebEQ.Master")
+        defaults.set(presetName, forKey: "TrapTube.WebEQ.Preset")
+    }
+
+    var settingsJSON: String {
+        let payload: [String: Any] = ["enabled": enabled, "gains": gains, "bass": bass, "master": master]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
+    }
+
+    func setBand(_ index: Int, _ value: Double) {
+        guard gains.indices.contains(index) else { return }
+        var next = gains
+        next[index] = min(12, max(-12, value))
+        gains = next
+        if presetName != "Custom" { presetName = "Custom" }
+    }
+
+    func applyPreset(_ preset: TrapTubeWebEQPreset) {
+        gains = preset.gains
+        bass = preset.bass
+        master = preset.master
+        presetName = preset.name
+    }
+}
+
+struct TrapTubeWebEQPreset: Identifiable {
+    let name: String
+    let gains: [Double]
+    let bass: Double
+    let master: Double
+    var id: String { name }
+
+    static let all: [TrapTubeWebEQPreset] = [
+        TrapTubeWebEQPreset(name: "Trap", gains: [7, 6, 4, 1, -1, -1, 0, 1, 2, 2, 3, 3, 4, 4, 3, 2], bass: 8, master: 1.05),
+        TrapTubeWebEQPreset(name: "Drill", gains: [8, 7, 5, 2, 0, -2, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3], bass: 10, master: 1.05),
+        TrapTubeWebEQPreset(name: "Hip-Hop", gains: [5, 5, 4, 2, 1, 0, 1, 2, 3, 3, 2, 2, 2, 1, 0, 0], bass: 6, master: 1.05),
+        TrapTubeWebEQPreset(name: "Bass", gains: [10, 9, 7, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], bass: 14, master: 0.95),
+        TrapTubeWebEQPreset(name: "Clarity", gains: [-2, -2, -1, -3, -2, 0, 1, 2, 3, 4, 4, 3, 3, 4, 4, 5], bass: 2, master: 1.10),
+        TrapTubeWebEQPreset(name: "Flat", gains: [Double](repeating: 0, count: 16), bass: 0, master: 1.0)
+    ]
+}
+
+enum TrapTubeStreamingQuality {
+    static var cap: Int { UserDefaults.standard.integer(forKey: "TrapTube.Streaming.MaxQuality") }
+    static let presets: [(label: String, value: Int)] = [
+        ("Auto", 0), ("2160p", 2160), ("1440p", 1440), ("1080p", 1080), ("720p", 720),
+        ("480p", 480), ("360p", 360), ("240p", 240), ("144p", 144)
+    ]
+
+    static func label(for value: Int) -> String {
+        presets.first { $0.value == value }?.label ?? "Auto"
+    }
+
+    static func withinCap(_ height: Int) -> Bool {
+        cap == 0 || height <= cap
+    }
+}
+
+/// Page-side WebAudio graph for youtube.com watch pages, injected into
+/// both watch web views. Same parameter model as the TypeType watch
+/// sheet's graph. The graph reports its REAL state back: the sheet's
+/// "signal flowing" badge is driven by the analyser, and a stream
+/// whose audio comes out of the graph silent while clearly playing
+/// (the CORS-zeroed case) is auto-bypassed so playback is never muted
+/// by the EQ, and reported honestly.
+enum TrapTubeWebEQInstaller {
+    static var scriptSource: String {
+        #"""
+        (() => {
+          if (window.__trapTubeWebEQInstalled) return;
+          window.__trapTubeWebEQInstalled = true;
+          var HZ = [32, 64, 125, 250, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 10000, 12000, 16000];
+          var settings = \#(TrapTubeWebEQ.shared.settingsJSON);
+          var ctx = null, source = null, filters = [], shelf = null, masterNode = null, analyser = null;
+          var video = null, bypassed = false, silentChecks = 0, lastLevel = 0;
+          function post(payload) {
+            try {
+              var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.trapTubeEQ;
+              if (h) h.postMessage(payload);
+            } catch (e) {}
+          }
+          function applySettings() {
+            if (!ctx || !filters.length) return;
+            var t = ctx.currentTime;
+            var i, g;
+            for (i = 0; i < HZ.length; i++) {
+              g = settings.enabled ? Number(settings.gains[i] || 0) : 0;
+              filters[i].gain.setTargetAtTime(g, t, 0.03);
+            }
+            if (shelf) shelf.gain.setTargetAtTime(settings.enabled ? Number(settings.bass || 0) : 0, t, 0.03);
+            if (masterNode) {
+              var peak = 0;
+              for (i = 0; i < HZ.length; i++) peak = Math.max(peak, Number(settings.gains[i] || 0));
+              if (settings.enabled) peak += Number(settings.bass || 0); else peak = 0;
+              var head = -Math.min(18, Math.max(0, peak) * 0.5);
+              var m = settings.enabled ? Math.max(0, Math.min(2, Number(settings.master == null ? 1 : settings.master))) : 1;
+              masterNode.gain.setTargetAtTime(m * Math.pow(10, head / 20), t, 0.03);
+            }
+          }
+          window.__traptubeWebSetEQ = function (v) { if (v) settings = v; applySettings(); report(); };
+          function measure() {
+            if (!analyser) return 0;
+            var data = new Uint8Array(analyser.fftSize);
+            analyser.getByteTimeDomainData(data);
+            var sum = 0, d;
+            for (var i = 0; i < data.length; i++) { d = (data[i] - 128) / 128; sum += d * d; }
+            return Math.sqrt(sum / data.length);
+          }
+          function currentState() {
+            if (!video) return { state: "noelement", level: 0, message: "No video element on this page yet." };
+            if (bypassed) return { state: "bypassed", level: 0, message: "This stream's audio is served in a way WebAudio cannot process (no CORS access), so it is playing unprocessed." };
+            if (!ctx || !source) return { state: "noelement", level: 0, message: "The EQ graph has not been built yet." };
+            if (ctx.state !== "running") return { state: "suspended", level: 0, message: "The audio path is paused - press play in the player to start the EQ." };
+            if (lastLevel > 0.004) return { state: "flowing", level: lastLevel, message: "" };
+            return { state: "attached", level: lastLevel, message: "The EQ is attached - waiting for audible signal (the video may be paused or in a quiet passage)." };
+          }
+          function report() {
+            var s = currentState();
+            post({ type: "eqStatus", state: s.state, level: s.level, message: s.message });
+          }
+          window.__traptubeWebEQReport = report;
+          function bypass() {
+            try {
+              if (source && ctx) {
+                try { source.disconnect(); } catch (e) {}
+                source.connect(ctx.destination);
+              }
+            } catch (e) {}
+            bypassed = true;
+            report();
+          }
+          function attach() {
+            var candidate = document.querySelector("#movie_player video") || document.querySelector("video.html5-main-video") || document.querySelector("video");
+            if (!candidate) { video = null; return; }
+            if (candidate === video) return;
+            video = candidate;
+            bypassed = false;
+            silentChecks = 0;
+            lastLevel = 0;
+            try {
+              var AC = window.AudioContext || window.webkitAudioContext;
+              if (!AC) {
+                post({ type: "eqStatus", state: "error", level: 0, message: "Web Audio is unavailable in this runtime." });
+                return;
+              }
+              if (!ctx) ctx = new AC();
+              if (video.__ttEQSource) {
+                source = video.__ttEQSource;
+                filters = video.__ttEQFilters || [];
+                shelf = video.__ttEQShelf || null;
+                masterNode = video.__ttEQMaster || null;
+                analyser = video.__ttEQAnalyser || null;
+              } else {
+                source = ctx.createMediaElementSource(video);
+                filters = HZ.map(function (f) {
+                  var n = ctx.createBiquadFilter();
+                  n.type = "peaking";
+                  n.frequency.value = f;
+                  n.Q.value = 1.15;
+                  n.gain.value = 0;
+                  return n;
+                });
+                shelf = ctx.createBiquadFilter();
+                shelf.type = "lowshelf";
+                shelf.frequency.value = 90;
+                shelf.Q.value = 0.7;
+                shelf.gain.value = 0;
+                masterNode = ctx.createGain();
+                masterNode.gain.value = 1;
+                analyser = ctx.createAnalyser();
+                analyser.fftSize = 512;
+                var node = source;
+                filters.forEach(function (n) { node.connect(n); node = n; });
+                node.connect(shelf);
+                shelf.connect(masterNode);
+                masterNode.connect(analyser);
+                analyser.connect(ctx.destination);
+                video.__ttEQSource = source;
+                video.__ttEQFilters = filters;
+                video.__ttEQShelf = shelf;
+                video.__ttEQMaster = masterNode;
+                video.__ttEQAnalyser = analyser;
+              }
+              var resume = function () {
+                if (ctx && ctx.state !== "running") {
+                  ctx.resume().then(function () { report(); }).catch(function () { report(); });
+                }
+              };
+              video.addEventListener("play", resume);
+              video.addEventListener("playing", resume);
+              if (ctx.state !== "running") ctx.resume().catch(function () {});
+              applySettings();
+              report();
+            } catch (e) {
+              post({ type: "eqStatus", state: "error", level: 0, message: "EQ attach failed: " + (e && e.message ? e.message : String(e)) });
+            }
+          }
+          function monitor() {
+            attach();
+            if (ctx && source && !bypassed && video) {
+              lastLevel = measure();
+              var audible = !video.paused && !video.ended && !video.muted && video.volume > 0 && video.readyState > 2;
+              if (ctx.state === "running" && audible && lastLevel < 0.0025) {
+                silentChecks += 1;
+                if (silentChecks >= 6) bypass();
+              } else if (lastLevel >= 0.0025) {
+                silentChecks = 0;
+              }
+            }
+            report();
+          }
+          document.addEventListener("pointerdown", function () {
+            if (ctx && ctx.state !== "running") ctx.resume().catch(function () {});
+          }, true);
+          document.addEventListener("yt-navigate-finish", function () { setTimeout(monitor, 120); });
+          try {
+            new MutationObserver(function () { attach(); }).observe(document.documentElement, { childList: true, subtree: true });
+          } catch (e) {}
+          setInterval(monitor, 1500);
+          monitor();
+        })()
+        """#
+    }
+}
+
+/// Page-world quality cap: reaches the page's own movie_player object
+/// (only possible from the page content world) and pins every new
+/// stream to the Settings preset via setPlaybackQualityRange.
+enum TrapTubeQualityInstaller {
+    static var scriptSource: String {
+        #"""
+        (() => {
+          if (window.__trapTubeQualityInstalled) return;
+          window.__trapTubeQualityInstalled = true;
+          var cap = \#(TrapTubeStreamingQuality.cap);
+          var LABELS = { 2160: "hd2160", 1440: "hd1440", 1080: "hd1080", 720: "hd720", 480: "large", 360: "medium", 240: "small", 144: "tiny" };
+          function applyQuality() {
+            try {
+              if (!cap) return;
+              var label = LABELS[cap];
+              if (!label) return;
+              var p = document.querySelector("#movie_player");
+              if (!p) return;
+              if (p.setPlaybackQualityRange) p.setPlaybackQualityRange("tiny", label);
+              if (p.setPlaybackQuality) p.setPlaybackQuality(label);
+            } catch (e) {}
+          }
+          window.__trapTubeSetQualityCap = function (c) { cap = Number(c) || 0; applyQuality(); };
+          document.addEventListener("yt-navigate-finish", function () {
+            setTimeout(applyQuality, 400);
+            setTimeout(applyQuality, 1800);
+          });
+          document.addEventListener("yt-player-updated", function () { setTimeout(applyQuality, 400); });
+          document.addEventListener("playing", function () { setTimeout(applyQuality, 600); }, true);
+          setInterval(applyQuality, 6000);
+          setTimeout(applyQuality, 800);
+        })()
+        """#
+    }
+}
+
+/// Hosts the session's web view inside the mini player. Re-parenting
+/// is plain UIKit addSubview: whichever container asks last (the host
+/// tab's representable or this slot) holds the view.
+final class TrapTubeWebContainerView: UIView {
+    private weak var attachedView: WKWebView?
+
+    func attach(host: TrapTubeHostTab) {
+        guard let view = TrapTubePlayerSession.shared.webViewIfExists(for: host) else { return }
+        if attachedView === view {
+            view.frame = bounds
+            return
+        }
+        detach()
+        attachedView = view
+        addSubview(view)
+        view.frame = bounds
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    }
+
+    func detach() {
+        if let view = attachedView, view.superview === self {
+            view.removeFromSuperview()
+        }
+        attachedView = nil
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        attachedView?.frame = bounds
+    }
+}
+
+struct TrapTubeWebSlotView: UIViewRepresentable {
+    let host: TrapTubeHostTab
+
+    func makeUIView(context: Context) -> TrapTubeWebContainerView {
+        let container = TrapTubeWebContainerView()
+        container.backgroundColor = .black
+        container.attach(host: host)
+        return container
+    }
+
+    func updateUIView(_ uiView: TrapTubeWebContainerView, context: Context) {
+        uiView.attach(host: host)
+    }
+
+    static func dismantleUIView(_ uiView: TrapTubeWebContainerView, coordinator: ()) {
+        uiView.detach()
+    }
+}
+
+struct TrapTubeWebMiniPlayerBar: View {
+    let host: TrapTubeHostTab
+    let onReturn: () -> Void
+    @ObservedObject private var session = TrapTubePlayerSession.shared
+    @EnvironmentObject private var theme: ThemeManager
+
+    var body: some View {
+        HStack(spacing: 10) {
+            TrapTubeWebSlotView(host: host)
+                .frame(width: 104, height: 58)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.white.opacity(0.14), lineWidth: 1))
+                .onTapGesture { onReturn() }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.watchTitle.isEmpty ? "YouTube video" : session.watchTitle)
+                    .font(.caption.bold()).foregroundStyle(.white).lineLimit(2)
+                Text(host == .home ? "Playing from Home" : "Playing from You")
+                    .font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { onReturn() }
+            Button {
+                session.togglePlay()
+            } label: {
+                Image(systemName: session.watchIsPlaying ? "pause.fill" : "play.fill")
+                    .font(.title3.bold()).foregroundStyle(.white)
+                    .frame(width: 38, height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(session.watchIsPlaying ? "Pause" : "Play")
+            Button {
+                session.closeMini()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.subheadline.bold()).foregroundStyle(Color(hex: "A6A4A6"))
+                    .frame(width: 34, height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close mini player")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(theme.oledEnabled ? Color.black : Color(hex: "141315"))
+        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.09)).frame(height: 1) }
+    }
+}
+
+struct TrapTubeWebEQSheet: View {
+    let host: TrapTubeHostTab
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var eq = TrapTubeWebEQ.shared
+    @ObservedObject private var center = TrapTubeWebEQCenter.shared
+
+    private var status: TrapTubeWebEQStatus? { center.statuses[host] }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    statusBanner
+                    Toggle(isOn: $eq.enabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Stream EQ").font(.headline).foregroundStyle(.white)
+                            Text("Processes the live YouTube stream in the page - the same band layout as the Stem Studio EQ graph. Changes apply live.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }
+                    .tint(theme.accent)
+                    presetRow
+                    bandSliders
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Bass").font(.caption.bold()).foregroundStyle(Color(hex: "D8D5D8"))
+                            Slider(value: $eq.bass, in: 0...20, step: 1).tint(theme.accent)
+                            Text("+\(Int(eq.bass)) dB").font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Master").font(.caption.bold()).foregroundStyle(Color(hex: "D8D5D8"))
+                            Slider(value: $eq.master, in: 0...2, step: 0.01).tint(theme.accent)
+                            Text("\(Int(eq.master * 100))%").font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }
+                    Text("The badge above only turns green when the analyser actually measures your audio passing through the EQ. If a stream is served in a way WebAudio cannot tap, the sheet says so and playback continues unprocessed instead of going silent.")
+                        .font(.caption2).foregroundStyle(Color(hex: "77747A"))
+                }
+                .padding(20)
+            }
+            .background(theme.background.ignoresSafeArea())
+            .navigationTitle("Stream EQ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.foregroundStyle(theme.accent)
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .onAppear { TrapTubePlayerSession.shared.requestEQStatus(for: host) }
+    }
+
+    private var statusBanner: some View {
+        let state = status?.state ?? "unknown"
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: bannerIcon(state))
+                .font(.headline)
+                .foregroundStyle(bannerColor(state))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(bannerTitle(state)).font(.subheadline.bold()).foregroundStyle(.white)
+                Text(bannerDetail(state)).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+                if state == "flowing", let level = status?.level {
+                    ProgressView(value: min(1, level * 6)).tint(.green)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func bannerIcon(_ state: String) -> String {
+        switch state {
+        case "flowing": return "checkmark.circle.fill"
+        case "attached": return "waveform.circle.fill"
+        case "suspended": return "pause.circle.fill"
+        case "bypassed": return "exclamationmark.triangle.fill"
+        case "error": return "xmark.octagon.fill"
+        default: return "waveform.circle"
+        }
+    }
+
+    private func bannerColor(_ state: String) -> Color {
+        switch state {
+        case "flowing": return .green
+        case "attached": return theme.accent
+        case "bypassed": return .orange
+        case "error": return .red
+        default: return Color(hex: "A6A4A6")
+        }
+    }
+
+    private func bannerTitle(_ state: String) -> String {
+        switch state {
+        case "flowing": return "EQ attached - signal flowing"
+        case "attached": return "EQ attached - waiting for audio"
+        case "suspended": return "EQ path paused"
+        case "noelement": return "No video on this page yet"
+        case "bypassed": return "This stream can't be EQ'd in the browser"
+        case "error": return "EQ attach failed"
+        default: return "Checking the EQ path..."
+        }
+    }
+
+    private func bannerDetail(_ state: String) -> String {
+        if let message = status?.message, !message.isEmpty { return message }
+        switch state {
+        case "flowing": return "The analyser is measuring live audio through the EQ bands right now."
+        case "attached": return "Press play in the player - the badge turns green once sound is flowing."
+        case "suspended": return "Press play in the player to start the audio path."
+        case "noelement": return "Open a video in this tab, then reopen this sheet."
+        default: return "Open a video in this tab, then check again."
+        }
+    }
+
+    private var presetRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(TrapTubeWebEQPreset.all) { preset in
+                    Button {
+                        eq.applyPreset(preset)
+                    } label: {
+                        Text(preset.name)
+                            .font(.caption.bold())
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(eq.presetName == preset.name ? theme.accent : Color.white.opacity(0.08), in: Capsule())
+                            .foregroundStyle(eq.presetName == preset.name ? .white : Color(hex: "D8D5D8"))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var bandSliders: some View {
+        VStack(spacing: 10) {
+            ForEach(0..<16, id: \.self) { index in
+                HStack(spacing: 10) {
+                    Text(frequencyLabel(TrapTubeWebEQ.frequencies[index]))
+                        .font(.caption2.bold()).foregroundStyle(Color(hex: "A6A4A6"))
+                        .frame(width: 36, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { eq.gains[index] },
+                        set: { eq.setBand(index, $0) }
+                    ), in: -12...12, step: 0.5)
+                    .tint(theme.accent)
+                    Text(String(format: "%+.0f", eq.gains[index]))
+                        .font(.caption2.bold()).foregroundStyle(.white)
+                        .frame(width: 30, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    private func frequencyLabel(_ hz: Int) -> String {
+        hz >= 1000 ? "\(hz / 1000)k" : "\(hz)"
+    }
+}
+'''
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+if "struct TrapTubeWebEQSheet" not in s:
+    s = s.rstrip("\n") + "\n" + ROUND3_SWIFT
+    p.write_text(s)
+
+# --- Item 5: OLED dark mode. ThemeManager gains the persisted switch;
+# ThemeManager.background returns true black while it is on.
+p = file("ThemeManager.swift")
+s = p.read_text()
+s = rep(s, "    @Published private(set) var backgroundHex = \"080809\"\n",
+        "    @Published private(set) var backgroundHex = \"080809\"\n    @Published var oledEnabled = false { didSet { UserDefaults.standard.set(oledEnabled, forKey: \"TrapTube.Theme.OLED\") } }\n",
+        "theme OLED flag")
+s = rep(s, "    init() {\n        let defaults = UserDefaults.standard\n",
+        "    init() {\n        let defaults = UserDefaults.standard\n        oledEnabled = defaults.bool(forKey: \"TrapTube.Theme.OLED\")\n",
+        "theme OLED init")
+s = rep(s, "    var background: Color { Color(hex: backgroundHex) }",
+        "    var background: Color { oledEnabled ? .black : Color(hex: backgroundHex) }",
+        "theme background OLED")
+p.write_text(s)
+
+# --- Item 5 + 4: Settings - the connection-check button becomes the
+# OLED toggle; the static streaming-quality card becomes a real menu.
+p = file("SettingsView.swift")
+s = p.read_text()
+s = rep(s, "    @State private var connectionStatus: String?\n    @State private var checkingConnection = false\n",
+        "    // Round 3: the TypeType connection check is gone; the OLED dark mode toggle lives in its card.\n",
+        "settings remove connection states")
+s = rep(s, """                    Button {
+                        checkingConnection = true; connectionStatus = nil
+                        Task {
+                            defer { checkingConnection = false }
+                            do { connectionStatus = try await TypeTypeService().checkHealth() }
+                            catch { connectionStatus = error.localizedDescription }
+                        }
+                    } label: {
+                        Label(checkingConnection ? "Checking\u2026" : "Check TypeType connection", systemImage: "network")
+                            .font(.subheadline.bold()).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 12)
+                            .background(theme.accent, in: Capsule())
+                    }
+                    .disabled(checkingConnection)
+                    if let connectionStatus {
+                        Text(connectionStatus).font(.caption).foregroundStyle(connectionStatus.hasPrefix("Connected") ? Color.green : Color(hex: "FF7A84"))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }""",
+        """                    Toggle(isOn: $theme.oledEnabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("OLED Dark Mode").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Pure black backgrounds - saves battery on OLED screens.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }
+                    .tint(theme.accent)""",
+        "settings OLED toggle replaces connection check")
+s = rep(s, "    @AppStorage(\"settings.shareDiagnostics\") private var shareDiagnostics = false\n",
+        "    @AppStorage(\"settings.shareDiagnostics\") private var shareDiagnostics = false\n    @AppStorage(\"TrapTube.Streaming.MaxQuality\") private var streamingCap = 0\n",
+        "settings streaming cap storage")
+s = rep(s, """                settingsCard(title: "Streaming quality", icon: "slider.horizontal.3") {
+                    Text("Quality choices are loaded from the active TypeType stream. Open a video and use the in-player Quality menu for available video renditions and the Audio menu for available audio tracks. TrapTube does not display fixed quality levels that the stream does not support.")
+                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                }""",
+        """                settingsCard(title: "Streaming quality", icon: "slider.horizontal.3") {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Maximum quality").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Caps every new stream in Home and You, and the download sheet's default pick.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        Picker("Maximum quality", selection: $streamingCap) {
+                            ForEach(TrapTubeStreamingQuality.presets.map { $0.value }, id: \\.self) { value in
+                                Text(TrapTubeStreamingQuality.label(for: value)).tag(value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(theme.accent)
+                        .onChange(of: streamingCap) { _, _ in
+                            TrapTubePlayerSession.shared.applyQualityCapToAll()
+                        }
+                    }
+                }""",
+        "settings streaming quality menu")
+# The theme picker's and the Customize sheet's hardcoded near-black
+# backgrounds follow the OLED switch via ThemeManager.background.
+s = rep_all(s, ".background(Color(hex: \"080809\").ignoresSafeArea())",
+            ".background(theme.background.ignoresSafeArea())", "settings surfaces OLED")
+p.write_text(s)
+
+# --- Item 2 + 5: RootView observes the session, hosts the mini player
+# above the tab bar, and its bottom inset follows OLED.
+p = file("RootView.swift")
+s = p.read_text()
+s = rep(s, "    @State private var showSplash = true\n",
+        "    @State private var showSplash = true\n    @ObservedObject private var webSession = TrapTubePlayerSession.shared\n",
+        "root session wiring")
+s = rep(s, """                MiniPlayer { showPlayer = true }
+                    .environmentObject(player).environmentObject(theme)""",
+        """                if let host = webSession.watchHost,
+                   (host == .home && selectedTab != .home) || (host == .you && selectedTab != .you) {
+                    TrapTubeWebMiniPlayerBar(host: host) { selectedTab = host == .home ? .home : .you }
+                        .environmentObject(theme)
+                }
+                MiniPlayer { showPlayer = true }
+                    .environmentObject(player).environmentObject(theme)""",
+        "root mini player bar")
+s = rep(s, """            .padding(.bottom, 0)
+            .background(.ultraThinMaterial)
+        }""",
+        """            .padding(.bottom, 0)
+            .background {
+                if theme.oledEnabled {
+                    Color.black
+                } else {
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+            }
+        }""", "root inset OLED")
+p.write_text(s)
+
+# --- Item 5: the tab bar itself follows OLED.
+p = file("Components.swift")
+s = p.read_text()
+s = rep(s, """        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)""",
+        """        .padding(.vertical, 6)
+        .background {
+            if theme.oledEnabled {
+                Color.black
+            } else {
+                Rectangle().fill(.ultraThinMaterial)
+            }
+        }""", "tab bar OLED")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
