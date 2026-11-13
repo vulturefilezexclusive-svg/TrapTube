@@ -1671,4 +1671,396 @@ if "struct TrapTubeModSheet" not in s:
     s += MOD_MENU_SWIFT
 p.write_text(s)
 
+
+# ---------------------------------------------------------------------------
+# Theme picker (phase 2): HSV components on ThemeManager, a Theme Color
+# picker in Settings, and Home header accents rerouted to the live theme.
+# ---------------------------------------------------------------------------
+
+THEME_PICKER_SWIFT = r'''
+
+// MARK: - Theme color picker (HSV wheel + component sliders + presets)
+// Added by ApplyHybridNavigation.py (theme phase). Reads and writes the
+// shared ThemeManager components, persisted under TrapTube.Theme.*.
+
+struct TrapTubeThemePickerView: View {
+    @EnvironmentObject private var theme: ThemeManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var copiedHex = false
+
+    private struct ThemePreset: Identifiable {
+        let name: String
+        let hex: String
+        var id: String { hex }
+    }
+
+    private static let presets: [ThemePreset] = [
+        ThemePreset(name: "TrapTube Red", hex: "E50920"),
+        ThemePreset(name: "Crimson", hex: "DC143C"),
+        ThemePreset(name: "Purple", hex: "7C3AED"),
+        ThemePreset(name: "Royal Blue", hex: "4169E1"),
+        ThemePreset(name: "Teal", hex: "14B8A6"),
+        ThemePreset(name: "Emerald", hex: "10B981"),
+        ThemePreset(name: "Orange", hex: "F97316"),
+        ThemePreset(name: "Gold", hex: "D4AF37"),
+        ThemePreset(name: "Hot Pink", hex: "FF69B4"),
+        ThemePreset(name: "Violet", hex: "8B5CF6"),
+        ThemePreset(name: "Mono White", hex: "F4F4F5")
+    ]
+
+    private static var hueColors: [Color] {
+        (0...6).map { Color(hue: Double($0) / 6.0, saturation: 1, brightness: 1) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 22) {
+                    wheel
+                    previewCard
+                    sliderCard
+                    presetsCard
+                    Button("Reset to TrapTube Red") { theme.reset() }
+                        .font(.subheadline.bold())
+                        .foregroundStyle(theme.accentSolid)
+                    Text("The accent color and its opacity drive the tab bar tint, the Home header accents, the injected mod button, and buttons throughout the app. Changes apply live and are saved automatically.")
+                        .font(.caption)
+                        .foregroundStyle(Color(hex: "A6A4A6"))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+            }
+            .background(Color(hex: "080809").ignoresSafeArea())
+            .navigationTitle("Theme Color")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                        .tint(theme.accentSolid)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: Wheel (angle = hue, distance from center = saturation)
+
+    private var wheel: some View {
+        let size: CGFloat = 264
+        let radius = Double(size / 2)
+        let thumbDistance = theme.themeSaturation * (radius - 16)
+        let thumbAngle = theme.themeHue * 2 * Double.pi - Double.pi / 2
+        return ZStack {
+            Circle()
+                .fill(AngularGradient(gradient: Gradient(colors: Self.hueColors),
+                                      center: .center,
+                                      startAngle: .degrees(-90),
+                                      endAngle: .degrees(270)))
+            Circle()
+                .fill(RadialGradient(colors: [.white, .white.opacity(0)],
+                                     center: .center, startRadius: 0, endRadius: CGFloat(radius)))
+            Circle()
+                .fill(Color.black.opacity(1 - theme.themeBrightness))
+            Circle()
+                .stroke(.white.opacity(0.14), lineWidth: 1)
+            Circle()
+                .fill(theme.accentSolid)
+                .frame(width: 26, height: 26)
+                .overlay(Circle().stroke(.white, lineWidth: 3))
+                .shadow(color: .black.opacity(0.45), radius: 4, y: 2)
+                .offset(x: CGFloat(cos(thumbAngle) * thumbDistance),
+                        y: CGFloat(sin(thumbAngle) * thumbDistance))
+        }
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let dx = Double(value.location.x) - radius
+                    let dy = Double(value.location.y) - radius
+                    let maxDistance = radius - 16
+                    let distance = min(maxDistance, hypot(dx, dy))
+                    var hue = (atan2(dy, dx) + Double.pi / 2) / (2 * Double.pi)
+                    if hue < 0 { hue += 1 }
+                    theme.applyComponents(hue: hue,
+                                          saturation: distance / maxDistance,
+                                          brightness: theme.themeBrightness,
+                                          opacity: theme.themeOpacity)
+                }
+        )
+        .accessibilityLabel("Color wheel. Drag to change hue and saturation.")
+    }
+
+    // MARK: Preview (resulting color over dark and light, hex + RGB)
+
+    private var previewCard: some View {
+        VStack(spacing: 10) {
+            ZStack {
+                HStack(spacing: 0) {
+                    Color(hex: "0B0B0E")
+                    Color.white
+                }
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(theme.accent)
+                    .frame(width: 132, height: 44)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.25), lineWidth: 1))
+            }
+            .frame(height: 76)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.10), lineWidth: 1))
+
+            HStack(spacing: 10) {
+                Button {
+                    UIPasteboard.general.string = theme.accentHexDisplay
+                    copiedHex = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(theme.accentHexDisplay).font(.headline.monospaced())
+                        Image(systemName: copiedHex ? "checkmark" : "doc.on.doc").font(.caption.bold())
+                    }
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(rgbaText)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(Color(hex: "A6A4A6"))
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.10), lineWidth: 1))
+    }
+
+    private var rgbaText: String {
+        let rgb = TrapTubeHSV.rgb(hue: theme.themeHue, saturation: theme.themeSaturation, brightness: theme.themeBrightness)
+        return "RGB \(rgb.r) \(rgb.g) \(rgb.b) · \(Int((theme.themeOpacity * 100).rounded()))%"
+    }
+
+    // MARK: Component sliders
+
+    private var sliderCard: some View {
+        VStack(spacing: 16) {
+            componentSlider(
+                title: "Saturation",
+                value: theme.themeSaturation,
+                stripColors: [Color(hue: theme.themeHue, saturation: 0, brightness: theme.themeBrightness),
+                              theme.accentSolid]
+            ) { theme.applyComponents(hue: theme.themeHue, saturation: $0, brightness: theme.themeBrightness, opacity: theme.themeOpacity) }
+
+            componentSlider(
+                title: "Brightness",
+                value: theme.themeBrightness,
+                stripColors: [.black, theme.accentSolid]
+            ) { theme.applyComponents(hue: theme.themeHue, saturation: theme.themeSaturation, brightness: $0, opacity: theme.themeOpacity) }
+
+            componentSlider(
+                title: "Opacity",
+                value: theme.themeOpacity,
+                stripColors: [theme.accentSolid.opacity(0), theme.accentSolid]
+            ) { theme.applyComponents(hue: theme.themeHue, saturation: theme.themeSaturation, brightness: theme.themeBrightness, opacity: $0) }
+        }
+        .padding(16)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.10), lineWidth: 1))
+    }
+
+    private func componentSlider(title: String, value: Double, stripColors: [Color],
+                                 onChange: @escaping (Double) -> Void) -> some View {
+        VStack(spacing: 7) {
+            HStack {
+                Text(title).font(.subheadline.bold()).foregroundStyle(.white)
+                Spacer()
+                Text("\(Int((value * 100).rounded()))%")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(Color(hex: "D2D0D2"))
+            }
+            RoundedRectangle(cornerRadius: 4)
+                .fill(LinearGradient(colors: stripColors, startPoint: .leading, endPoint: .trailing))
+                .frame(height: 8)
+            Slider(value: Binding(get: { value }, set: onChange), in: 0...1)
+                .tint(theme.accentSolid)
+        }
+    }
+
+    // MARK: Presets
+
+    private var presetsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Preset themes").font(.headline.bold()).foregroundStyle(.white)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 12)], spacing: 14) {
+                ForEach(Self.presets) { preset in
+                    Button {
+                        let hsv = TrapTubeHSV.hsv(fromHex: preset.hex)
+                        theme.applyComponents(hue: hsv.hue, saturation: hsv.saturation,
+                                              brightness: hsv.brightness, opacity: 1)
+                    } label: {
+                        VStack(spacing: 7) {
+                            Circle()
+                                .fill(Color(hex: preset.hex))
+                                .frame(width: 42, height: 42)
+                                .overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 1))
+                            Text(preset.name)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(theme.accentHex == preset.hex ? .white.opacity(0.10) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 13))
+                        .overlay(RoundedRectangle(cornerRadius: 13)
+                            .stroke(theme.accentHex == preset.hex ? theme.accentSolid : .white.opacity(0.07), lineWidth: 1))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(preset.name) theme")
+                }
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.10), lineWidth: 1))
+    }
+}
+'''
+
+def rep_all(source, old, new, label):
+    n = source.count(old)
+    if n == 0:
+        if new in source:
+            return source
+        raise SystemExit(f"Missing expected pattern: {label}")
+    return source.replace(old, new)
+
+# ThemeManager.swift: HSV component state (TrapTube.Theme.*), persisted.
+p = file("ThemeManager.swift")
+s = p.read_text()
+if "themeHue" not in s:
+    s = rep(s, """    @Published private(set) var accentHex: String {
+        didSet { UserDefaults.standard.set(accentHex, forKey: "theme.accent") }
+    }
+""", """    @Published private(set) var accentHex: String {
+        didSet { UserDefaults.standard.set(accentHex, forKey: "theme.accent") }
+    }
+
+    /// HSV components of the current accent, persisted under
+    /// TrapTube.Theme.* and edited by the Theme Color picker.
+    @Published private(set) var themeHue: Double
+    @Published private(set) var themeSaturation: Double
+    @Published private(set) var themeBrightness: Double
+    @Published private(set) var themeOpacity: Double
+""", "theme component state")
+    s = rep(s, """    init() {
+        let saved = UserDefaults.standard.string(forKey: "theme.accent") ?? "E50920"
+        accentHex = Self.accents.first(where: { $0.hex == saved })?.hex ?? "E50920"
+    }
+""", """    init() {
+        let defaults = UserDefaults.standard
+        let saved = defaults.string(forKey: "theme.accent") ?? "E50920"
+        let isValidHex = saved.count == 6 && saved.allSatisfy { $0.isHexDigit }
+        accentHex = isValidHex ? saved.uppercased() : "E50920"
+        if defaults.object(forKey: "TrapTube.Theme.Hue") != nil {
+            themeHue = defaults.double(forKey: "TrapTube.Theme.Hue")
+            themeSaturation = defaults.double(forKey: "TrapTube.Theme.Saturation")
+            themeBrightness = defaults.double(forKey: "TrapTube.Theme.Brightness")
+            themeOpacity = defaults.object(forKey: "TrapTube.Theme.Opacity") != nil
+                ? defaults.double(forKey: "TrapTube.Theme.Opacity") : 1
+            accentHex = TrapTubeHSV.hex(hue: themeHue, saturation: themeSaturation, brightness: themeBrightness)
+            defaults.set(accentHex, forKey: "theme.accent")
+        } else {
+            let hsv = TrapTubeHSV.hsv(fromHex: accentHex)
+            themeHue = hsv.hue
+            themeSaturation = hsv.saturation
+            themeBrightness = hsv.brightness
+            themeOpacity = 1
+        }
+    }
+""", "theme init")
+    s = rep(s, "    var accent: Color { Color(hex: accentHex) }",
+    """    var accent: Color {
+        Color(hue: themeHue, saturation: themeSaturation, brightness: themeBrightness, opacity: themeOpacity)
+    }
+    /// Full-opacity accent for text-critical surfaces.
+    var accentSolid: Color { Color(hex: accentHex) }
+    var accentHexDisplay: String { "#" + accentHex }""", "theme accent accessors")
+    s = rep(s, "    var selectedAccent: AccentOption { Self.accents.first(where: { $0.hex == accentHex }) ?? Self.accents[0] }",
+            "    var selectedAccent: AccentOption { Self.accents.first(where: { $0.hex == accentHex }) ?? AccentOption(name: \"Custom\", hex: accentHex) }",
+            "theme selected accent")
+    s = rep(s, """    func selectAccent(_ option: AccentOption) { accentHex = option.hex }
+    func reset() { accentHex = "E50920" }""",
+    """    func selectAccent(_ option: AccentOption) {
+        let hsv = TrapTubeHSV.hsv(fromHex: option.hex)
+        applyComponents(hue: hsv.hue, saturation: hsv.saturation, brightness: hsv.brightness, opacity: themeOpacity)
+    }
+
+    /// Single write path for the picker's wheel, sliders, and presets.
+    func applyComponents(hue: Double, saturation: Double, brightness: Double, opacity: Double) {
+        themeHue = min(1, max(0, hue))
+        themeSaturation = min(1, max(0, saturation))
+        themeBrightness = min(1, max(0, brightness))
+        themeOpacity = min(1, max(0, opacity))
+        accentHex = TrapTubeHSV.hex(hue: themeHue, saturation: themeSaturation, brightness: themeBrightness)
+        let defaults = UserDefaults.standard
+        defaults.set(themeHue, forKey: "TrapTube.Theme.Hue")
+        defaults.set(themeSaturation, forKey: "TrapTube.Theme.Saturation")
+        defaults.set(themeBrightness, forKey: "TrapTube.Theme.Brightness")
+        defaults.set(themeOpacity, forKey: "TrapTube.Theme.Opacity")
+    }
+
+    func reset() {
+        let hsv = TrapTubeHSV.hsv(fromHex: "E50920")
+        applyComponents(hue: hsv.hue, saturation: hsv.saturation, brightness: hsv.brightness, opacity: 1)
+    }""", "theme component writes")
+p.write_text(s)
+
+# SettingsView.swift: Appearance card + Theme Color sheet + picker view.
+p = file("SettingsView.swift")
+s = p.read_text()
+if "showThemePicker" not in s:
+    s = rep(s, "import SwiftUI\n\nstruct SettingsView: View {",
+            "import SwiftUI\nimport UIKit\n\nstruct SettingsView: View {", "settings imports")
+    s = rep(s, "    @State private var showCustomization = false\n",
+            "    @State private var showCustomization = false\n    @State private var showThemePicker = false\n",
+            "settings theme picker state")
+    s = rep(s, """        .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player).environmentObject(theme).presentationDetents([.large]) }
+""", """        .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player).environmentObject(theme).presentationDetents([.large]) }
+        .sheet(isPresented: $showThemePicker) { TrapTubeThemePickerView().environmentObject(theme).presentationDetents([.large]).presentationDragIndicator(.visible) }
+""", "settings theme picker sheet")
+    s = rep(s, """                settingsCard(title: "Video discovery", icon: "play.rectangle.fill") {""",
+    """                settingsCard(title: "Appearance", icon: "paintpalette.fill") {
+                    HStack(spacing: 12) {
+                        RoundedRectangle(cornerRadius: 9).fill(theme.accent).frame(width: 34, height: 34)
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.white.opacity(0.16), lineWidth: 1))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Theme Color").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("HSV wheel, sliders, and presets. Current accent: " + theme.accentHexDisplay)
+                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                        Spacer()
+                        Button("Open") { showThemePicker = true }
+                            .font(.subheadline.bold()).foregroundStyle(theme.accentSolid)
+                    }
+                }
+
+                settingsCard(title: "Video discovery", icon: "play.rectangle.fill") {""",
+            "settings appearance card")
+if "struct TrapTubeThemePickerView" not in s:
+    s += THEME_PICKER_SWIFT
+p.write_text(s)
+
+# YouTubeView.swift: Home header accents follow the live theme.
+p = file("YouTubeView.swift")
+s = p.read_text()
+s = rep_all(s, "RadialGradient(colors: [Color(hex: \"A90012\").opacity(0.22), .clear],",
+            "RadialGradient(colors: [theme.accent.opacity(0.22), .clear],", "home backdrop accent")
+s = rep_all(s, ".shadow(color: Color(hex: \"F01D2D\").opacity(0.34), radius: 10, y: 3)",
+            ".shadow(color: theme.accent.opacity(0.34), radius: 10, y: 3)", "home header shadow accent")
+s = rep_all(s, ".tint(Color(hex: \"FF3948\"))", ".tint(theme.accent)", "home tint accent")
+s = rep_all(s, "LinearGradient(colors: [Color(hex: \"FF303B\"), Color(hex: \"A90012\")]",
+            "LinearGradient(colors: [theme.accent, theme.accent.opacity(0.62)]", "home gradient accents")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
