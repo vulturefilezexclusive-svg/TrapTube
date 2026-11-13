@@ -8724,26 +8724,6 @@ enum TrapTubeCrashTrail {
         describeASBD(format.streamDescription.pointee)
     }
 
-    /// The reader track's ACTUAL emitted format description -
-    /// the fact two audit rounds could only guess at.
-    static func describeTrackFormat(_ track: AVAssetTrack) -> String {
-        guard let first = track.formatDescriptions.first else { return "unavailable" }
-        let desc = first as CMFormatDescription
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
-        var layoutTag: UInt32 = 0
-        var layoutSize = 0
-        if let layout = CMAudioFormatDescriptionGetChannelLayout(desc, sizeOut: &layoutSize) {
-            layoutTag = layout.pointee.mChannelLayoutTag
-        }
-        return describeASBD(asbd) + ", layout tag \(layoutTag)"
-    }
-
-    static func trackMatchesCanonical(_ track: AVAssetTrack, canonical: AVAudioFormat) -> Bool {
-        guard let first = track.formatDescriptions.first else { return false }
-        let desc = first as CMFormatDescription
-        return AVAudioFormat(cmAudioFormatDescription: desc) == canonical
-    }
-
     static func describeSampleBufferFormat(_ sampleBuffer: CMSampleBuffer) -> String {
         guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
@@ -8805,8 +8785,8 @@ s = rep(s, r'''        guard let track = try? await asset.loadTracks(withMediaTy
         r'''        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
               let format = streamFormat,
               let newReader = try? AVAssetReader(asset: asset) else { return false }
-        TrapTubeCrashTrail.record("ghost reader created (track fmt: \(TrapTubeCrashTrail.describeTrackFormat(track)))")
-        TrapTubeCrashTrail.record("ghost canonical format (\(TrapTubeCrashTrail.describeAudioFormat(format)); track matches canonical: \(TrapTubeCrashTrail.trackMatchesCanonical(track, canonical: format)))")''',
+        TrapTubeCrashTrail.record("ghost reader created")
+        TrapTubeCrashTrail.record("ghost canonical format (\(TrapTubeCrashTrail.describeAudioFormat(format)))")''',
         "round9 reader created crumb")
 s = rep(s, r'''        guard connectGraph(format: format) else { return false }
         node.stop()
