@@ -92,6 +92,7 @@ account = r'''
 /// YouTube account destination. Uses the default website data store so cookies
 /// and the signed-in YouTube session are shared with the Home tab's WKWebView.
 struct YouTubeAccountView: View {
+    @EnvironmentObject private var theme: ThemeManager
     @State private var isLoading = true
     @ObservedObject private var modCenter = TrapTubeModCenter.shared
     private let accountURL = URL(string: "https://www.youtube.com/feed/you")!
@@ -2553,7 +2554,7 @@ final class TrapTubePlayerSession: ObservableObject {
     func applyQualityCapToAll() {
         let cap = TrapTubeStreamingQuality.cap
         for (_, view) in webViews {
-            view.evaluateJavaScript("window.__trapTubeSetQualityCap && window.__trapTubeSetQualityCap(\(cap))", in: .page) { _ in }
+            view.evaluateJavaScript("window.__trapTubeSetQualityCap && window.__trapTubeSetQualityCap(\(cap))", in: nil, in: WKContentWorld.page, completionHandler: { _, _ in })
         }
     }
 
