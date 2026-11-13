@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, master, feature/native-player-demucs-eq, claude-stem-fix-import]
+    branches: [main, master, feature/native-player-demucs-eq, claude-stem-fix-import, work/hybrid-floot]
     paths:
       - 'ci/source.zip'
       - 'ci/patches/**'
@@ -64,6 +64,7 @@ jobs:
           cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
           python3 ci/patches/KeepImportAction.py work/TrapTube
           python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
+          python3 ci/patches/ApplyHybridNavigation.py work/TrapTube
           python3 - "$COMPONENTS_FILE" <<'PY'
           from pathlib import Path
           import sys
@@ -172,6 +173,7 @@ jobs:
           cp ci/patches/StemStudioView.swift "$VIEWS_DIR/StemStudioView.swift"
           python3 ci/patches/KeepImportAction.py work/TrapTube
           python3 ci/patches/ApplyVisualFeatures.py work/TrapTube
+          python3 ci/patches/ApplyHybridNavigation.py work/TrapTube
           cp ci/patches/HTDemucs-ATTRIBUTION.md "$MODELS_DIR/HTDemucs-ATTRIBUTION.md"
           python3 - "$COMPONENTS_FILE" <<'PY'
           from pathlib import Path
