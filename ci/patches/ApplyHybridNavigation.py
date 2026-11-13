@@ -6173,10 +6173,10 @@ final class TrapTubeNativePlayCenter: ObservableObject {
     /// session is playing. begin() no-ops for the already-loaded
     /// video, so playback continues untouched.
     func reopenSession() {
-        let session = TrapTubeNativeSession.shared
-        guard let entry = session.currentEntry else { return }
-        let request = TrapTubeNativePlayRequest(videoID: entry.videoID, title: entry.title, contextName: session.contextName)
         DispatchQueue.main.async {
+            let session = TrapTubeNativeSession.shared
+            guard let entry = session.currentEntry else { return }
+            let request = TrapTubeNativePlayRequest(videoID: entry.videoID, title: entry.title, contextName: session.contextName)
             self.pendingPresent?.cancel()
             self.activeRequest = request
         }
@@ -6337,7 +6337,7 @@ final class TrapTubePiPHolder: NSObject, AVPictureInPictureControllerDelegate {
         guard isSupported else { return }
         if attachedLayer == layer, controller != nil { return }
         attachedLayer = layer
-        let created = AVPictureInPictureController(playerLayer: layer)
+        guard let created = AVPictureInPictureController(playerLayer: layer) else { return }
         created.delegate = self
         controller = created
     }
@@ -6626,7 +6626,7 @@ final class TrapTubeGhostAudio {
                 guard let output = self.readerOutput else { return }
                 if let sampleBuffer = output.copyNextSampleBuffer() {
                     if let pcm = Self.pcmBuffer(from: sampleBuffer) {
-                        self.node.scheduleBuffer(pcm)
+                        self.node.scheduleBuffer(pcm, completionHandler: nil)
                         self.scheduledFrames += AVAudioFramePosition(pcm.frameLength)
                         self.lastBufferAt = Date()
                     }
