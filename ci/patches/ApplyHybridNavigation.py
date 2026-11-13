@@ -4482,7 +4482,7 @@ ROUND5_START_DOWNLOAD = r'''    private func startDownload(_ info: TrapTubeVideo
         if captionIndex > 0, info.captions.indices.contains(captionIndex - 1) {
             let track = info.captions[captionIndex - 1]
             Task {
-                if let captions = try? await TrapTubeInnerTube.fetchCaptions(track: track) {
+                if let captions = try? await TrapTubeCaptionSaver.fetchText(track, userAgent: info.userAgent) {
                     let fileName = trapTubeSafeFileName(title, ext: "captions.txt")
                     let url = TrapTubeDownloadPaths.downloadsDirectory.appendingPathComponent(fileName)
                     try? captions.write(to: url, atomically: true, encoding: .utf8)
