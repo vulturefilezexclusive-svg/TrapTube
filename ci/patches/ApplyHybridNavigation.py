@@ -3660,4 +3660,1523 @@ s = rep(s, r"""                    Toggle(isOn: $theme.oledEnabled) {
         "settings block ads toggle")
 p.write_text(s)
 
+# =====================================================================
+# Round 5 - on-device fixes from the Round 3 build test (2026-11-13).
+#
+# Item 0 (Round 4 compile fix): build #396 failed with ONE error -
+# generated YouTubeView.swift "assigning non-escaping parameter
+# 'builder' to an '@escaping' closure" - because Round 4 taught
+# TrapTubePlayerSession.webView(for:builder:) to STORE the builder in
+# its builders dictionary (for rebuildWatchWebViews) without marking
+# the parameter @escaping. Fixed below.
+#
+# Item 2 diagnosis (Home header all dead): the header actions were
+# written against a @State copy of the web view captured in
+# makeUIView (created(_:) / pendingURL queue from Round 1). Round 3
+# moved ownership into TrapTubePlayerSession, but the header kept the
+# old pattern: RootView's tab switch recreates YouTubeView (wiping the
+# @State copy back to nil mid-session), and rebuildWatchWebViews()
+# swaps the session's view for a fresh one the @State copy never
+# learns about. So Sign in / refresh / search / chips navigated a
+# detached view - or queued into pendingURL, which was only consumed
+# at creation time and silently dropped. Fix: header actions route
+# through the session, and both hosts become container views that
+# re-attach whatever web view the session currently owns (the pattern
+# the mini player already uses).
+#
+# Item 6 diagnosis (stuck "Loading your YouTube feed..." pill): the
+# pill's isLoading only changed in WKNavigationDelegate callbacks.
+# When YouTubeView is recreated over a live session web view, no new
+# navigation starts, so no callback ever fires and the pill (initial
+# value true) stays forever. Fix: the coordinators observe the web
+# view's real isLoading via KVO (with .initial, so recreation syncs
+# immediately), and each host view force-clears the pill after a 20 s
+# timeout task if a load somehow never reports back.
+#
+# Item 3: the page WebAudio EQ honestly reports it cannot process
+# most YouTube streams (no CORS access). The native route ships here:
+# TrapTubeNativeStreamPlayer resolves the same video with the
+# existing InnerTube resolver and plays it in AVPlayer with
+# TrapTubeTapEQ attached and EqualizerView controls - reachable from
+# the mod sheet's "Play in..." and from the Stream EQ sheet when the
+# page graph reports bypassed/error.
+#
+# Item 4: the resolver now aggregates formats from EVERY client
+# profile (adaptive AVC/VP9/AV1 video-only + AAC/Opus audio-only +
+# muxed), the download sheet lists them all, adaptive picks download
+# with the best paired audio and merge via FFmpegKit (AVC remux,
+# VP9/AV1 transcode to H.264), and audio-only picks always convert
+# to MP3.
+#
+# Item 5: downloaded-file playback hardening - see the
+# AudioEngineManager.swift section below for the vector list.
+# =====================================================================
+
+# --- Item 0 + Items 2/6: YouTubeView.swift session and hosts --------
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+s = rep(s,
+        "    func webView(for host: TrapTubeHostTab, builder: () -> WKWebView) -> WKWebView {",
+        "    func webView(for host: TrapTubeHostTab, builder: @escaping () -> WKWebView) -> WKWebView {",
+        "round5 session builder escaping fix")
+
+s = rep(s, """    func applyQualityCapToAll() {""", """    /// Round 5: header actions (sign-in, refresh, search, category
+    /// chips) route through the session so they always drive the web
+    /// view that is actually on screen.
+    func load(_ url: URL, for host: TrapTubeHostTab) {
+        webViews[host]?.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+    }
+
+    func reload(for host: TrapTubeHostTab) {
+        webViews[host]?.reload()
+    }
+
+    func applyQualityCapToAll() {""",
+        "round5 session load and reload")
+
+# Home header: drop the stale @State web view / pending URL pattern.
+s = rep(s, """struct YouTubeView: View {
+    @EnvironmentObject private var theme: ThemeManager
+    @State private var webView: WKWebView?
+    @State private var pendingURL: URL?
+    @State private var searchText = \"\"""", """struct YouTubeView: View {
+    @EnvironmentObject private var theme: ThemeManager
+    @State private var searchText = \"\"""",
+        "round5 home stale webview state")
+
+s = rep(s, """                    YouTubeHomeWebView(
+                        url: homeURL,
+                        onCreated: { created($0) },
+                        onLoading: { isLoading = $0 }
+                    )""", """                    YouTubeHomeWebView(
+                        url: homeURL,
+                        onLoading: { isLoading = $0 }
+                    )""",
+        "round5 home representable call")
+
+s = rep(s, """        .sheet(item: $homeEQCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+    }""", """        .sheet(item: $homeEQCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+        // Round 5 (item 6): the loading pill is driven by the web
+        // view's real isLoading (KVO in the coordinator); this task
+        // force-clears it if a load ever outlives the timeout
+        // without a finish/fail callback, so it can never linger.
+        .task(id: isLoading) {
+            guard isLoading else { return }
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            if !Task.isCancelled { isLoading = false }
+        }
+    }""",
+        "round5 home pill timeout")
+
+s = rep(s, """            Button { webView?.reload() } label: {""", """            Button {
+                // Round 5: reload the session-owned web view (the one
+                // on screen); the pill lights and KVO/timeout clears it.
+                isLoading = true
+                TrapTubePlayerSession.shared.reload(for: .home)
+            } label: {""",
+        "round5 home reload button")
+
+s = rep(s, """    private func load(_ url: URL) {
+        guard url.host == "www.youtube.com" || url.host == "m.youtube.com" else { return }
+        // If the web view has not been created yet (early tap on Sign in or a
+        // category), queue the navigation instead of silently dropping it.
+        if let webView {
+            webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        } else {
+            pendingURL = url
+        }
+    }
+
+    private func created(_ view: WKWebView) {
+        webView = view
+        if let pendingURL {
+            self.pendingURL = nil
+            view.load(URLRequest(url: pendingURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        }
+    }""", """    private func load(_ url: URL) {
+        guard url.host == "www.youtube.com" || url.host == "m.youtube.com" else { return }
+        // Round 5: route through TrapTubePlayerSession, which owns
+        // the displayed web view for the app's lifetime. The old
+        // version loaded a @State copy of the view (or queued into
+        // pendingURL when the copy was nil); the copy was reset every
+        // time RootView's tab switch recreated this view and went
+        // stale when the session rebuilt its web views, so Sign in,
+        // search and the category chips navigated a detached view -
+        // or nothing at all.
+        isLoading = true
+        TrapTubePlayerSession.shared.load(url, for: .home)
+    }""",
+        "round5 home load routes via session")
+
+p.write_text(s)
+
+# --- Item 2/6 continued: both hosts become session-synced container
+# views (TrapTubeWebContainerView - the same attach pattern the mini
+# player uses), so a session rebuild is reflected on screen, the
+# coordinator is rebound as delegate on the CURRENT web view, and the
+# loading pill follows the view's real isLoading via KVO.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+ROUND5_HOME_HOST = r'''private struct YouTubeHomeWebView: UIViewRepresentable {
+    let url: URL
+    let onLoading: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onLoading: onLoading) }
+
+    /// Builds the session's Home web view. Kept apart from the view
+    /// lifecycle: TrapTubePlayerSession stores this builder and
+    /// re-runs it when the Block Ads toggle rebuilds the watch views.
+    static func buildWebView() -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        TrapTubeModInstaller.install(into: configuration)
+        let created = WKWebView(frame: .zero, configuration: configuration)
+        // Present as mobile Safari: Google refuses to run its sign-in flow
+        // for the default WKWebView user agent ("browser may not be secure").
+        created.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+        created.isOpaque = false
+        created.backgroundColor = .black
+        created.scrollView.backgroundColor = .black
+        created.underPageBackgroundColor = .black
+        // Let the web view use the full safe area so the page header is
+        // not pinned underneath the status bar.
+        created.scrollView.contentInsetAdjustmentBehavior = .automatic
+        created.allowsBackForwardNavigationGestures = true
+        return created
+    }
+
+    /// Returns the session's current Home web view, creating it on
+    /// first use, and (re)binds the coordinator as its navigation
+    /// delegate and loading observer - including after a session
+    /// rebuild swapped in a fresh instance.
+    private func syncSessionView(coordinator: Coordinator) -> WKWebView {
+        let view = TrapTubePlayerSession.shared.webView(for: .home) { Self.buildWebView() }
+        if coordinator.webView !== view {
+            view.navigationDelegate = coordinator
+            coordinator.attach(to: view)
+            if TrapTubePlayerSession.shared.claimInitialLoad(for: .home) {
+                view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+            } else if view.url == nil, !view.isLoading {
+                view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+            }
+        }
+        return view
+    }
+
+    func makeUIView(context: Context) -> TrapTubeWebContainerView {
+        _ = syncSessionView(coordinator: context.coordinator)
+        let container = TrapTubeWebContainerView()
+        container.backgroundColor = .black
+        container.attach(host: .home)
+        return container
+    }
+
+    func updateUIView(_ uiView: TrapTubeWebContainerView, context: Context) {
+        context.coordinator.onLoading = onLoading
+        _ = syncSessionView(coordinator: context.coordinator)
+        uiView.attach(host: .home)
+    }
+
+    static func dismantleUIView(_ uiView: TrapTubeWebContainerView, coordinator: Coordinator) {
+        // The session owns the web view; detaching here lets RootView's
+        // mini player slot take it over while another tab is showing.
+        uiView.detach()
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var onLoading: (Bool) -> Void
+        weak var webView: WKWebView?
+        private var loadingObservation: NSKeyValueObservation?
+
+        init(onLoading: @escaping (Bool) -> Void) { self.onLoading = onLoading }
+
+        /// Round 5 (item 6): the loading pill follows the web view's
+        /// real isLoading via KVO. The .initial option reports the
+        /// current state immediately, so a view recreated over an
+        /// already-loaded page starts with the pill OFF (previously
+        /// the pill only cleared when a brand-new navigation
+        /// finished, which is why it could stick over a loaded feed).
+        func attach(to view: WKWebView) {
+            webView = view
+            loadingObservation?.invalidate()
+            loadingObservation = view.observe(\.isLoading, options: [.initial, .new]) { [weak self] observed, _ in
+                let loading = observed.isLoading
+                DispatchQueue.main.async { self?.onLoading(loading) }
+            }
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(true) }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if TrapTubePlayerSession.shared.handleNavigationAction(navigationAction, webView: webView) {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+    }
+}
+
+'''
+s = splice_between(s,
+                   "private struct YouTubeHomeWebView: UIViewRepresentable {",
+                   "private struct TypeTypeVideoRow: View {",
+                   ROUND5_HOME_HOST, "round5 home host")
+
+ROUND5_ACCOUNT_HOST = r'''private struct YouTubeAccountWebView: UIViewRepresentable {
+    let url: URL
+    let onLoading: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onLoading: onLoading) }
+
+    /// Builds the session's You-tab web view (stored by the session
+    /// and re-run when the watch web views are rebuilt).
+    static func buildWebView() -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        TrapTubeModInstaller.install(into: configuration)
+        let created = WKWebView(frame: .zero, configuration: configuration)
+        // Present as mobile Safari: Google refuses to run its sign-in flow
+        // for the default WKWebView user agent ("browser may not be secure").
+        created.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+        created.isOpaque = false
+        created.backgroundColor = .black
+        created.scrollView.backgroundColor = .black
+        created.underPageBackgroundColor = .black
+        created.scrollView.contentInsetAdjustmentBehavior = .automatic
+        created.allowsBackForwardNavigationGestures = true
+        return created
+    }
+
+    /// Returns the session's current You-tab web view, creating it on
+    /// first use, and (re)binds the coordinator as delegate/observer -
+    /// including after a session rebuild.
+    private func syncSessionView(coordinator: Coordinator) -> WKWebView {
+        let view = TrapTubePlayerSession.shared.webView(for: .you) { Self.buildWebView() }
+        if coordinator.webView !== view {
+            view.navigationDelegate = coordinator
+            coordinator.attach(to: view)
+            if TrapTubePlayerSession.shared.claimInitialLoad(for: .you) {
+                view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+            } else if view.url == nil, !view.isLoading {
+                view.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+            }
+        }
+        return view
+    }
+
+    func makeUIView(context: Context) -> TrapTubeWebContainerView {
+        _ = syncSessionView(coordinator: context.coordinator)
+        let container = TrapTubeWebContainerView()
+        container.backgroundColor = .black
+        container.attach(host: .you)
+        return container
+    }
+
+    func updateUIView(_ uiView: TrapTubeWebContainerView, context: Context) {
+        context.coordinator.onLoading = onLoading
+        _ = syncSessionView(coordinator: context.coordinator)
+        uiView.attach(host: .you)
+    }
+
+    static func dismantleUIView(_ uiView: TrapTubeWebContainerView, coordinator: Coordinator) {
+        // The session owns the web view; detaching here lets RootView's
+        // mini player slot take it over while another tab is showing.
+        uiView.detach()
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var onLoading: (Bool) -> Void
+        weak var webView: WKWebView?
+        private var loadingObservation: NSKeyValueObservation?
+
+        init(onLoading: @escaping (Bool) -> Void) { self.onLoading = onLoading }
+
+        /// Round 5 (item 6): same KVO loading binding as the Home host.
+        func attach(to view: WKWebView) {
+            webView = view
+            loadingObservation?.invalidate()
+            loadingObservation = view.observe(\.isLoading, options: [.initial, .new]) { [weak self] observed, _ in
+                let loading = observed.isLoading
+                DispatchQueue.main.async { self?.onLoading(loading) }
+            }
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(true) }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async { self.onLoading(false) }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if TrapTubePlayerSession.shared.handleNavigationAction(navigationAction, webView: webView) {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+    }
+}
+
+'''
+s = splice_between(s,
+                   "private struct YouTubeAccountWebView: UIViewRepresentable {",
+                   "/// TrapTube tab: the home for in-app downloads.",
+                   ROUND5_ACCOUNT_HOST, "round5 account host")
+
+# The You tab pill gets the same hard-timeout guard as Home.
+s = rep(s, """        .sheet(item: $eqCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+        .preferredColorScheme(.dark)
+    }
+}""", """        .sheet(item: $eqCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+        // Round 5 (item 6): hard timeout so this loading state can
+        // never linger either (it is KVO-driven like Home's).
+        .task(id: isLoading) {
+            guard isLoading else { return }
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            if !Task.isCancelled { isLoading = false }
+        }
+        .preferredColorScheme(.dark)
+    }
+}""",
+        "round5 account pill timeout")
+
+p.write_text(s)
+
+# --- Item 1: Settings cleanup - delete the watch.typetype.video
+# server/connection block entirely; the card keeps the OLED toggle
+# (Round 3) and the Block Ads toggle + counter (Round 4) under a
+# plain "Playback" title.
+p = file("SettingsView.swift")
+s = p.read_text()
+s = rep(s, """                settingsCard(title: "Video discovery", icon: "play.rectangle.fill") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack").foregroundStyle(theme.accent)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("watch.typetype.video").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Native feed and search use the TypeType server.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }""", """                settingsCard(title: "Playback", icon: "play.rectangle.fill") {""",
+        "round5 settings server block removed")
+s = rep(s, "// Round 3: the TypeType connection check is gone; the OLED dark mode toggle lives in its card.",
+        "// Round 5: the TypeType connection/server block is gone entirely; this card keeps the OLED and Block Ads toggles.",
+        "round5 settings comment refresh")
+p.write_text(s)
+
+# --- Item 4 (resolver side): enumerate EVERY format across all
+# InnerTube client profiles - adaptive video-only (AVC/VP9/AV1 at
+# every height), audio-only (AAC + Opus), plus the muxed ones - each
+# remembering which profile (user agent) produced it.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+s = rep(s, """    var audioKbps: Int { Int((Double(bitrate) / 1000).rounded()) }
+}""", """    var audioKbps: Int { Int((Double(bitrate) / 1000).rounded()) }
+
+    // Round 5: filled in by the resolver with the user agent of the
+    // client profile that produced this format (requests for the
+    // stream must carry the same agent).
+    var userAgent: String = ""
+
+    var videoCodecLabel: String {
+        let mime = mimeType.lowercased()
+        if mime.contains("av01") { return "AV1" }
+        if mime.contains("vp09") || mime.contains("vp9") { return "VP9" }
+        if mime.contains("avc1") { return "AVC" }
+        if mime.contains("hvc1") || mime.contains("hev1") { return "HEVC" }
+        return "Video"
+    }
+
+    var audioCodecLabel: String {
+        let mime = mimeType.lowercased()
+        if mime.contains("opus") { return "Opus" }
+        if mime.contains("mp4a") { return "AAC" }
+        return "Audio"
+    }
+
+    var containerLabel: String { mimeType.lowercased().contains("webm") ? "WebM" : "MP4" }
+
+    var isAVCVideo: Bool { hasVideo && mimeType.lowercased().contains("avc1") }
+    var isAACAudio: Bool { !hasVideo && hasAudio && mimeType.lowercased().contains("mp4a") }
+
+    /// File extension matching this stream's real container.
+    var streamFileExtension: String {
+        if mimeType.lowercased().contains("webm") { return "webm" }
+        return hasVideo ? "mp4" : "m4a"
+    }
+}""",
+        "round5 stream format helpers")
+
+s = rep(s, """    let muxed: [TrapTubeStreamFormat]
+    let audioOnly: [TrapTubeStreamFormat]""", """    let muxed: [TrapTubeStreamFormat]
+    let adaptiveVideo: [TrapTubeStreamFormat]
+    let audioOnly: [TrapTubeStreamFormat]""",
+        "round5 video info adaptive")
+
+s = rep(s, """    private static func parseFormats(_ raw: Any?) -> [TrapTubeStreamFormat] {""",
+        """    private static func parseFormats(_ raw: Any?, userAgent: String) -> [TrapTubeStreamFormat] {""",
+        "round5 parseFormats signature")
+s = rep(s, """                hasVideo: isVideo,
+                hasAudio: isAudio || mime.contains("mp4a"))""", """                hasVideo: isVideo,
+                hasAudio: isAudio || mime.contains("mp4a"),
+                userAgent: userAgent)""",
+        "round5 parseFormats userAgent")
+
+ROUND5_FETCH_INFO = r'''    static func fetchInfo(videoID: String) async throws -> TrapTubeVideoInfo {
+        // Round 5: aggregate across EVERY client profile instead of
+        // stopping at the first usable one, so the download sheet and
+        // the native player can offer all formats YouTube returns -
+        // adaptive AVC/VP9/AV1 video-only at every height, AAC and
+        // Opus audio-only at every bitrate, plus the muxed MP4s.
+        // Formats are deduplicated by itag; the first profile that
+        // offers an itag wins and its user agent travels with it.
+        var failures: [String] = []
+        var muxedByItag: [Int: TrapTubeStreamFormat] = [:]
+        var adaptiveVideoByItag: [Int: TrapTubeStreamFormat] = [:]
+        var audioByItag: [Int: TrapTubeStreamFormat] = [:]
+        var title = ""
+        var author = ""
+        var durationSeconds = 0
+        var captions: [TrapTubeCaptionTrack] = []
+        var primaryUserAgent: String?
+
+        for profile in profiles {
+            do {
+                let json = try await playerResponse(videoID: videoID, profile: profile)
+                if let playability = json["playabilityStatus"] as? [String: Any],
+                   let status = playability["status"] as? String, status != "OK" {
+                    let reason = playability["reason"] as? String ?? status
+                    failures.append("\(profile.name): \(reason)")
+                    continue
+                }
+                guard let streaming = json["streamingData"] as? [String: Any] else {
+                    failures.append("\(profile.name): no streaming data in the response")
+                    continue
+                }
+                let details = json["videoDetails"] as? [String: Any]
+                if title.isEmpty {
+                    title = details?["title"] as? String ?? ""
+                    author = details?["author"] as? String ?? ""
+                    durationSeconds = Int(details?["lengthSeconds"] as? String ?? "") ?? 0
+                }
+                if captions.isEmpty { captions = parseCaptions(json) }
+                if primaryUserAgent == nil { primaryUserAgent = profile.userAgent }
+
+                for format in parseFormats(streaming["formats"], userAgent: profile.userAgent)
+                where format.hasVideo && format.hasAudio && format.mimeType.contains("mp4") {
+                    if muxedByItag[format.itag] == nil { muxedByItag[format.itag] = format }
+                }
+                for format in parseFormats(streaming["adaptiveFormats"], userAgent: profile.userAgent) {
+                    if format.hasVideo && !format.hasAudio {
+                        if adaptiveVideoByItag[format.itag] == nil { adaptiveVideoByItag[format.itag] = format }
+                    } else if !format.hasVideo && format.hasAudio {
+                        if audioByItag[format.itag] == nil { audioByItag[format.itag] = format }
+                    } else if format.hasVideo && format.hasAudio && format.mimeType.contains("mp4") {
+                        if muxedByItag[format.itag] == nil { muxedByItag[format.itag] = format }
+                    }
+                }
+            } catch {
+                failures.append("\(profile.name): \(error.localizedDescription)")
+            }
+        }
+
+        let muxed = muxedByItag.values.sorted { ($0.height, $0.bitrate) > ($1.height, $1.bitrate) }
+        let adaptiveVideo = adaptiveVideoByItag.values.sorted { ($0.height, $0.bitrate) > ($1.height, $1.bitrate) }
+        let audioOnly = audioByItag.values.sorted { $0.bitrate > $1.bitrate }
+        guard !muxed.isEmpty || !adaptiveVideo.isEmpty || !audioOnly.isEmpty else {
+            throw TrapTubeModError.unplayable(failures.isEmpty ? "YouTube returned no downloadable streams" : failures.joined(separator: " · "))
+        }
+        return TrapTubeVideoInfo(
+            videoID: videoID,
+            title: title.isEmpty ? "YouTube video" : title,
+            author: author,
+            durationSeconds: durationSeconds,
+            userAgent: primaryUserAgent ?? profiles[0].userAgent,
+            muxed: muxed,
+            adaptiveVideo: adaptiveVideo,
+            audioOnly: audioOnly,
+            captions: captions)
+    }
+'''
+s = splice_function(s,
+                    "    static func fetchInfo(videoID: String) async throws -> TrapTubeVideoInfo {",
+                    ROUND5_FETCH_INFO, "round5 fetchInfo aggregation")
+p.write_text(s)
+
+# --- Item 4 (sheet side): list every format, pair adaptive picks
+# with the best audio, and always convert audio-only picks to MP3.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+s = rep(s, """    @State private var selectedVideoItag: Int?
+    @State private var selectedAudioItag: Int?
+    @State private var audioFormat = "m4a\"""", """    @State private var selectedVideoItag: Int?
+    @State private var selectedAdaptiveItag: Int?
+    @State private var selectedVideoIsAdaptive = false
+    @State private var selectedAudioItag: Int?""",
+        "round5 sheet selection state")
+
+s = rep(s, """    private var selectedFormat: TrapTubeStreamFormat? {
+        guard let info else { return nil }
+        if tab == 0 {
+            return info.muxed.first { $0.itag == selectedVideoItag } ?? info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first
+        }
+        return info.audioOnly.first { $0.itag == selectedAudioItag } ?? info.audioOnly.first
+    }""", """    private var selectedFormat: TrapTubeStreamFormat? {
+        guard let info else { return nil }
+        if tab == 0 {
+            if selectedVideoIsAdaptive {
+                return info.adaptiveVideo.first { $0.itag == selectedAdaptiveItag }
+                    ?? info.adaptiveVideo.first { TrapTubeStreamingQuality.withinCap($0.height) }
+                    ?? info.adaptiveVideo.first
+            }
+            return info.muxed.first { $0.itag == selectedVideoItag } ?? info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first
+        }
+        return info.audioOnly.first { $0.itag == selectedAudioItag } ?? info.audioOnly.first
+    }
+
+    /// The audio stream an adaptive (video-only) download is paired
+    /// with: the best AAC track when there is one (cleanest merge),
+    /// otherwise the best audio track of any codec.
+    private var pairedAudioFormat: TrapTubeStreamFormat? {
+        guard let info else { return nil }
+        return info.audioOnly.first { $0.isAACAudio } ?? info.audioOnly.first
+    }
+
+    private func headerSummary(_ format: TrapTubeStreamFormat, info: TrapTubeVideoInfo) -> String {
+        if tab == 1 {
+            return "\\(format.audioKbps) kbps · \\(format.audioCodecLabel) \\u{2192} MP3 · \\(format.sizeText(durationSeconds: info.durationSeconds))"
+        }
+        if selectedVideoIsAdaptive {
+            let label = format.qualityLabel.isEmpty ? "\\(format.height)p" : format.qualityLabel
+            return "\\(label) · \\(format.videoCodecLabel) + audio · \\(format.sizeText(durationSeconds: info.durationSeconds))"
+        }
+        return "\\(format.qualityLabel) · \\(format.sizeText(durationSeconds: info.durationSeconds))"
+    }""",
+        "round5 sheet selected format")
+
+s = rep(s, """            if let format = selectedFormat {
+                Text("\\(tab == 0 ? format.qualityLabel : "\\(format.audioKbps) kbps") · \\(format.sizeText(durationSeconds: info.durationSeconds))")
+                    .font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
+            }""", """            if let format = selectedFormat {
+                Text(headerSummary(format, info: info))
+                    .font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
+            }""",
+        "round5 sheet header summary")
+
+s = rep(s, """            Text("Video (avc1)").tag(0)""",
+        """            Text("Video").tag(0)""",
+        "round5 sheet picker label")
+
+s = rep(s, """        if tab == 0 {
+            if info.muxed.isEmpty {
+                Text("YouTube did not offer a directly downloadable MP4 for this video. Audio-only may still be available.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(info.muxed) { format in
+                        formatRow(label: "\\(format.qualityLabel) · MP4",
+                                  size: format.sizeText(durationSeconds: info.durationSeconds),
+                                  selected: selectedFormat?.itag == format.itag) {
+                            selectedVideoItag = format.itag
+                        }
+                    }
+                }
+            }
+        } else {""", """        if tab == 0 {
+            if info.muxed.isEmpty && info.adaptiveVideo.isEmpty {
+                Text("YouTube did not offer a downloadable video stream for this video. Audio-only may still be available.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !info.muxed.isEmpty {
+                Text("Video + audio · single file").font(.subheadline.bold()).foregroundStyle(.white)
+                VStack(spacing: 8) {
+                    ForEach(info.muxed) { format in
+                        formatRow(label: "\\(format.qualityLabel) · MP4",
+                                  size: format.sizeText(durationSeconds: info.durationSeconds),
+                                  selected: !selectedVideoIsAdaptive && selectedFormat?.itag == format.itag) {
+                            selectedVideoItag = format.itag
+                            selectedVideoIsAdaptive = false
+                        }
+                    }
+                }
+            }
+            if !info.adaptiveVideo.isEmpty {
+                Text("Adaptive video · best audio added, then merged").font(.subheadline.bold()).foregroundStyle(.white)
+                    .padding(.top, 6)
+                VStack(spacing: 8) {
+                    ForEach(info.adaptiveVideo) { format in
+                        formatRow(label: "\\(format.qualityLabel.isEmpty ? "\\(format.height)p" : format.qualityLabel) · \\(format.videoCodecLabel) · \\(format.containerLabel)",
+                                  size: format.sizeText(durationSeconds: info.durationSeconds),
+                                  selected: selectedVideoIsAdaptive && selectedFormat?.itag == format.itag) {
+                            selectedAdaptiveItag = format.itag
+                            selectedVideoIsAdaptive = true
+                        }
+                    }
+                }
+                Text("AVC picks merge without re-encoding. VP9 and AV1 picks are converted to H.264 at the same height so the result plays in the TrapTube tab.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {""",
+        "round5 sheet video lists")
+
+s = rep(s, """            if info.audioOnly.isEmpty {
+                Text("YouTube did not offer a directly downloadable AAC track for this video.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(info.audioOnly) { format in
+                        formatRow(label: "\\(format.audioKbps) kbps · AAC",
+                                  size: format.sizeText(durationSeconds: info.durationSeconds),
+                                  selected: selectedFormat?.itag == format.itag) {
+                            selectedAudioItag = format.itag
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Format").font(.subheadline.bold()).foregroundStyle(.white)
+                    Picker("Format", selection: $audioFormat) {
+                        Text("m4a").tag("m4a")
+                        Text("mp3").tag("mp3")
+                    }
+                    .pickerStyle(.segmented)
+                    Text(audioFormat == "mp3"
+                         ? "The AAC track downloads first, then FFmpeg converts it to MP3 on this device."
+                         : "The AAC track is saved as-is in an M4A file.")
+                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                }
+
+                VStack(alignment: .leading, spacing: 10) {""", """            if info.audioOnly.isEmpty {
+                Text("YouTube did not offer a downloadable audio track for this video.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(info.audioOnly) { format in
+                        formatRow(label: "\\(format.audioKbps) kbps · \\(format.audioCodecLabel)",
+                                  size: format.sizeText(durationSeconds: info.durationSeconds),
+                                  selected: selectedFormat?.itag == format.itag) {
+                            selectedAudioItag = format.itag
+                        }
+                    }
+                }
+
+                Text("Whichever track you pick is downloaded and converted to MP3 automatically, then stored in the TrapTube tab for playback.")
+                    .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 10) {""",
+        "round5 sheet audio lists")
+
+s = rep(s, """    private func applyDefaults(_ info: TrapTubeVideoInfo) {
+        if selectedVideoItag == nil { selectedVideoItag = (info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first)?.itag }
+        if selectedAudioItag == nil { selectedAudioItag = info.audioOnly.first?.itag }""", """    private func applyDefaults(_ info: TrapTubeVideoInfo) {
+        if selectedVideoItag == nil { selectedVideoItag = (info.muxed.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.muxed.first)?.itag }
+        if selectedAdaptiveItag == nil { selectedAdaptiveItag = (info.adaptiveVideo.first { TrapTubeStreamingQuality.withinCap($0.height) } ?? info.adaptiveVideo.first)?.itag }
+        if info.muxed.isEmpty, !info.adaptiveVideo.isEmpty { selectedVideoIsAdaptive = true }
+        if selectedAudioItag == nil { selectedAudioItag = info.audioOnly.first?.itag }""",
+        "round5 sheet defaults")
+
+ROUND5_START_DOWNLOAD = r'''    private func startDownload(_ info: TrapTubeVideoInfo) {
+        guard let format = selectedFormat else { return }
+        let title: String
+        if tab == 1 {
+            let editedTitle = metaTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let editedArtist = metaArtist.trimmingCharacters(in: .whitespacesAndNewlines)
+            title = editedTitle.isEmpty ? info.title : (editedArtist.isEmpty ? editedTitle : "\(editedArtist) – \(editedTitle)")
+        } else {
+            title = info.title
+        }
+
+        if tab == 1 {
+            // Round 5: an audio-only pick ALWAYS ends as an MP3 in the
+            // TrapTube tab, whichever stream was chosen (AAC or Opus).
+            guard let url = URL(string: format.url) else { return }
+            manager.enqueueDirectDownload(
+                remoteURL: url,
+                title: title,
+                mode: "audio",
+                fileName: trapTubeSafeFileName(title, ext: format.streamFileExtension),
+                videoID: videoID,
+                convertToMP3: true,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)
+        } else if selectedVideoIsAdaptive {
+            // Round 5: a video-only pick downloads together with the
+            // best paired audio and is merged by the manager (AVC
+            // remux, VP9/AV1 transcode to H.264).
+            guard let videoURL = URL(string: format.url),
+                  let audio = pairedAudioFormat,
+                  let audioURL = URL(string: audio.url) else {
+                startedMessage = "No audio track is available to pair with this video stream."
+                return
+            }
+            manager.enqueueAdaptiveDownload(
+                videoURL: videoURL,
+                audioURL: audioURL,
+                title: title,
+                videoIsAVC: format.isAVCVideo,
+                audioIsAAC: audio.isAACAudio,
+                videoID: videoID,
+                videoUserAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                audioUserAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent)
+        } else {
+            guard let url = URL(string: format.url) else { return }
+            manager.enqueueDirectDownload(
+                remoteURL: url,
+                title: title,
+                mode: "video",
+                fileName: trapTubeSafeFileName(title, ext: "mp4"),
+                videoID: videoID,
+                convertToMP3: false,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)
+        }
+
+        if captionIndex > 0, info.captions.indices.contains(captionIndex - 1) {
+            let track = info.captions[captionIndex - 1]
+            Task {
+                if let captions = try? await TrapTubeInnerTube.fetchCaptions(track: track) {
+                    let fileName = trapTubeSafeFileName(title, ext: "captions.txt")
+                    let url = TrapTubeDownloadPaths.downloadsDirectory.appendingPathComponent(fileName)
+                    try? captions.write(to: url, atomically: true, encoding: .utf8)
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        manager.registerLocalFile(fileURL: url, title: "\(title) — captions", mode: "text", videoID: videoID)
+                    }
+                }
+            }
+        }
+
+        downloadStarted = true
+        startedMessage = "Download started — track its progress in the TrapTube tab."
+    }
+'''
+s = splice_function(s,
+                    "    private func startDownload(_ info: TrapTubeVideoInfo) {",
+                    ROUND5_START_DOWNLOAD, "round5 startDownload")
+
+# Download later: fall back to the adaptive path when no muxed MP4
+# exists, so the feature keeps working for every video.
+s = rep(s, """                let info = try await TrapTubeInnerTube.fetchInfo(videoID: entry.videoID)
+                guard let format = info.muxed.first, let url = URL(string: format.url) else {
+                    manager.lastError = "No directly downloadable MP4 was found for this video."
+                    return
+                }
+                manager.enqueueDirectDownload(remoteURL: url, title: info.title, mode: "video",
+                                              fileName: trapTubeSafeFileName(info.title, ext: "mp4"),
+                                              videoID: entry.videoID, convertToMP3: false,
+                                              userAgent: info.userAgent)
+                removeLater(entry)""", """                let info = try await TrapTubeInnerTube.fetchInfo(videoID: entry.videoID)
+                if let format = info.muxed.first, let url = URL(string: format.url) {
+                    manager.enqueueDirectDownload(remoteURL: url, title: info.title, mode: "video",
+                                                  fileName: trapTubeSafeFileName(info.title, ext: "mp4"),
+                                                  videoID: entry.videoID, convertToMP3: false,
+                                                  userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)
+                    removeLater(entry)
+                    return
+                }
+                let adaptiveVideo = info.adaptiveVideo.first { $0.isAVCVideo } ?? info.adaptiveVideo.first
+                let pairedAudio = info.audioOnly.first { $0.isAACAudio } ?? info.audioOnly.first
+                guard let adaptiveVideo, let pairedAudio,
+                      let videoURL = URL(string: adaptiveVideo.url),
+                      let audioURL = URL(string: pairedAudio.url) else {
+                    manager.lastError = "No downloadable video stream was found for this video."
+                    return
+                }
+                manager.enqueueAdaptiveDownload(
+                    videoURL: videoURL, audioURL: audioURL, title: info.title,
+                    videoIsAVC: adaptiveVideo.isAVCVideo, audioIsAAC: pairedAudio.isAACAudio,
+                    videoID: entry.videoID,
+                    videoUserAgent: adaptiveVideo.userAgent.isEmpty ? info.userAgent : adaptiveVideo.userAgent,
+                    audioUserAgent: pairedAudio.userAgent.isEmpty ? info.userAgent : pairedAudio.userAgent)
+                removeLater(entry)""",
+        "round5 download later adaptive fallback")
+
+p.write_text(s)
+
+# --- Item 4 (manager side): the adaptive download + merge job, and
+# an honest MP3-fallback message (the kept original may be WebM now).
+p = file("TypeTypeService.swift")
+s = p.read_text()
+
+s = rep(s, """    func process(_ item: TrapTubeDownloadedMedia, operation: TrapTubeFFmpegOperation) async throws {""", """    // MARK: Round 5 adaptive downloads (video-only + paired audio)
+
+    /// Downloads a video-only stream and its paired audio stream,
+    /// then merges them with FFmpeg: a straight remux when the video
+    /// is AVC and the audio is AAC, a video-copy + AAC transcode when
+    /// only the audio needs converting, and a full H.264 transcode
+    /// (same height) for VP9/AV1 picks so the result plays in the
+    /// TrapTube tab. Progress surfaces through the same jobs list as
+    /// direct downloads.
+    func enqueueAdaptiveDownload(videoURL: URL, audioURL: URL, title: String,
+                                 videoIsAVC: Bool, audioIsAAC: Bool,
+                                 videoID: String?, videoUserAgent: String?, audioUserAgent: String?) {
+        lastError = nil
+        let jobID = UUID().uuidString
+        jobs.insert(TrapTubeDownloadTask(
+            id: jobID, title: title, mode: "video", status: "downloading",
+            stage: "Downloading video", progress: 0, downloadedBytes: 0,
+            totalBytes: 0, speedBytesPerSecond: 0, error: nil
+        ), at: 0)
+        Task { [weak self] in
+            await self?.runAdaptiveDownload(
+                jobID: jobID, videoURL: videoURL, audioURL: audioURL, title: title,
+                videoIsAVC: videoIsAVC, audioIsAAC: audioIsAAC,
+                videoID: videoID, videoUserAgent: videoUserAgent, audioUserAgent: audioUserAgent)
+        }
+    }
+
+    private func runAdaptiveDownload(jobID: String, videoURL: URL, audioURL: URL, title: String,
+                                     videoIsAVC: Bool, audioIsAAC: Bool,
+                                     videoID: String?, videoUserAgent: String?, audioUserAgent: String?) async {
+        do {
+            try FileManager.default.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
+            let videoTemp = try await TrapTubeDirectDownloader.shared.download(
+                from: videoURL, userAgent: videoUserAgent
+            ) { [weak self] fraction in
+                Task { @MainActor in
+                    self?.updateJob(jobID) {
+                        $0.progress = fraction * 0.7
+                        $0.stage = "Downloading video \\(Int(fraction * 100))%"
+                    }
+                }
+            }
+            updateJob(jobID) { $0.stage = "Downloading audio"; $0.progress = 0.7 }
+            let audioTemp = try await TrapTubeDirectDownloader.shared.download(
+                from: audioURL, userAgent: audioUserAgent
+            ) { [weak self] fraction in
+                Task { @MainActor in
+                    self?.updateJob(jobID) {
+                        $0.progress = 0.7 + fraction * 0.2
+                        $0.stage = "Downloading audio \\(Int(fraction * 100))%"
+                    }
+                }
+            }
+            defer {
+                try? FileManager.default.removeItem(at: videoTemp)
+                try? FileManager.default.removeItem(at: audioTemp)
+            }
+            updateJob(jobID) {
+                $0.stage = videoIsAVC ? "Processing (merging)" : "Processing (converting to H.264)"
+                $0.progress = 0.95
+            }
+
+            var destination = downloadsDirectory.appendingPathComponent(trapTubeSafeFileName(title, ext: "mp4"))
+            if FileManager.default.fileExists(atPath: destination.path) {
+                let base = destination.deletingPathExtension().lastPathComponent
+                let suffix = String(UUID().uuidString.prefix(6))
+                destination = downloadsDirectory.appendingPathComponent("\\(base)-\\(suffix).mp4")
+            }
+
+            var arguments = ["-y", "-i", videoTemp.path, "-i", audioTemp.path,
+                             "-map", "0:v:0", "-map", "1:a:0"]
+            if videoIsAVC && audioIsAAC {
+                arguments += ["-c", "copy"]
+            } else if videoIsAVC {
+                arguments += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+            } else {
+                arguments += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                              "-c:a", "aac", "-b:a", "192k"]
+            }
+            arguments += ["-movflags", "+faststart", "-metadata", "title=\\(title)", destination.path]
+            try await TrapTubeFFmpegProcessor.execute(arguments)
+            guard FileManager.default.fileExists(atPath: destination.path) else {
+                throw TrapTubeFFmpegError.missingOutput
+            }
+
+            let size = (try? FileManager.default.attributesOfItem(atPath: destination.path))
+                .flatMap { ($0[.size] as? NSNumber)?.int64Value } ?? 0
+            let item = TrapTubeDownloadedMedia(
+                id: UUID().uuidString,
+                title: title,
+                fileName: destination.lastPathComponent,
+                mode: "video",
+                sizeBytes: size,
+                createdAt: Date(),
+                videoID: videoID
+            )
+            completed.insert(item, at: 0)
+            persistCompleted()
+            updateJob(jobID) { $0.status = "saved"; $0.stage = "Saved to device"; $0.progress = 1 }
+        } catch {
+            updateJob(jobID) { $0.status = "failed"; $0.stage = "Failed"; $0.error = error.localizedDescription }
+            lastError = error.localizedDescription
+        }
+    }
+
+    func process(_ item: TrapTubeDownloadedMedia, operation: TrapTubeFFmpegOperation) async throws {""",
+        "round5 adaptive download manager")
+
+s = rep(s, """                    lastError = "MP3 conversion failed, so the M4A original was kept: \\(error.localizedDescription)\"""",
+        """                    lastError = "MP3 conversion failed, so the downloaded original was kept: \\(error.localizedDescription)\"""",
+        "round5 mp3 fallback message")
+p.write_text(s)
+
+# --- Item 3: native stream player with the working EQ --------------
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# Mod sheet: "Play in..." expands; the first option streams the same
+# video natively with the EQ attached.
+s = rep(s, """    @State private var showPlayNote = false
+    @State private var playItem: TrapTubeDownloadedMedia?""", """    @State private var showPlayNote = false
+    @State private var showPlayOptions = false
+    @State private var playItem: TrapTubeDownloadedMedia?
+    @State private var nativePlay: TrapTubeNativePlayRequest?""",
+        "round5 mod sheet native state")
+
+s = rep(s, """                    modRow("Play in...", detail: playDetail, icon: "play.rectangle.on.rectangle") {
+                        playAction()
+                    }
+                    if showPlayNote {
+                        Text("This video isn't downloaded yet. Download it here first — after that it plays inside TrapTube from the TrapTube tab: videos in the EQ video player, audio in your library.")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 10).padding(.leading, 24)
+                    }""", """                    modRow("Play in...", detail: playDetail, icon: "play.rectangle.on.rectangle") {
+                        withAnimation { showPlayOptions.toggle() }
+                    }
+                    if showPlayOptions {
+                        modRow("TrapTube Player (EQ)", detail: "Stream it now with the 16-band EQ", icon: "waveform") {
+                            nativePlay = TrapTubeNativePlayRequest(videoID: request.videoID, title: displayTitle)
+                        }
+                        if downloadedCopy != nil {
+                            modRow("Downloaded copy", detail: playDetail, icon: "arrow.down.circle") {
+                                playAction()
+                            }
+                        } else {
+                            Text("No downloaded copy yet — downloading it here also makes it playable from the TrapTube tab (videos in the EQ video player, audio in your library).")
+                                .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 10).padding(.leading, 24)
+                        }
+                    }""",
+        "round5 mod sheet play options")
+
+s = rep(s, """        .sheet(item: $playItem) { item in
+            TrapTubeDownloadedVideoPlayer(item: item)
+                .preferredColorScheme(.dark)
+        }
+    }""", """        .sheet(item: $playItem) { item in
+            TrapTubeDownloadedVideoPlayer(item: item)
+                .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $nativePlay) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }
+    }""",
+        "round5 mod sheet native cover")
+
+# Stream EQ sheet: when the page graph reports it cannot process the
+# stream, offer the native player instead of dead-ending.
+s = rep(s, """    @ObservedObject private var eq = TrapTubeWebEQ.shared
+    @ObservedObject private var center = TrapTubeWebEQCenter.shared""", """    @ObservedObject private var eq = TrapTubeWebEQ.shared
+    @ObservedObject private var center = TrapTubeWebEQCenter.shared
+    @ObservedObject private var playerSession = TrapTubePlayerSession.shared
+    @State private var nativePlay: TrapTubeNativePlayRequest?""",
+        "round5 eq sheet native state")
+
+s = rep(s, """        .presentationDetents([.large])
+        .onAppear { TrapTubePlayerSession.shared.requestEQStatus(for: host) }""", """        .presentationDetents([.large])
+        .onAppear { TrapTubePlayerSession.shared.requestEQStatus(for: host) }
+        .fullScreenCover(item: $nativePlay) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }""",
+        "round5 eq sheet native cover")
+
+s = rep(s, """                if state == "flowing", let level = status?.level {
+                    ProgressView(value: min(1, level * 6)).tint(.green)
+                }
+            }
+            Spacer(minLength: 0)
+        }""", """                if state == "flowing", let level = status?.level {
+                    ProgressView(value: min(1, level * 6)).tint(.green)
+                }
+                if (state == "bypassed" || state == "error"),
+                   playerSession.watchHost == host, let videoID = playerSession.watchVideoID {
+                    Button {
+                        nativePlay = TrapTubeNativePlayRequest(videoID: videoID, title: playerSession.watchTitle)
+                    } label: {
+                        Label("Play in TrapTube Player", systemImage: "play.rectangle.fill")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(theme.accent, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                }
+            }
+            Spacer(minLength: 0)
+        }""",
+        "round5 eq sheet native button")
+
+ROUND5_NATIVE_PLAYER_SWIFT = r'''
+
+// MARK: - Round 5 native stream player (the EQ path that always works)
+//
+// The in-page WebAudio EQ cannot process most YouTube streams: the
+// media is served without CORS access, so the graph measures silence
+// and auto-bypasses. This player takes the route the app already
+// owns - resolve the same video with TrapTubeInnerTube and play it
+// in AVPlayer with TrapTubeTapEQ attached, the exact stack that
+// equalizes downloaded files - with EqualizerView for the controls.
+
+struct TrapTubeNativePlayRequest: Identifiable {
+    let videoID: String
+    let title: String
+    var id: String { videoID }
+}
+
+@MainActor
+final class TrapTubeNativeStreamPlayerModel: ObservableObject {
+    enum Phase {
+        case resolving
+        case playing
+        case failed(String)
+    }
+
+    let player = AVPlayer()
+    @Published private(set) var phase: Phase = .resolving
+    @Published private(set) var equalizerActive = false
+    @Published private(set) var eqAttachFinished = false
+
+    private var startTask: Task<Void, Never>?
+    private var statusObservation: NSKeyValueObservation?
+    private var attachGeneration = 0
+
+    func start(videoID: String) {
+        guard startTask == nil else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        startTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let info = try await TrapTubeInnerTube.fetchInfo(videoID: videoID)
+                let item = try await Self.makePlayerItem(info: info)
+                if Task.isCancelled { return }
+                self.statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+                    guard observedItem.status == .failed else { return }
+                    let message = observedItem.error?.localizedDescription ?? "The stream failed to load."
+                    Task { @MainActor in self?.phase = .failed(message) }
+                }
+                self.player.replaceCurrentItem(with: item)
+                self.phase = .playing
+                self.player.play()
+                // The EQ tap attaches alongside playback; it never
+                // gates it, and a failure just leaves the badge honest.
+                let generation = self.attachGeneration
+                let attached = await TrapTubeTapEQ.shared.attach(to: item)
+                if generation == self.attachGeneration, self.player.currentItem === item {
+                    self.equalizerActive = attached
+                    self.eqAttachFinished = true
+                }
+            } catch {
+                if !Task.isCancelled { self.phase = .failed(error.localizedDescription) }
+            }
+        }
+    }
+
+    func stop() {
+        attachGeneration += 1
+        startTask?.cancel()
+        startTask = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        equalizerActive = false
+        eqAttachFinished = false
+    }
+
+    /// Muxed MP4 when YouTube offers one; otherwise an AVC + AAC
+    /// composition built from the adaptive streams (the same pairing
+    /// the download merge uses).
+    private static func makePlayerItem(info: TrapTubeVideoInfo) async throws -> AVPlayerItem {
+        if let muxed = info.muxed.first, let url = URL(string: muxed.url) {
+            let asset = AVURLAsset(url: url, options: headerOptions(userAgent: muxed.userAgent.isEmpty ? info.userAgent : muxed.userAgent))
+            return AVPlayerItem(asset: asset)
+        }
+        guard let video = info.adaptiveVideo.first(where: { $0.isAVCVideo }),
+              let audio = info.audioOnly.first(where: { $0.isAACAudio }),
+              let videoURL = URL(string: video.url),
+              let audioURL = URL(string: audio.url) else {
+            throw TrapTubeModError.unplayable("no stream this player can use (it needs a muxed MP4 or an AVC + AAC pair)")
+        }
+        let videoAsset = AVURLAsset(url: videoURL, options: headerOptions(userAgent: video.userAgent.isEmpty ? info.userAgent : video.userAgent))
+        let audioAsset = AVURLAsset(url: audioURL, options: headerOptions(userAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent))
+        guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw TrapTubeModError.unplayable("the adaptive streams had no usable tracks")
+        }
+        let videoDuration = try await videoAsset.load(.duration)
+        let audioDuration = try await audioAsset.load(.duration)
+        let duration = CMTimeMinimum(videoDuration, audioDuration)
+        guard duration.isValid, duration.seconds > 0 else {
+            throw TrapTubeModError.unplayable("the adaptive streams reported no duration")
+        }
+        let composition = AVMutableComposition()
+        guard let compositionVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw TrapTubeModError.unplayable("could not build the playback composition")
+        }
+        let range = CMTimeRange(start: .zero, duration: duration)
+        try compositionVideo.insertTimeRange(range, of: videoTrack, at: .zero)
+        try compositionAudio.insertTimeRange(range, of: audioTrack, at: .zero)
+        compositionVideo.preferredTransform = try await videoTrack.load(.preferredTransform)
+        return AVPlayerItem(asset: composition)
+    }
+
+    private static func headerOptions(userAgent: String) -> [String: Any] {
+        ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": userAgent, "Referer": "https://www.youtube.com/"]]
+    }
+}
+
+struct TrapTubeNativeStreamPlayer: View {
+    let request: TrapTubeNativePlayRequest
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audio: AudioEngineManager
+    @EnvironmentObject private var theme: ThemeManager
+    @StateObject private var model = TrapTubeNativeStreamPlayerModel()
+    @State private var showEqualizer = false
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+            VideoPlayer(player: model.player)
+                .background(.black)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "waveform")
+                        Text(badgeText)
+                    }
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(.black.opacity(0.72), in: Capsule())
+                    Spacer()
+                    Button {
+                        showEqualizer = true
+                    } label: {
+                        Label("EQ", systemImage: "slider.horizontal.3")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 8)
+                            .background(.black.opacity(0.72), in: Capsule())
+                    }
+                    .accessibilityLabel("Open the equalizer")
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(.black.opacity(0.72), in: Circle())
+                    }
+                    .accessibilityLabel("Close player")
+                }
+                if !request.title.isEmpty {
+                    Text(request.title)
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        .lineLimit(2)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
+                }
+            }
+            .padding(.top, 12)
+            .padding(.horizontal, 12)
+
+            if case .resolving = model.phase {
+                VStack(spacing: 12) {
+                    ProgressView().tint(.white)
+                    Text("Resolving stream…").font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if case .failed(let message) = model.phase {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.title2).foregroundStyle(Color(hex: "FF7A84"))
+                    Text(message).font(.subheadline).foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Close") { dismiss() }
+                        .font(.subheadline.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 9)
+                        .background(.white.opacity(0.12), in: Capsule())
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black.opacity(0.66))
+            }
+        }
+        .background(.black)
+        .task { model.start(videoID: request.videoID) }
+        .onDisappear { model.stop() }
+        .onChange(of: audio.eqGains) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.bassBoost) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.masterGain) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .sheet(isPresented: $showEqualizer) {
+            EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
+        }
+    }
+
+    private var badgeText: String {
+        switch model.phase {
+        case .resolving: return "RESOLVING…"
+        case .failed: return "PLAYBACK FAILED"
+        case .playing:
+            if !model.eqAttachFinished { return "EQ ATTACHING…" }
+            return model.equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM"
+        }
+    }
+}
+'''
+if "struct TrapTubeNativeStreamPlayer" not in s:
+    s += ROUND5_NATIVE_PLAYER_SWIFT
+p.write_text(s)
+
+# --- Item 5: downloaded-file playback crash audit + hardening -----
+# Path audited in the generated sources: TrapTubeDownloadsView row
+# play button -> .sheet(item:) -> TrapTubeDownloadedVideoPlayer ->
+# TrapTubeEQMediaPlayer.play(url:) -> AVPlayerItem ->
+# TrapTubeTapEQ.attach -> MTAudioProcessingTap (TapState).
+# Vectors found and fixed:
+#  (a) play(url:) never validated the file. A manifest entry whose
+#      file was deleted or truncated (restoreCompleted only filters
+#      at launch) produced a dead item and a wedged black player.
+#      Fixed: existence + non-zero size check, a published
+#      playbackError, and item-status observation so a corrupt file
+#      surfaces its real error in the player view.
+#  (b) play() only called player.play() AFTER the EQ attach awaited
+#      asset track loading, inside an unstructured Task with no
+#      cancellation: dismissing/reopening raced attach completions
+#      against teardown and could stack taps. Fixed: playback starts
+#      immediately, attach runs alongside under a generation token,
+#      stop() cancels the task and invalidates the (single) status
+#      observation exactly once.
+#  (c) TapState.prepare force-unwrapped its freshly allocated
+#      coefficient/delay/snapshot pointers on the audio render path.
+#      Fixed: build through locals, publish once, no unwraps.
+#  (d) attach(to:) happily stacked a second tap on an item that
+#      already carried one (re-presentation), orphaning the first
+#      tap's retained state. Fixed: early-out when a tap exists.
+#  (e) Teardown: the player registered no KVO before (nothing to
+#      double-remove); the one observation added by (a) is
+#      invalidated in stop() and nowhere else.
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+
+s = rep(s, """    func attach(to item: AVPlayerItem) async -> Bool {
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .audio), let track = tracks.first else { return false }""", """    func attach(to item: AVPlayerItem) async -> Bool {
+        // Round 5: never stack a second tap on an item that already
+        // carries one (a re-attach on sheet re-presentation used to
+        // orphan the first tap's retained state).
+        if let existingParameters = item.audioMix?.inputParameters,
+           existingParameters.contains(where: { $0.audioTapProcessor != nil }) {
+            return true
+        }
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .audio), let track = tracks.first else { return false }""",
+        "round5 tap no stacking")
+
+s = rep(s, """        guard isFloat32, channels > 0, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
+        let count = TrapTubeTapEQ.sectionCount
+        coefficients = .allocate(capacity: 5 * count)
+        for section in 0..<count { Self.identity(coefficients! + section * 5) }
+        setup = vDSP_biquad_CreateSetupD(coefficients!, vDSP_Length(count))
+        delays = .allocate(capacity: delayLength * channels); delays!.initialize(repeating: 0, count: delayLength * channels)
+        snapshot = .allocate(capacity: 18); snapshot!.initialize(repeating: 0, count: 18); snapshot![17] = 1
+        appliedVersion = 0""", """        guard isFloat32, channels > 0, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
+        let count = TrapTubeTapEQ.sectionCount
+        // Round 5: no force unwraps on the render path - build
+        // through locals and publish the pointers once, fully built.
+        let newCoefficients = UnsafeMutablePointer<Double>.allocate(capacity: 5 * count)
+        for section in 0..<count { Self.identity(newCoefficients + section * 5) }
+        coefficients = newCoefficients
+        setup = vDSP_biquad_CreateSetupD(newCoefficients, vDSP_Length(count))
+        let newDelays = UnsafeMutablePointer<Float>.allocate(capacity: delayLength * channels)
+        newDelays.initialize(repeating: 0, count: delayLength * channels)
+        delays = newDelays
+        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 18)
+        newSnapshot.initialize(repeating: 0, count: 18)
+        newSnapshot[17] = 1
+        snapshot = newSnapshot
+        appliedVersion = 0""",
+        "round5 tapstate unwraps")
+
+ROUND5_EQ_MEDIA_PLAYER = r'''/// Plays any local audio/video file or progressive URL through AVPlayer with the shared EQ attached.
+/// Bind `player` to a `VideoPlayer` or `AVPlayerViewController`.
+///
+/// Round 5 hardening (downloaded files crashed/wedged on open): the
+/// file is validated BEFORE an item is built, item failures are
+/// observed and published instead of leaving a silent black screen,
+/// playback starts immediately (the EQ tap attaches alongside and
+/// can never gate or kill it), and a generation counter makes attach
+/// completions from a previous open harmless after stop().
+@MainActor
+final class TrapTubeEQMediaPlayer: ObservableObject {
+    let player = AVPlayer()
+    @Published private(set) var equalizerActive = false
+    @Published private(set) var playbackError: String?
+
+    private var attachTask: Task<Void, Never>?
+    private var statusObservation: NSKeyValueObservation?
+    private var currentItem: AVPlayerItem?
+    private var generation = 0
+
+    func play(url: URL) {
+        stop()
+        playbackError = nil
+
+        // Never hand AVPlayer a file that is not really there: a
+        // manifest entry whose file was deleted or left empty used
+        // to become a dead item (and the racing tap attach made it
+        // worse). Say so in the UI instead.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        guard FileManager.default.fileExists(atPath: url.path), size > 0 else {
+            playbackError = "This downloaded file is missing or empty. Delete it and download it again."
+            return
+        }
+
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        let item = AVPlayerItem(url: url)
+        currentItem = item
+        equalizerActive = false
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+            guard observedItem.status == .failed else { return }
+            let message = observedItem.error?.localizedDescription ?? "This file could not be played."
+            Task { @MainActor in self?.playbackError = message }
+        }
+        player.replaceCurrentItem(with: item)
+        player.play()
+
+        // The tap attaches alongside playback; failure just means the
+        // file plays without EQ (the badge says so) - never silence.
+        let playGeneration = generation
+        attachTask = Task { [weak self] in
+            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            guard let self, self.generation == playGeneration, self.currentItem === item else { return }
+            self.equalizerActive = attached
+        }
+    }
+
+    func stop() {
+        generation += 1
+        attachTask?.cancel()
+        attachTask = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        currentItem = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        equalizerActive = false
+    }
+}
+'''
+# TrapTubeEQMediaPlayer is the LAST declaration in this file, so the
+# old class is replaced by truncating at its doc comment.
+if "Round 5 hardening (downloaded files" not in s:
+    r5_player_marker = "/// Plays any local audio/video file or progressive URL through AVPlayer with the shared EQ attached."
+    if r5_player_marker not in s:
+        raise SystemExit("round5 eq media player anchor missing")
+    s = s[:s.index(r5_player_marker)] + ROUND5_EQ_MEDIA_PLAYER + "\n"
+p.write_text(s)
+
+# The downloaded-file player view surfaces the error honestly.
+p = file("YouTubeView.swift")
+s = p.read_text()
+s = rep(s, """            VideoPlayer(player: mediaPlayer.player)
+                .background(.black)
+                .ignoresSafeArea()
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                Text(mediaPlayer.equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM")
+            }
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.72), in: Capsule())
+            .padding(.top, 12)
+            .padding(.leading, 12)""", """            VideoPlayer(player: mediaPlayer.player)
+                .background(.black)
+                .ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform")
+                    Text(mediaPlayer.playbackError != nil ? "PLAYBACK FAILED" : (mediaPlayer.equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM"))
+                }
+                .font(.caption2.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.72), in: Capsule())
+                if let playbackError = mediaPlayer.playbackError {
+                    Text(playbackError)
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(Color(hex: "5A1019").opacity(0.9), in: RoundedRectangle(cornerRadius: 9))
+                }
+            }
+            .padding(.top, 12)
+            .padding(.leading, 12)""",
+        "round5 downloaded player error surface")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
