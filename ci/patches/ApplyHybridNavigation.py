@@ -9424,4 +9424,511 @@ s = rep(s, r'''            let attached = await TrapTubeTapEQ.shared.attach(to: 
         "round9 downloaded drain")
 p.write_text(s)
 
+# ---------------------------------------------------------------------------
+# Round 10: downloads 403 - re-mint stream URLs at job start and once
+# more on any 403. Replay evidence (2026-11-13): with FRESHLY minted
+# URLs, every request shape the app can emit (plain download-task GET,
+# 8 MiB ranged chunks, cross-profile UA, no Referer, browser UA,
+# open-ended AVPlayer-style Range) succeeds against googlevideo once
+# the normal 302 CMS redirect is followed - UA, Referer and request
+# shape are NOT the differentiator. What IS true of the minted URLs:
+# the signature covers the minting IP (the URL literally carries
+# ip=<minting address>) and expire is ~21600s (6h) after minting.
+# The app, however, fetched with URLs minted when a sheet opened -
+# or, from the native player, with session.currentInfo minted when
+# playback STARTED - and nothing anywhere re-minted: a job whose
+# mint had aged or whose network egress had moved got a uniform
+# 403 from BOTH ladder stages (the on-device badStatusForHost(403)
+# proves the ladder engaged and the chunked retry died too).
+# Fix: every download job now carries a refresher closure that
+# re-runs fetchInfo and returns the same format (same itag) freshly
+# minted. TrapTubeDirectDownloader.downloadWithRemint runs it once
+# BEFORE the first byte (mint->fetch gap collapses to ~a second,
+# same egress) and once more if the server still answers 403, then
+# fails with the honest host-named error exactly as before.
+# ---------------------------------------------------------------------------
+
+# --- TypeTypeService.swift: refresher types + downloadWithRemint.
+p = file("TypeTypeService.swift")
+s = p.read_text()
+
+s = rep(s, r'''final class TrapTubeDirectDownloader: NSObject, URLSessionDownloadDelegate {''',
+        r'''/// Round 10: a download job's way back to a FRESH stream URL for
+/// the same format. googlevideo URLs are signed for the IP that
+/// minted them and expire about six hours later (expire is mint
+/// + ~21600s, and the signature covers the ip parameter), so a URL
+/// captured when a sheet opened - or when playback started - can
+/// be dead on arrival by the time a download actually runs, and
+/// every request shape then earns the same HTTP 403 from both
+/// fetch strategies. Re-minting right before the fetch collapses
+/// the mint-to-fetch gap to about a second on the same egress.
+typealias TrapTubeStreamRefresher = () async -> (url: URL, userAgent: String?)?
+
+/// Round 10: the adaptive-pair version of the refresher.
+typealias TrapTubeAdaptiveRefresher = () async -> (videoURL: URL, videoUserAgent: String?, audioURL: URL, audioUserAgent: String?)?
+
+final class TrapTubeDirectDownloader: NSObject, URLSessionDownloadDelegate {''',
+        "round10 refresher typealiases")
+
+s = rep(s, r'''    private func downloadWhole(url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {''',
+        r'''    /// Round 10: download with re-minting. The refresher runs
+    /// once BEFORE the first byte, so the job never starts from a
+    /// stale URL, and once more if the server still answers 403
+    /// (a URL can also die mid-flight when the device's egress IP
+    /// moves between mint and fetch); after that the job fails
+    /// with the honest error, host named, exactly as before. The
+    /// refresher returns nil when it cannot produce a fresh URL,
+    /// in which case the passed-in URL is used / the error stands.
+    func downloadWithRemint(from url: URL, userAgent: String?,
+                            remint: @escaping TrapTubeStreamRefresher,
+                            onProgress: @escaping (Double) -> Void) async throws -> URL {
+        var currentURL = url
+        var currentUA = userAgent
+        if let fresh = await remint() {
+            currentURL = fresh.url
+            currentUA = fresh.userAgent
+        }
+        do {
+            return try await download(from: currentURL, userAgent: currentUA, onProgress: onProgress)
+        } catch let error as TrapTubeDirectDownloadError {
+            guard Self.isForbidden(error), let fresh = await remint() else { throw error }
+            return try await download(from: fresh.url, userAgent: fresh.userAgent, onProgress: onProgress)
+        }
+    }
+
+    private static func isForbidden(_ error: TrapTubeDirectDownloadError) -> Bool {
+        switch error {
+        case .badStatus(let code), .badStatusForHost(let code, _):
+            return code == 403
+        case .emptyDownload:
+            return false
+        }
+    }
+
+    private func downloadWhole(url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {''',
+        "round10 downloadWithRemint")
+
+# --- Manager: thread the refresher through direct downloads.
+s = rep(s, r'''    func enqueueDirectDownload(remoteURL: URL, title: String, mode: String, fileName: String,
+                               videoID: String?, convertToMP3: Bool, userAgent: String?) {''',
+        r'''    func enqueueDirectDownload(remoteURL: URL, title: String, mode: String, fileName: String,
+                               videoID: String?, convertToMP3: Bool, userAgent: String?,
+                               refresher: @escaping TrapTubeStreamRefresher = { nil }) {''',
+        "round10 enqueueDirect refresher param")
+
+s = rep(s, r'''            await self?.runDirectDownload(
+                jobID: jobID, remoteURL: remoteURL, title: title, mode: mode,
+                fileName: fileName, videoID: videoID,
+                convertToMP3: convertToMP3, userAgent: userAgent)''',
+        r'''            await self?.runDirectDownload(
+                jobID: jobID, remoteURL: remoteURL, title: title, mode: mode,
+                fileName: fileName, videoID: videoID,
+                convertToMP3: convertToMP3, userAgent: userAgent, refresher: refresher)''',
+        "round10 runDirect call refresher")
+
+s = rep(s, r'''    private func runDirectDownload(jobID: String, remoteURL: URL, title: String, mode: String,
+                                   fileName: String, videoID: String?,
+                                   convertToMP3: Bool, userAgent: String?) async {''',
+        r'''    private func runDirectDownload(jobID: String, remoteURL: URL, title: String, mode: String,
+                                   fileName: String, videoID: String?,
+                                   convertToMP3: Bool, userAgent: String?,
+                                   refresher: @escaping TrapTubeStreamRefresher = { nil }) async {''',
+        "round10 runDirect refresher param")
+
+s = rep(s, r'''            let tempURL = try await TrapTubeDirectDownloader.shared.download(
+                from: remoteURL, userAgent: userAgent
+            ) { [weak self] fraction in''',
+        r'''            let tempURL = try await TrapTubeDirectDownloader.shared.downloadWithRemint(
+                from: remoteURL, userAgent: userAgent, remint: refresher
+            ) { [weak self] fraction in''',
+        "round10 runDirect uses remint")
+
+# --- Manager: thread the refresher through adaptive downloads.
+s = rep(s, r'''    func enqueueAdaptiveDownload(videoURL: URL, audioURL: URL, title: String,
+                                 videoIsAVC: Bool, audioIsAAC: Bool,
+                                 videoID: String?, videoUserAgent: String?, audioUserAgent: String?) {''',
+        r'''    func enqueueAdaptiveDownload(videoURL: URL, audioURL: URL, title: String,
+                                 videoIsAVC: Bool, audioIsAAC: Bool,
+                                 videoID: String?, videoUserAgent: String?, audioUserAgent: String?,
+                                 refresher: @escaping TrapTubeAdaptiveRefresher = { nil }) {''',
+        "round10 enqueueAdaptive refresher param")
+
+s = rep(s, r'''            await self?.runAdaptiveDownload(
+                jobID: jobID, videoURL: videoURL, audioURL: audioURL, title: title,
+                videoIsAVC: videoIsAVC, audioIsAAC: audioIsAAC,
+                videoID: videoID, videoUserAgent: videoUserAgent, audioUserAgent: audioUserAgent)''',
+        r'''            await self?.runAdaptiveDownload(
+                jobID: jobID, videoURL: videoURL, audioURL: audioURL, title: title,
+                videoIsAVC: videoIsAVC, audioIsAAC: audioIsAAC,
+                videoID: videoID, videoUserAgent: videoUserAgent, audioUserAgent: audioUserAgent,
+                refresher: refresher)''',
+        "round10 runAdaptive call refresher")
+
+s = rep(s, r'''    private func runAdaptiveDownload(jobID: String, videoURL: URL, audioURL: URL, title: String,
+                                     videoIsAVC: Bool, audioIsAAC: Bool,
+                                     videoID: String?, videoUserAgent: String?, audioUserAgent: String?) async {
+        do {''',
+        r'''    private func runAdaptiveDownload(jobID: String, videoURL: URL, audioURL: URL, title: String,
+                                     videoIsAVC: Bool, audioIsAAC: Bool,
+                                     videoID: String?, videoUserAgent: String?, audioUserAgent: String?,
+                                     refresher: @escaping TrapTubeAdaptiveRefresher = { nil }) async {
+        // Round 10: per-leg remints projected from the pair refresher.
+        let videoRemint: TrapTubeStreamRefresher = {
+            let fresh = await refresher()
+            return fresh.map { (url: $0.videoURL, userAgent: $0.videoUserAgent) }
+        }
+        let audioRemint: TrapTubeStreamRefresher = {
+            let fresh = await refresher()
+            return fresh.map { (url: $0.audioURL, userAgent: $0.audioUserAgent) }
+        }
+        do {''',
+        "round10 runAdaptive refresher param")
+
+s = rep(s, r'''            let videoTemp = try await TrapTubeDirectDownloader.shared.download(
+                from: videoURL, userAgent: videoUserAgent
+            ) { [weak self] fraction in''',
+        r'''            let videoTemp = try await TrapTubeDirectDownloader.shared.downloadWithRemint(
+                from: videoURL, userAgent: videoUserAgent, remint: videoRemint
+            ) { [weak self] fraction in''',
+        "round10 runAdaptive video remint")
+
+s = rep(s, r'''            let audioTemp = try await TrapTubeDirectDownloader.shared.download(
+                from: audioURL, userAgent: audioUserAgent
+            ) { [weak self] fraction in''',
+        r'''            let audioTemp = try await TrapTubeDirectDownloader.shared.downloadWithRemint(
+                from: audioURL, userAgent: audioUserAgent, remint: audioRemint
+            ) { [weak self] fraction in''',
+        "round10 runAdaptive audio remint")
+
+p.write_text(s)
+
+# --- YouTubeView.swift: wire refreshers at every enqueue call site,
+# plus the Ghost FILE route.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# Download sheet, audio pick (always MP3): re-mint the same itag.
+s = rep(s, r'''                convertToMP3: true,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)''',
+        r'''                convertToMP3: true,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                refresher: {
+                    guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: videoID) else { return nil }
+                    let pick = fresh.audioOnly.first { $0.itag == format.itag } ?? fresh.audioOnly.first
+                    guard let pick, let freshURL = URL(string: pick.url) else { return nil }
+                    return (url: freshURL, userAgent: pick.userAgent.isEmpty ? fresh.userAgent : pick.userAgent)
+                })''',
+        "round10 sheet audio refresher")
+
+# Download sheet, adaptive pick: re-mint the same itag pair.
+s = rep(s, r'''                videoUserAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                audioUserAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent)''',
+        r'''                videoUserAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                audioUserAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent,
+                refresher: {
+                    guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: videoID) else { return nil }
+                    let v = fresh.adaptiveVideo.first { $0.itag == format.itag } ?? fresh.adaptiveVideo.first
+                    let a = fresh.audioOnly.first { $0.itag == audio.itag }
+                        ?? fresh.audioOnly.first { $0.isAACAudio } ?? fresh.audioOnly.first
+                    guard let v, let a, let vURL = URL(string: v.url), let aURL = URL(string: a.url) else { return nil }
+                    return (videoURL: vURL, videoUserAgent: v.userAgent.isEmpty ? fresh.userAgent : v.userAgent,
+                            audioURL: aURL, audioUserAgent: a.userAgent.isEmpty ? fresh.userAgent : a.userAgent)
+                })''',
+        "round10 sheet adaptive refresher")
+
+# Download sheet, muxed pick: re-mint the same itag.
+s = rep(s, r'''                convertToMP3: false,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)''',
+        r'''                convertToMP3: false,
+                userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                refresher: {
+                    guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: videoID) else { return nil }
+                    let pick = fresh.muxed.first { $0.itag == format.itag } ?? fresh.muxed.first
+                    guard let pick, let freshURL = URL(string: pick.url) else { return nil }
+                    return (url: freshURL, userAgent: pick.userAgent.isEmpty ? fresh.userAgent : pick.userAgent)
+                })''',
+        "round10 sheet muxed refresher")
+
+# Download later, muxed pick: same selection, freshly minted.
+s = rep(s, r'''                    manager.enqueueDirectDownload(remoteURL: url, title: info.title, mode: "video",
+                                                  fileName: trapTubeSafeFileName(info.title, ext: "mp4"),
+                                                  videoID: entry.videoID, convertToMP3: false,
+                                                  userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent)''',
+        r'''                    manager.enqueueDirectDownload(remoteURL: url, title: info.title, mode: "video",
+                                                  fileName: trapTubeSafeFileName(info.title, ext: "mp4"),
+                                                  videoID: entry.videoID, convertToMP3: false,
+                                                  userAgent: format.userAgent.isEmpty ? info.userAgent : format.userAgent,
+                                                  refresher: {
+                                                      guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: entry.videoID) else { return nil }
+                                                      let pick = fresh.muxed.first { $0.itag == format.itag } ?? fresh.muxed.first
+                                                      guard let pick, let freshURL = URL(string: pick.url) else { return nil }
+                                                      return (url: freshURL, userAgent: pick.userAgent.isEmpty ? fresh.userAgent : pick.userAgent)
+                                                  })''',
+        "round10 later muxed refresher")
+
+# Download later, adaptive pick: same selection rules, freshly minted.
+s = rep(s, r'''                    videoUserAgent: adaptiveVideo.userAgent.isEmpty ? info.userAgent : adaptiveVideo.userAgent,
+                    audioUserAgent: pairedAudio.userAgent.isEmpty ? info.userAgent : pairedAudio.userAgent)''',
+        r'''                    videoUserAgent: adaptiveVideo.userAgent.isEmpty ? info.userAgent : adaptiveVideo.userAgent,
+                    audioUserAgent: pairedAudio.userAgent.isEmpty ? info.userAgent : pairedAudio.userAgent,
+                    refresher: {
+                        guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: entry.videoID) else { return nil }
+                        let v = fresh.adaptiveVideo.first { $0.itag == adaptiveVideo.itag }
+                            ?? fresh.adaptiveVideo.first { $0.isAVCVideo } ?? fresh.adaptiveVideo.first
+                        let a = fresh.audioOnly.first { $0.itag == pairedAudio.itag }
+                            ?? fresh.audioOnly.first { $0.isAACAudio } ?? fresh.audioOnly.first
+                        guard let v, let a, let vURL = URL(string: v.url), let aURL = URL(string: a.url) else { return nil }
+                        return (videoURL: vURL, videoUserAgent: v.userAgent.isEmpty ? fresh.userAgent : v.userAgent,
+                                audioURL: aURL, audioUserAgent: a.userAgent.isEmpty ? fresh.userAgent : a.userAgent)
+                    })''',
+        "round10 later adaptive refresher")
+
+# Ghost: a refresher slot on the audio engine, fed by the session.
+s = rep(s, r'''    struct Source {
+        let url: URL
+        let userAgent: String
+    }''',
+        r'''    struct Source {
+        let url: URL
+        let userAgent: String
+    }
+
+    /// Round 10: set by the player session; re-mints this source's
+    /// stream URL on demand so the FILE route never has to fetch a
+    /// URL minted when playback started (googlevideo URLs are
+    /// signed for the minting IP and expire ~6h after minting).
+    var sourceRefresher: (() async -> Source?)?''',
+        "round10 ghost sourceRefresher property")
+
+# Ghost FILE route: fetch through downloadWithRemint.
+s = rep(s, r'''        let downloadedFile = try? await TrapTubeDirectDownloader.shared.download(
+            from: source.url, userAgent: source.userAgent, onProgress: { _ in })''',
+        r'''        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = sourceRefresher else { return nil }
+            guard let fresh = await refresh() else { return nil }
+            return (url: fresh.url, userAgent: fresh.userAgent)
+        }
+        let downloadedFile = try? await TrapTubeDirectDownloader.shared.downloadWithRemint(
+            from: source.url, userAgent: source.userAgent, remint: remint, onProgress: { _ in })''',
+        "round10 ghost file route remint")
+
+# Session: feed the ghost a refresher for the current video.
+s = rep(s, r'''            self.ghost.setBaselineRate(self.rate)''',
+        r'''            let ghostVideoID = info.videoID
+            self.ghost.sourceRefresher = {
+                guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: ghostVideoID) else { return nil }
+                return Self.ghostSource(info: fresh)
+            }
+            self.ghost.setBaselineRate(self.rate)''',
+        "round10 session ghost refresher")
+
+p.write_text(s)
+
+# =====================================================================
+# Round 10 (diag): make the crash trail UNMISSABLE.
+#
+# Round 9 surfaced the previous run's summary ONLY as a 9-pt line
+# under the native player's status text, and summarize()
+# suppressed it whenever the previous run had reached "run
+# healthy" after its last load began. That pairing erased
+# exactly the crash the trail exists to name: markRunHealthy()
+# records "run healthy" the moment an EQ attach RETURNS (and
+# when the ghost feed goes live / at the first drift tick), and
+# a tap process-callback crash can only happen after that - so
+# "crashes right after eq attaching" always summarized to nil,
+# and the user reported "I don't see no debug line anywhere."
+# Fixes, display-only (the trail format, the step set and every
+# record() call site are untouched):
+#   1. summarize() is replaced by summarizeDiagnostics(): the
+#      previous run's last real pipeline step + format facts,
+#      never suppressed by a clean stop or a healthy marker; a
+#      trailing "run healthy" is walked back past, because the
+#      marker is written by the display layer itself.
+#   2. The player line reads the diagnostics summary (session
+#      init); markRunHealthy() still clears the live player
+#      line once THIS run plays healthily.
+#   3. Settings gains an always-visible Diagnostics card: the
+#      same boot-captured summary, the last 30 trail lines in a
+#      monospaced scroll block, and a ShareLink exporting the
+#      full trail text - reachable without opening the player.
+# =====================================================================
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# --- Crash trail: replace the suppressing summary with the
+# diagnostics summary (declaration, getter, boot capture).
+s = rep(s, r'''    private static var storedPreviousSummary: String?''',
+        r'''    /// Round 10 (diag): the previous run's last step,
+    /// captured at boot WITHOUT the display suppression Round
+    /// 9's summarize() applied. That suppression returned nil
+    /// whenever the previous run had reached "run healthy"
+    /// after its last load began - but markRunHealthy() writes
+    /// that marker the moment an EQ attach returns, and a tap
+    /// process-callback crash can only happen after that, so
+    /// the exact crash this trail exists to name was the one
+    /// case the summary erased. Diagnostics never suppresses.
+    private static var storedPreviousDiagnostics: String?''',
+        "round10diag stored diagnostics")
+
+s = rep(s, r'''    static var previousRunSummary: String? {
+        _ = boot
+        return storedPreviousSummary
+    }''',
+        r'''    static var previousRunDiagnostics: String? {
+        _ = boot
+        return storedPreviousDiagnostics
+    }
+
+    /// The full current trail text (every run still on disk).
+    /// Read live, so the Settings diagnostics page shows the
+    /// trail exactly as it stands when the page is opened.
+    static func trailText() -> String {
+        _ = boot
+        guard let fileURL, let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return "" }
+        return text
+    }
+
+    /// The last `lineCount` lines of the trail, for display.
+    static func trailTail(_ lineCount: Int) -> String {
+        let text = trailText()
+        guard !text.isEmpty else { return "" }
+        let lines = text.split(separator: "\n").map(String.init)
+        return lines.suffix(lineCount).joined(separator: "\n")
+    }''',
+        "round10diag diagnostics accessors")
+
+s = rep(s, r'''        storedPreviousSummary = summarize(lines)''',
+        r'''        storedPreviousDiagnostics = summarizeDiagnostics(lines)''',
+        "round10diag boot capture")
+
+s = rep(s, r'''    private static func summarize(_ lines: [String]) -> String? {
+        let meaningful = lines.filter { !$0.contains("heartbeat") }
+        guard let last = meaningful.last else { return nil }
+        if last.contains("session stop (clean)") { return nil }
+        // A previous run that reached healthy playback after its
+        // last load began left no crash residue to surface.
+        var sawLoad = false
+        var healthyAfterLoad = false
+        for line in meaningful {
+            if line.contains("load begin") { sawLoad = true; healthyAfterLoad = false }
+            if line.contains("run healthy") { healthyAfterLoad = true }
+        }
+        if sawLoad && healthyAfterLoad { return nil }
+        let step = stripTimestamp(last)
+        let facts = meaningful.last {
+            $0.contains("(track fmt:") || $0.contains("prepare (fmt:") || $0.contains("canonical format")
+        }
+        if let facts, facts != last { return step + " | " + stripTimestamp(facts) }
+        return step
+    }''',
+        r'''    /// The diagnostics summary: the previous run's last real
+    /// pipeline step plus its format facts, NEVER suppressed -
+    /// a clean stop and a healthy-then-crash run are both
+    /// reported as what they were. A trailing "run healthy"
+    /// marker is walked back past: markRunHealthy() writes it
+    /// when an attach succeeds, so the step before it is the
+    /// last step the pipeline itself reached - and a crash in
+    /// the first render callback lands after the marker, not
+    /// before it.
+    private static func summarizeDiagnostics(_ lines: [String]) -> String? {
+        let meaningful = lines.filter { !$0.contains("heartbeat") }
+        guard !meaningful.isEmpty else { return nil }
+        let stepLine = meaningful.last { !$0.contains("run healthy") } ?? meaningful[meaningful.count - 1]
+        let step = stripTimestamp(stepLine)
+        let facts = meaningful.last {
+            $0.contains("(track fmt:") || $0.contains("prepare (fmt:") || $0.contains("canonical format")
+        }
+        if let facts, facts != stepLine { return step + " | " + stripTimestamp(facts) }
+        return step
+    }''',
+        "round10diag summarize diagnostics")
+
+# --- Session init: the player line reads the diagnostics
+# summary, so a post-healthy crash in the previous run still
+# surfaces. markRunHealthy() still clears the live line once
+# THIS run plays healthily (the boot-captured value Settings
+# shows is unaffected).
+s = rep(s, r'''        lastRunReached = TrapTubeCrashTrail.previousRunSummary''',
+        r'''        lastRunReached = TrapTubeCrashTrail.previousRunDiagnostics''',
+        "round10diag session reads diagnostics")
+
+p.write_text(s)
+
+# --- SettingsView.swift: the always-visible Diagnostics card.
+p = file("SettingsView.swift")
+s = p.read_text()
+
+s = rep(s, r'''    @ObservedObject private var adBlockCenter = TrapTubeAdBlockCenter.shared''',
+        r'''    @ObservedObject private var adBlockCenter = TrapTubeAdBlockCenter.shared
+    // Round 10 (diag): crash-trail diagnostics, loaded on appear.
+    @State private var diagLastRun: String?
+    @State private var diagTrailTail = ""
+    @State private var diagTrailText = ""''',
+        "round10diag settings state")
+
+s = rep(s, r'''                settingsCard(title: "Local library", icon: "externaldrive.fill") {
+                    infoRow("Imported audio", value: "Stored on this device")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Supported formats", value: "MP3 · M4A · AAC · WAV · AIFF")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Stem separation", value: stemService.availability.title)
+                }''',
+        r'''                settingsCard(title: "Local library", icon: "externaldrive.fill") {
+                    infoRow("Imported audio", value: "Stored on this device")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Supported formats", value: "MP3 · M4A · AAC · WAV · AIFF")
+                    Divider().overlay(.white.opacity(0.1))
+                    infoRow("Stem separation", value: stemService.availability.title)
+                }
+
+                settingsCard(title: "Diagnostics", icon: "waveform.path.ecg") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Last run reached").font(.subheadline.bold()).foregroundStyle(.white)
+                        Text(diagLastRun ?? "No previous run recorded")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Divider().overlay(.white.opacity(0.1))
+                    Text("Crash trail - latest steps").font(.subheadline.bold()).foregroundStyle(.white)
+                    ScrollView {
+                        Text(diagTrailTail.isEmpty ? "The crash trail is empty." : diagTrailTail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color(hex: "D2D0D2"))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(height: 180)
+                    .padding(10)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                    ShareLink(item: diagTrailText) {
+                        Label("Share crash trail", systemImage: "square.and.arrow.up")
+                            .font(.subheadline.bold())
+                    }
+                    .foregroundStyle(theme.accent)
+                    .disabled(diagTrailText.isEmpty)
+                }''',
+        "round10diag settings card")
+
+s = rep(s, r'''        .onAppear { stemService.refresh() }''',
+        r'''        .onAppear { stemService.refresh(); loadDiagnostics() }''',
+        "round10diag settings onAppear")
+
+s = rep(s, r'''    private func settingsToggle(_ title: String, detail: String, value: Binding<Bool>) -> some View {''',
+        r'''    /// Round 10 (diag): load the crash trail's boot-captured
+    /// previous-run summary and the live trail tail. Unlike the
+    /// player's status line, this page never suppresses: it
+    /// shows the previous run's last step even after clean or
+    /// healthy-then-crash runs.
+    private func loadDiagnostics() {
+        diagLastRun = TrapTubeCrashTrail.previousRunDiagnostics
+        diagTrailText = TrapTubeCrashTrail.trailText()
+        diagTrailTail = TrapTubeCrashTrail.trailTail(30)
+    }
+
+    private func settingsToggle(_ title: String, detail: String, value: Binding<Bool>) -> some View {''',
+        "round10diag settings loader")
+
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
