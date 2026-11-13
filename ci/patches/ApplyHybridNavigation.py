@@ -8727,8 +8727,9 @@ enum TrapTubeCrashTrail {
     /// The reader track's ACTUAL emitted format description -
     /// the fact two audit rounds could only guess at.
     static func describeTrackFormat(_ track: AVAssetTrack) -> String {
-        guard let desc = track.formatDescriptions.first as? CMFormatDescription,
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
+        guard let first = track.formatDescriptions.first else { return "unavailable" }
+        let desc = first as CMFormatDescription
+        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
         var layoutTag: UInt32 = 0
         var layoutSize = 0
         if let layout = CMAudioFormatDescriptionGetChannelLayout(desc, sizeOut: &layoutSize) {
@@ -8738,7 +8739,8 @@ enum TrapTubeCrashTrail {
     }
 
     static func trackMatchesCanonical(_ track: AVAssetTrack, canonical: AVAudioFormat) -> Bool {
-        guard let desc = track.formatDescriptions.first as? CMFormatDescription else { return false }
+        guard let first = track.formatDescriptions.first else { return false }
+        let desc = first as CMFormatDescription
         return AVAudioFormat(cmAudioFormatDescription: desc) == canonical
     }
 
