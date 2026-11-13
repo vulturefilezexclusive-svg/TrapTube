@@ -5179,4 +5179,688 @@ s = rep(s, """            VideoPlayer(player: mediaPlayer.player)
         "round5 downloaded player error surface")
 p.write_text(s)
 
+# --- Round 6: native player crash-proofing, EQ button opens the
+# native player directly, downloads HTTP 403 ranged fallback --------
+# Crash audit of the Round 5 native stream player path (the app died
+# while the badge read RESOLVING...):
+#  (a) makePlayerItem built its AVMutableComposition insert ranges
+#      from the assets' reported durations. An asset's duration can
+#      exceed its own track's timeRange, and inserting a range past
+#      the end of a track raises inside AVFoundation instead of
+#      throwing a Swift error - a hard crash in the middle of
+#      resolving, uncapturable by do/catch. Fixed by construction:
+#      insert ranges now come from each track's OWN loaded timeRange,
+#      clamped to the shorter track, so an out-of-bounds insert is
+#      impossible, and every failure lands in PLAYBACK FAILED.
+#  (b) The start task checked cancellation only after the item was
+#      built and awaited the EQ attach inline (no separate task to
+#      cancel; an attach completing after dismissal could still
+#      publish). Fixed to the downloaded player's pattern: checks
+#      after every await, attach in its own task under the generation
+#      token + current-item identity, stop() cancels both tasks and
+#      invalidates the single status observation exactly once.
+#  (c) TrapTubeInnerTube.cachedVisitorData was unsynchronized shared
+#      mutable state while fetchInfo is called concurrently (mod
+#      sheet, download sheet, download-later queue, native player) -
+#      a data race on a String, i.e. memory corruption when two
+#      first-fetches overlap. Now lock-guarded.
+#  (d) Presentation: both native-player entry points presented a
+#      fullScreenCover from INSIDE a sheet. Presentation is unified
+#      at the host level through TrapTubeNativePlayCenter; sheets
+#      dismiss first and the center defers until the dismissal lands.
+# EQ button: the injected EQ button (script message + traptube-eq://
+# fallback) now carries the video id and playback position and lands
+# in TrapTubeNativePlayRouter, which opens the current video
+# DIRECTLY in the native player (page video paused, position carried
+# over). The stream EQ sheet remains only as the fallback when no
+# video id is known, and its banner's native-player button is now
+# always offered when a video is playing on that host.
+# Downloads 403 audit: the header flow was already correct end to
+# end (fetchInfo stamps every format with its minting profile's user
+# agent; the sheet, Download later and the manager pass it through;
+# TrapTubeDirectDownloader sends that UA + Referer; FFmpeg only ever
+# reads local temp files, never URLs). What differs from the fetch
+# path that googlevideo accepts (AVPlayer) is the request SHAPE: a
+# plain full-file GET. The downloader now falls back on HTTP 403 to
+# ranged chunk fetching with the exact AVPlayer header shape (same
+# UA + Referer + Range on every chunk), and reports the failing host
+# if both strategies are refused.
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# (c) visitor-data cache lock (write site first, so the declaration
+# rep's helper bodies can't make the write pattern ambiguous).
+s = rep(s, r'''        cachedVisitorData = value''', r'''        storeVisitor(value)''',
+        "round6 visitor store call")
+s = rep(s, r'''        if let cachedVisitorData { return cachedVisitorData }''', r'''        if let cached = cachedVisitor() { return cached }''',
+        "round6 visitor read call")
+s = rep(s, r'''    private static var cachedVisitorData: String?''', r'''    private static var cachedVisitorData: String?
+    // Round 6: fetchInfo runs concurrently (mod sheet, download
+    // sheet, download-later queue, native player); the visitor cache
+    // is shared mutable state and is now lock-guarded.
+    private static let visitorDataLock = NSLock()
+
+    private static func cachedVisitor() -> String? {
+        visitorDataLock.lock()
+        defer { visitorDataLock.unlock() }
+        return cachedVisitorData
+    }
+
+    private static func storeVisitor(_ value: String) {
+        visitorDataLock.lock()
+        cachedVisitorData = value
+        visitorDataLock.unlock()
+    }''',
+        "round6 visitor lock")
+
+# EQ button payload: video id + position on both channels.
+s = rep(s, r'''          function fireEQ() {
+            if (!post("trapTubeEQ", { action: "open" })) {
+              try { window.location.href = "traptube-eq://open"; } catch (e) {}
+            }
+          }''', r'''          function fireEQ() {
+            var id = currentVideoID();
+            var t = 0;
+            try {
+              var v = document.querySelector("#movie_player video") || document.querySelector("video");
+              if (v && isFinite(v.currentTime)) t = Math.floor(v.currentTime);
+            } catch (e) {}
+            if (!post("trapTubeEQ", { action: "open", videoID: id || "", startAt: t })) {
+              try { window.location.href = "traptube-eq://open?v=" + encodeURIComponent(id || "") + "&t=" + t; } catch (e) {}
+            }
+          }''',
+        "round6 fireEQ payload")
+
+# Session: the scheme fallback lands in the same router, and the
+# session gains a pause for the page video.
+s = rep(s, r'''        if scheme == "traptube-eq" {
+            TrapTubeWebEQCenter.shared.present(host: host(for: webView))
+            return true
+        }''', r'''        if scheme == "traptube-eq" {
+            // Round 6: the fallback channel carries the video id and
+            // position too, and lands in the same router as the
+            // script-message channel.
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let videoID = items.first { $0.name == "v" }?.value
+            let startAt = items.first { $0.name == "t" }?.value.flatMap { Double($0) } ?? 0
+            TrapTubeNativePlayRouter.openEQ(host: host(for: webView), videoID: videoID, startAt: startAt)
+            return true
+        }''',
+        "round6 scheme eq route")
+s = rep(s, r'''    func closeMini() {''', r'''    /// Round 6: opening the native player pauses the page video so
+    /// the two never play over each other.
+    func pauseWatchVideo(for host: TrapTubeHostTab) {
+        webViews[host]?.evaluateJavaScript("(() => { var v = document.querySelector('video'); if (v && !v.paused) v.pause(); })()")
+        if watchHost == host { watchIsPlaying = false }
+    }
+
+    func closeMini() {''',
+        "round6 session pause")
+
+# Script handler: EQ open routes to the native player.
+s = rep(s, r'''        if (body["action"] as? String) == "open" {
+            TrapTubeWebEQCenter.shared.present(host: host)
+        }''', r'''        if (body["action"] as? String) == "open" {
+            // Round 6: the EQ button opens the current video in the
+            // native TrapTube player with the EQ attached; the router
+            // falls back to the WebEQ sheet only when no video id is
+            // known for this surface.
+            let videoID = body["videoID"] as? String
+            let startAt = (body["startAt"] as? NSNumber)?.doubleValue ?? 0
+            TrapTubeNativePlayRouter.openEQ(host: host, videoID: videoID, startAt: startAt)
+        }''',
+        "round6 eq handler route")
+
+# Mod sheet: native play goes through the shared center (this sheet
+# dismisses first); the in-sheet cover and its state go away.
+s = rep(s, r'''    @State private var showPlayOptions = false
+    @State private var playItem: TrapTubeDownloadedMedia?
+    @State private var nativePlay: TrapTubeNativePlayRequest?''', r'''    @State private var showPlayOptions = false
+    @State private var playItem: TrapTubeDownloadedMedia?''',
+        "round6 mod sheet state")
+s = rep(s, r'''                        modRow("TrapTube Player (EQ)", detail: "Stream it now with the 16-band EQ", icon: "waveform") {
+                            nativePlay = TrapTubeNativePlayRequest(videoID: request.videoID, title: displayTitle)
+                        }''', r'''                        modRow("TrapTube Player (EQ)", detail: "Stream it now with the 16-band EQ", icon: "waveform") {
+                            // Round 6: unified host-level
+                            // presentation - dismiss this sheet and
+                            // let the shared center present the player.
+                            let videoID = request.videoID
+                            let title = displayTitle
+                            dismiss()
+                            TrapTubeNativePlayCenter.shared.present(videoID: videoID, title: title, afterSheetDismissal: true)
+                        }''',
+        "round6 mod sheet native row")
+s = rep(s, r'''        .sheet(item: $playItem) { item in
+            TrapTubeDownloadedVideoPlayer(item: item)
+                .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $nativePlay) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }
+    }''', r'''        .sheet(item: $playItem) { item in
+            TrapTubeDownloadedVideoPlayer(item: item)
+                .preferredColorScheme(.dark)
+        }
+    }''',
+        "round6 mod sheet cover removed")
+
+# Stream EQ sheet: same unification, and the native-player button is
+# the main call to action whenever a video plays on this host.
+s = rep(s, r'''    @ObservedObject private var playerSession = TrapTubePlayerSession.shared
+    @State private var nativePlay: TrapTubeNativePlayRequest?''', r'''    @ObservedObject private var playerSession = TrapTubePlayerSession.shared''',
+        "round6 eq sheet state")
+s = rep(s, r'''        .presentationDetents([.large])
+        .onAppear { TrapTubePlayerSession.shared.requestEQStatus(for: host) }
+        .fullScreenCover(item: $nativePlay) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }
+    }''', r'''        .presentationDetents([.large])
+        .onAppear { TrapTubePlayerSession.shared.requestEQStatus(for: host) }
+    }''',
+        "round6 eq sheet cover removed")
+s = rep(s, r'''                if (state == "bypassed" || state == "error"),
+                   playerSession.watchHost == host, let videoID = playerSession.watchVideoID {
+                    Button {
+                        nativePlay = TrapTubeNativePlayRequest(videoID: videoID, title: playerSession.watchTitle)
+                    } label: {''', r'''                if playerSession.watchHost == host, let videoID = playerSession.watchVideoID {
+                    // Round 6: the native player is this sheet's main
+                    // call to action whenever a video is playing on
+                    // this host - it is where the EQ always attaches.
+                    Button {
+                        dismiss()
+                        TrapTubeNativePlayCenter.shared.present(videoID: videoID, title: playerSession.watchTitle, afterSheetDismissal: true)
+                    } label: {''',
+        "round6 eq sheet native button")
+
+# Hosts: both present the native player from the shared center.
+s = rep(s, r'''    @ObservedObject private var homeEQCenter = TrapTubeWebEQCenter.shared''', r'''    @ObservedObject private var homeEQCenter = TrapTubeWebEQCenter.shared
+    @ObservedObject private var homeNativePlayCenter = TrapTubeNativePlayCenter.shared''',
+        "round6 home center")
+s = rep(s, r'''        .sheet(item: $homeEQCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }''', r'''        .sheet(item: $homeEQCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+        .fullScreenCover(item: $homeNativePlayCenter.activeRequest) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }''',
+        "round6 home native cover")
+s = rep(s, r'''    @ObservedObject private var modCenter = TrapTubeModCenter.shared
+    @ObservedObject private var eqCenter = TrapTubeWebEQCenter.shared''', r'''    @ObservedObject private var modCenter = TrapTubeModCenter.shared
+    @ObservedObject private var eqCenter = TrapTubeWebEQCenter.shared
+    @ObservedObject private var nativePlayCenter = TrapTubeNativePlayCenter.shared''',
+        "round6 account center")
+s = rep(s, r'''        .sheet(item: $eqCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }''', r'''        .sheet(item: $eqCenter.activeRequest) { request in
+            TrapTubeWebEQSheet(host: request.host)
+                .environmentObject(theme)
+        }
+        .fullScreenCover(item: $nativePlayCenter.activeRequest) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }''',
+        "round6 account native cover")
+
+# The native player block itself: truncate the Round 5 block (it is
+# the last thing in this file) and append the Round 6 version.
+ROUND6_NATIVE_PLAYER_SWIFT = r'''
+
+// MARK: - Round 6 native stream player (crash-proofed) + presentation
+//
+// Round 6 audit of the Round 5 player (the app crashed while the
+// badge read RESOLVING...):
+//  (a) makePlayerItem built its AVMutableComposition insert ranges
+//      from the assets' reported durations. An asset's duration can
+//      exceed its own track's timeRange, and inserting a range past
+//      the end of a track raises inside AVFoundation instead of
+//      throwing a Swift error - a hard crash mid-resolve. The ranges
+//      now come from each track's OWN loaded timeRange, clamped to
+//      the shorter track, so an out-of-bounds insert is impossible
+//      by construction and every failure lands in PLAYBACK FAILED.
+//  (b) The start task checked cancellation once and awaited the EQ
+//      attach inline. It now checks cancellation/generation after
+//      every await and attaches in a separate task - the exact
+//      pattern the Round 5 downloaded-file player was hardened to -
+//      and stop() cancels both tasks and invalidates the single
+//      status observation exactly once.
+//  (c) Presentation is unified through TrapTubeNativePlayCenter:
+//      both tab hosts present the player; no sheet presents it from
+//      inside itself anymore.
+
+struct TrapTubeNativePlayRequest: Identifiable {
+    let videoID: String
+    let title: String
+    var startAt: TimeInterval = 0
+    var id: String { videoID }
+}
+
+/// The single presentation path for the native player. Both watch
+/// hosts observe this center and present the player as a full-screen
+/// cover; the mod sheet, the stream EQ sheet and the in-player EQ
+/// button all land here.
+final class TrapTubeNativePlayCenter: ObservableObject {
+    static let shared = TrapTubeNativePlayCenter()
+    @Published var activeRequest: TrapTubeNativePlayRequest?
+    private var pendingPresent: DispatchWorkItem?
+    private init() {}
+
+    /// When the caller is a sheet it dismisses itself first and the
+    /// presentation is deferred briefly so the dismissal completes -
+    /// a cover presented over a still-dismissing sheet can be
+    /// dropped by SwiftUI's presentation machinery.
+    func present(videoID: String, title: String, startAt: TimeInterval = 0, afterSheetDismissal: Bool = false) {
+        let request = TrapTubeNativePlayRequest(videoID: videoID, title: title, startAt: startAt)
+        DispatchQueue.main.async {
+            self.pendingPresent?.cancel()
+            if afterSheetDismissal {
+                let work = DispatchWorkItem { [weak self] in self?.activeRequest = request }
+                self.pendingPresent = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+            } else {
+                self.activeRequest = request
+            }
+        }
+    }
+}
+
+enum TrapTubeNativePlayRouter {
+    /// The in-player EQ button's intent: open the page's current
+    /// video in the native TrapTube player with the EQ attached.
+    /// Falls back to the stream EQ sheet only when no video id is
+    /// known for the tapped surface.
+    static func openEQ(host: TrapTubeHostTab?, videoID: String?, startAt: TimeInterval) {
+        let session = TrapTubePlayerSession.shared
+        var resolvedID = (videoID?.isEmpty == false) ? videoID : nil
+        if resolvedID == nil, let host, session.watchHost == host {
+            resolvedID = session.watchVideoID
+        }
+        if let host, let resolvedID {
+            // The native player takes over the audio; pause the page
+            // video so the two never play over each other.
+            session.pauseWatchVideo(for: host)
+            TrapTubeNativePlayCenter.shared.present(videoID: resolvedID, title: session.watchTitle, startAt: startAt)
+        } else {
+            TrapTubeWebEQCenter.shared.present(host: host)
+        }
+    }
+}
+
+@MainActor
+final class TrapTubeNativeStreamPlayerModel: ObservableObject {
+    enum Phase {
+        case resolving
+        case playing
+        case failed(String)
+    }
+
+    let player = AVPlayer()
+    @Published private(set) var phase: Phase = .resolving
+    @Published private(set) var equalizerActive = false
+    @Published private(set) var eqAttachFinished = false
+
+    private var startTask: Task<Void, Never>?
+    private var attachTask: Task<Void, Never>?
+    private var statusObservation: NSKeyValueObservation?
+    private var currentItem: AVPlayerItem?
+    private var generation = 0
+
+    func start(videoID: String, startAt: TimeInterval = 0) {
+        guard startTask == nil else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let startGeneration = generation
+        startTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let info = try await TrapTubeInnerTube.fetchInfo(videoID: videoID)
+                guard !Task.isCancelled, self.generation == startGeneration else { return }
+                let item = try await Self.makePlayerItem(info: info)
+                guard !Task.isCancelled, self.generation == startGeneration else { return }
+                self.currentItem = item
+                self.statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+                    guard observedItem.status == .failed else { return }
+                    let message = observedItem.error?.localizedDescription ?? "The stream failed to load."
+                    Task { @MainActor in self?.phase = .failed(message) }
+                }
+                self.player.replaceCurrentItem(with: item)
+                self.phase = .playing
+                if startAt > 5 {
+                    // Pick up roughly where the page video left off;
+                    // AVPlayer queues the seek until the item is ready.
+                    self.player.seek(to: CMTime(seconds: startAt, preferredTimescale: 600),
+                                     toleranceBefore: CMTime(seconds: 2, preferredTimescale: 600),
+                                     toleranceAfter: .zero)
+                }
+                self.player.play()
+                // The EQ tap attaches alongside playback in its own
+                // task (the downloaded player's pattern): it never
+                // gates playback, and stop() can cancel it cleanly.
+                self.attachTask = Task { [weak self] in
+                    let attached = await TrapTubeTapEQ.shared.attach(to: item)
+                    guard let self, self.generation == startGeneration, self.currentItem === item else { return }
+                    self.equalizerActive = attached
+                    self.eqAttachFinished = true
+                }
+            } catch {
+                if !Task.isCancelled, self.generation == startGeneration {
+                    self.phase = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func stop() {
+        generation += 1
+        startTask?.cancel()
+        startTask = nil
+        attachTask?.cancel()
+        attachTask = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        currentItem = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        equalizerActive = false
+        eqAttachFinished = false
+    }
+
+    /// Muxed MP4 when YouTube offers one; otherwise an AVC + AAC
+    /// composition built from the adaptive streams (the same pairing
+    /// the download merge uses).
+    private static func makePlayerItem(info: TrapTubeVideoInfo) async throws -> AVPlayerItem {
+        if let muxed = info.muxed.first, let url = URL(string: muxed.url) {
+            let asset = AVURLAsset(url: url, options: headerOptions(userAgent: muxed.userAgent.isEmpty ? info.userAgent : muxed.userAgent))
+            return AVPlayerItem(asset: asset)
+        }
+        guard let video = info.adaptiveVideo.first(where: { $0.isAVCVideo }),
+              let audio = info.audioOnly.first(where: { $0.isAACAudio }),
+              let videoURL = URL(string: video.url),
+              let audioURL = URL(string: audio.url) else {
+            throw TrapTubeModError.unplayable("no stream this player can use (it needs a muxed MP4 or an AVC + AAC pair)")
+        }
+        let videoAsset = AVURLAsset(url: videoURL, options: headerOptions(userAgent: video.userAgent.isEmpty ? info.userAgent : video.userAgent))
+        let audioAsset = AVURLAsset(url: audioURL, options: headerOptions(userAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent))
+        guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw TrapTubeModError.unplayable("the adaptive streams had no usable tracks")
+        }
+        // Round 6 defensive composition: the insert ranges are built
+        // from each track's OWN loaded timeRange and clamped to the
+        // shorter track - never from the assets' reported durations,
+        // which can exceed a track's real range and make AVFoundation
+        // raise (crash) instead of throwing. By construction each
+        // insert range lies inside its track's timeRange.
+        let videoRange = try await videoTrack.load(.timeRange)
+        let audioRange = try await audioTrack.load(.timeRange)
+        let target = CMTimeMinimum(videoRange.duration, audioRange.duration)
+        guard videoRange.isValid, audioRange.isValid,
+              target.isValid, target.isNumeric, target.seconds > 0 else {
+            throw TrapTubeModError.unplayable("the adaptive streams reported no usable timeline")
+        }
+        let composition = AVMutableComposition()
+        guard let compositionVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw TrapTubeModError.unplayable("could not build the playback composition")
+        }
+        do {
+            try compositionVideo.insertTimeRange(CMTimeRange(start: videoRange.start, duration: target), of: videoTrack, at: .zero)
+            try compositionAudio.insertTimeRange(CMTimeRange(start: audioRange.start, duration: target), of: audioTrack, at: .zero)
+        } catch {
+            throw TrapTubeModError.unplayable("could not assemble the video and audio streams (\(error.localizedDescription))")
+        }
+        if let transform = try? await videoTrack.load(.preferredTransform) {
+            compositionVideo.preferredTransform = transform
+        }
+        return AVPlayerItem(asset: composition)
+    }
+
+    private static func headerOptions(userAgent: String) -> [String: Any] {
+        ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": userAgent, "Referer": "https://www.youtube.com/"]]
+    }
+}
+
+struct TrapTubeNativeStreamPlayer: View {
+    let request: TrapTubeNativePlayRequest
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audio: AudioEngineManager
+    @EnvironmentObject private var theme: ThemeManager
+    @StateObject private var model = TrapTubeNativeStreamPlayerModel()
+    @State private var showEqualizer = false
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+            VideoPlayer(player: model.player)
+                .background(.black)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "waveform")
+                        Text(badgeText)
+                    }
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(.black.opacity(0.72), in: Capsule())
+                    Spacer()
+                    Button {
+                        showEqualizer = true
+                    } label: {
+                        Label("EQ", systemImage: "slider.horizontal.3")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 8)
+                            .background(.black.opacity(0.72), in: Capsule())
+                    }
+                    .accessibilityLabel("Open the equalizer")
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(.black.opacity(0.72), in: Circle())
+                    }
+                    .accessibilityLabel("Close player")
+                }
+                if !request.title.isEmpty {
+                    Text(request.title)
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        .lineLimit(2)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
+                }
+            }
+            .padding(.top, 12)
+            .padding(.horizontal, 12)
+
+            if case .resolving = model.phase {
+                VStack(spacing: 12) {
+                    ProgressView().tint(.white)
+                    Text("Resolving stream…").font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if case .failed(let message) = model.phase {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.title2).foregroundStyle(Color(hex: "FF7A84"))
+                    Text(message).font(.subheadline).foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Close") { dismiss() }
+                        .font(.subheadline.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 9)
+                        .background(.white.opacity(0.12), in: Capsule())
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black.opacity(0.66))
+            }
+        }
+        .background(.black)
+        .task { model.start(videoID: request.videoID, startAt: request.startAt) }
+        .onDisappear { model.stop() }
+        .onChange(of: audio.eqGains) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.bassBoost) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.masterGain) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .sheet(isPresented: $showEqualizer) {
+            EqualizerView().environmentObject(audio).environmentObject(theme).presentationDetents([.large])
+        }
+    }
+
+    private var badgeText: String {
+        switch model.phase {
+        case .resolving: return "RESOLVING…"
+        case .failed: return "PLAYBACK FAILED"
+        case .playing:
+            if !model.eqAttachFinished { return "EQ ATTACHING…" }
+            return model.equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM"
+        }
+    }
+}
+'''
+if "Round 6 native stream player (crash-proofed)" not in s:
+    r6_marker = "\n// MARK: - Round 5 native stream player"
+    if r6_marker not in s:
+        raise SystemExit("round6 native player anchor missing")
+    s = s[:s.index(r6_marker)] + ROUND6_NATIVE_PLAYER_SWIFT + "\n"
+p.write_text(s)
+
+# Downloads: ranged fallback inside TrapTubeDirectDownloader.
+p = file("TypeTypeService.swift")
+s = p.read_text()
+s = rep(s, r'''enum TrapTubeDirectDownloadError: LocalizedError {
+    case badStatus(Int)
+    case emptyDownload''', r'''enum TrapTubeDirectDownloadError: LocalizedError {
+    case badStatus(Int)
+    case badStatusForHost(Int, String)
+    case emptyDownload''',
+        "round6 download error host case")
+s = rep(s, r'''        case .badStatus(let code):
+            return "The download server returned HTTP \(code)."''', r'''        case .badStatus(let code):
+            return "The download server returned HTTP \(code)."
+        case .badStatusForHost(let code, let host):
+            return "The download server returned HTTP \(code) (host: \(host))."''',
+        "round6 download error host text")
+ROUND6_DOWNLOAD_FUNC = r'''    func download(from url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {
+        // Round 6: two strategies. The plain download task is the
+        // fast path. If googlevideo refuses it with HTTP 403, fall
+        // back to fetching the file in ranged chunks with the exact
+        // header shape AVPlayer uses for these URLs - the minting
+        // profile's User-Agent + Referer + a Range on every chunk.
+        do {
+            return try await downloadWhole(url: url, userAgent: userAgent, onProgress: onProgress)
+        } catch TrapTubeDirectDownloadError.badStatus(let code) where code == 403 {
+            do {
+                return try await downloadInChunks(url: url, userAgent: userAgent, onProgress: onProgress)
+            } catch let chunkError as TrapTubeDirectDownloadError {
+                if case .badStatus(let chunkCode) = chunkError {
+                    throw TrapTubeDirectDownloadError.badStatusForHost(chunkCode, url.host ?? "unknown host")
+                }
+                throw chunkError
+            }
+        }
+    }
+
+    private func downloadWhole(url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {
+        var request = URLRequest(url: url)
+        if let ua = userAgent, !ua.isEmpty {
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        }
+        request.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            let task = session.downloadTask(with: request)
+            stateLock.lock()
+            continuations[task.taskIdentifier] = continuation
+            progressBlocks[task.taskIdentifier] = onProgress
+            stateLock.unlock()
+            task.resume()
+        }
+    }
+
+    /// Ranged fallback: sequential chunks appended to one temp file.
+    /// A 200 answer to a ranged request means the server ignored the
+    /// Range header and sent the whole file - that body IS the file.
+    private func downloadInChunks(url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {
+        let chunkSize: Int64 = 8 * 1024 * 1024
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tt-direct-\(UUID().uuidString)-chunked.bin")
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        var offset: Int64 = 0
+        var total: Int64 = -1
+        do {
+            while total < 0 || offset < total {
+                var request = URLRequest(url: url)
+                if let ua = userAgent, !ua.isEmpty {
+                    request.setValue(ua, forHTTPHeaderField: "User-Agent")
+                }
+                request.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
+                let end = offset + chunkSize - 1
+                request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw TrapTubeDirectDownloadError.badStatus(-1)
+                }
+                if http.statusCode == 200 {
+                    if offset == 0 {
+                        try handle.write(contentsOf: data)
+                        offset = Int64(data.count)
+                        total = offset
+                        break
+                    }
+                    throw TrapTubeDirectDownloadError.badStatus(http.statusCode)
+                }
+                guard http.statusCode == 206 else {
+                    throw TrapTubeDirectDownloadError.badStatus(http.statusCode)
+                }
+                if total < 0, let rangeHeader = http.value(forHTTPHeaderField: "Content-Range"),
+                   let slash = rangeHeader.lastIndex(of: "/"),
+                   let parsed = Int64(rangeHeader[rangeHeader.index(after: slash)...]) {
+                    total = parsed
+                }
+                if data.isEmpty { break }
+                try handle.write(contentsOf: data)
+                offset += Int64(data.count)
+                if total > 0 { onProgress(min(1, Double(offset) / Double(total))) }
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+        guard offset > 0 else {
+            try? FileManager.default.removeItem(at: destination)
+            throw TrapTubeDirectDownloadError.emptyDownload
+        }
+        onProgress(1)
+        return destination
+    }
+
+'''
+s = splice_between(s, "    func download(from url: URL, userAgent: String?, onProgress: @escaping (Double) -> Void) async throws -> URL {",
+                   "    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,",
+                   ROUND6_DOWNLOAD_FUNC, "round6 downloader strategies")
+# A 416 to a chunk past the end (when the server never sent a
+# Content-Range total) means the file is already complete.
+s = rep(s, r'''                guard http.statusCode == 206 else {
+                    throw TrapTubeDirectDownloadError.badStatus(http.statusCode)
+                }''', r'''                guard http.statusCode == 206 else {
+                    if http.statusCode == 416, offset > 0 { break }
+                    throw TrapTubeDirectDownloadError.badStatus(http.statusCode)
+                }''',
+        "round6 chunk 416 completion")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
