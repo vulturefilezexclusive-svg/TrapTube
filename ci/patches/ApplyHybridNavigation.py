@@ -3324,4 +3324,340 @@ s = rep(s, """        .padding(.vertical, 6)
         }""", "tab bar OLED")
 p.write_text(s)
 
+# =====================================================================
+# Round 4 - ad blocking, ported from how the YTPlus/YTLite build
+# actually does it (evidence: ~/workspace/traptube-hybrid/
+# ad-blocking-research.md). YTLite's "Remove ads" (localization key
+# RemoveAds, NSUserDefaults key noAds, Feed page row 1) is implemented
+# by FeedManager as host RENDERER FILTERING over the protobuf section
+# trees: ad renderers (tested via isAdRenderer: / hasAdLoggingData)
+# are dropped before cells are built, and the player response's ad
+# arrays (playerAdsArray / adSlotsArray) never reach playback. There
+# is NO network layer in the dylib - zero NSURLProtocol /
+# WKContentRuleList / canInitWithRequest references and zero ad-host
+# or tracking-endpoint strings - so this round deliberately ships NO
+# WKContentRuleList either. The web-view equivalent of the same layer:
+# an in-page script hides ad renderers in the feed/watch DOM, clicks
+# the skip button the moment an in-stream ad offers one, and mutes +
+# fast-forwards unskippable ads (the ad still loads and plays -
+# nothing is ever blocked). If YouTube's enforcement interstitial
+# ever appears, the script detects it and stops all in-stream actions
+# for the rest of that page load. A Block Ads toggle (default ON) in
+# Settings rebuilds both web views live, and the page reports counts
+# (hidden / skipped / fast-forwarded) to a session counter.
+# =====================================================================
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# --- The installer additionally registers the ad-block handler and,
+# while the toggle is on, the document-start ad script. Both watch
+# web views are configured exclusively through this installer.
+s = rep(s, """        controller.add(TrapTubeWatchStateHandler.shared, name: "trapTubeState")
+""",
+        """        controller.add(TrapTubeWatchStateHandler.shared, name: "trapTubeState")
+        controller.add(TrapTubeAdBlockHandler.shared, name: "trapTubeAds")
+        if TrapTubeAdBlockCenter.isEnabled {
+            controller.addUserScript(WKUserScript(source: TrapTubeAdBlockInstaller.scriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+""", "installer ad block registration")
+
+# --- The session stores its web-view builders so the Block Ads
+# toggle can rebuild both views: a WKWebView's configuration is
+# fixed at creation, so a fresh configuration means a fresh view.
+s = rep(s, "    private var webViews: [TrapTubeHostTab: WKWebView] = [:]\n",
+        "    private var webViews: [TrapTubeHostTab: WKWebView] = [:]\n    private var builders: [TrapTubeHostTab: () -> WKWebView] = [:]\n",
+        "session builder store")
+s = rep(s, """    func webView(for host: TrapTubeHostTab, builder: () -> WKWebView) -> WKWebView {
+        if let existing = webViews[host] { return existing }
+""",
+        """    func webView(for host: TrapTubeHostTab, builder: () -> WKWebView) -> WKWebView {
+        builders[host] = builder
+        if let existing = webViews[host] { return existing }
+""", "session builder capture")
+s = rep(s, "    func applyQualityCapToAll() {",
+        """    /// Round 4: the Block Ads toggle changes which user scripts a
+    /// configuration carries; configurations are immutable after
+    /// WKWebView creation, so toggling rebuilds both watch web views
+    /// from their stored builders and reloads the page each was on.
+    func rebuildWatchWebViews() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.rebuildWatchWebViews() }
+            return
+        }
+        for (host, builder) in builders {
+            let currentURL = webViews[host]?.url
+            let fresh = builder()
+            webViews[host] = fresh
+            if let currentURL {
+                fresh.load(URLRequest(url: currentURL))
+            }
+        }
+        objectWillChange.send()
+    }
+
+    func applyQualityCapToAll() {""", "session rebuild for ad toggle")
+p.write_text(s)
+
+# --- Round 4 types, appended to YouTubeView.swift.
+ROUND4_SWIFT = r'''
+// MARK: - Round 4: ad blocking (content-level port of YTLite's noAds)
+
+/// Settings + session state for ad blocking. Mirrors YTLite's
+/// "Remove ads" (defaults key noAds): the native build drops ad
+/// renderers from the content it already fetched - it never blocks a
+/// request - so the hybrid does the equivalent inside the page and
+/// counts what it neutralizes.
+final class TrapTubeAdBlockCenter: ObservableObject {
+    static let shared = TrapTubeAdBlockCenter()
+    static let enabledKey = "TrapTube.Ads.BlockEnabled"
+
+    static var isEnabled: Bool {
+        (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
+    }
+
+    @Published var enabled: Bool {
+        didSet {
+            UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
+            TrapTubePlayerSession.shared.rebuildWatchWebViews()
+        }
+    }
+    @Published private(set) var hiddenCount = 0
+    @Published private(set) var skippedCount = 0
+    @Published private(set) var fastForwardedCount = 0
+
+    var neutralizedCount: Int { hiddenCount + skippedCount + fastForwardedCount }
+
+    private init() {
+        enabled = Self.isEnabled
+    }
+
+    func record(hidden: Int, skipped: Int, fastForwarded: Int) {
+        DispatchQueue.main.async {
+            self.hiddenCount += max(0, hidden)
+            self.skippedCount += max(0, skipped)
+            self.fastForwardedCount += max(0, fastForwarded)
+        }
+    }
+}
+
+final class TrapTubeAdBlockHandler: NSObject, WKScriptMessageHandler {
+    static let shared = TrapTubeAdBlockHandler()
+    private override init() { super.init() }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "trapTubeAds",
+              let body = message.body as? [String: Any] else { return }
+        let hidden = (body["hidden"] as? NSNumber)?.intValue ?? 0
+        let skipped = (body["skipped"] as? NSNumber)?.intValue ?? 0
+        let fastForwarded = (body["fastforward"] as? NSNumber)?.intValue ?? 0
+        TrapTubeAdBlockCenter.shared.record(hidden: hidden, skipped: skipped, fastForwarded: fastForwarded)
+    }
+}
+
+/// The in-page half of the port. Where YTLite drops ad renderers from
+/// the protobuf section tree before cells exist, this script hides the
+/// DOM nodes that are the web renderers for ads; where the native
+/// player simply never wires the response's ad arrays into playback,
+/// this script lets the web player's ad load and "play" but clicks
+/// Skip the moment it exists and mutes + fast-forwards the rest.
+/// Nothing is intercepted or blocked at the network layer. If the
+/// enforcement interstitial ever appears, all in-stream actions stop
+/// for the remainder of the page load.
+enum TrapTubeAdBlockInstaller {
+    static var scriptSource: String {
+        #"""
+        (() => {
+          if (window.__trapTubeAdsInstalled) return;
+          window.__trapTubeAdsInstalled = true;
+          var pending = { hidden: 0, skipped: 0, fastforward: 0 };
+          var backedOff = false;
+          var adActive = false;
+          var ffCounted = false;
+          var savedRate = 1;
+          var savedMuted = false;
+          var lastHideSweep = 0;
+          function post() {
+            if (!pending.hidden && !pending.skipped && !pending.fastforward) return;
+            try {
+              var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.trapTubeAds;
+              if (!h) return;
+              h.postMessage({ hidden: pending.hidden, skipped: pending.skipped, fastforward: pending.fastforward });
+              pending = { hidden: 0, skipped: 0, fastforward: 0 };
+            } catch (e) {}
+          }
+          function bump(kind) { pending[kind] += 1; }
+          function enforcementShowing() {
+            try {
+              if (document.querySelector("ytd-enforcement-message-view-model")) return true;
+              var dialogs = document.querySelectorAll("tp-yt-paper-dialog");
+              for (var i = 0; i < dialogs.length; i++) {
+                var t = dialogs[i].textContent || "";
+                if (t.indexOf("Ad blockers violate") !== -1) return true;
+              }
+            } catch (e) {}
+            return false;
+          }
+          var AD_TAG_SELECTOR = [
+            "ytd-ad-slot-renderer", "ytm-ad-slot-renderer",
+            "ytd-display-ad-renderer", "ytm-display-ad-renderer",
+            "ytd-promoted-sparkles-web-renderer", "ytm-promoted-sparkles-web-renderer",
+            "ytd-promoted-sparkles-text-search-ad-renderer",
+            "ytd-promoted-video-renderer", "ytm-promoted-video-renderer",
+            "ytd-search-pyv-renderer",
+            "ytd-in-feed-ad-layout-renderer", "ytm-in-feed-ad-layout-renderer",
+            "ytd-banner-promo-renderer", "ytd-statement-banner-renderer",
+            "ytd-mealbar-promo-renderer", "yt-mealbar-promo-renderer",
+            "ytd-compact-promoted-video-renderer"
+          ].join(",");
+          var ITEM_SELECTOR = "ytd-rich-item-renderer,ytm-rich-item-renderer,ytd-rich-section-renderer,ytd-video-renderer,ytm-compact-video-renderer";
+          function markHidden(el, countIt) {
+            if (!el || el.__ttAdHidden) return;
+            el.__ttAdHidden = true;
+            try { el.style.setProperty("display", "none", "important"); } catch (e) {}
+            if (countIt) bump("hidden");
+          }
+          function sweepHidden() {
+            try {
+              var items = document.querySelectorAll(ITEM_SELECTOR);
+              for (var i = 0; i < items.length; i++) {
+                var item = items[i];
+                if (item.__ttAdHidden) continue;
+                var child = item.querySelector(AD_TAG_SELECTOR);
+                if (child && !child.__ttAdHidden) markHidden(item, true);
+              }
+              var ads = document.querySelectorAll(AD_TAG_SELECTOR + ",#masthead-ad");
+              for (var j = 0; j < ads.length; j++) {
+                var ad = ads[j];
+                if (ad.__ttAdHidden) continue;
+                var p = ad.parentElement;
+                var insideHidden = false;
+                while (p) { if (p.__ttAdHidden) { insideHidden = true; break; } p = p.parentElement; }
+                if (!insideHidden) markHidden(ad, true);
+              }
+            } catch (e) {}
+          }
+          function playerEl() {
+            return document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
+          }
+          function mainVideo() {
+            var p = playerEl();
+            return (p && p.querySelector("video")) || document.querySelector("video");
+          }
+          function adShowing() {
+            try {
+              var p = playerEl();
+              return !!(p && (p.classList.contains("ad-showing") || p.classList.contains("ad-interrupting")));
+            } catch (e) {}
+            return false;
+          }
+          function restoreFromAd() {
+            if (!adActive) return;
+            adActive = false;
+            ffCounted = false;
+            var v = mainVideo();
+            if (v) {
+              try { v.playbackRate = savedRate; } catch (e) {}
+              try { v.muted = savedMuted; } catch (e) {}
+            }
+          }
+          function sweepPlayer() {
+            if (backedOff) return;
+            if (enforcementShowing()) {
+              backedOff = true;
+              restoreFromAd();
+              return;
+            }
+            try {
+              if (!adShowing()) { restoreFromAd(); return; }
+              var skip = document.querySelector(".ytp-skip-ad-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button-modern,.videoAdUiSkipButton");
+              if (skip) {
+                try { skip.click(); bump("skipped"); post(); } catch (e) {}
+                return;
+              }
+              var v = mainVideo();
+              if (!v) return;
+              if (!adActive) {
+                adActive = true;
+                ffCounted = false;
+                savedRate = v.playbackRate || 1;
+                savedMuted = !!v.muted;
+              }
+              try { v.muted = true; } catch (e) {}
+              try { if (v.playbackRate !== 16) v.playbackRate = 16; } catch (e) {}
+              if (!ffCounted && v.readyState > 0 && !v.paused) { ffCounted = true; bump("fastforward"); }
+              var overlays = document.querySelectorAll(".ytp-ad-player-overlay,.ytp-ad-overlay-container");
+              for (var i = 0; i < overlays.length; i++) markHidden(overlays[i], false);
+            } catch (e) {}
+          }
+          function start() {
+            sweepHidden();
+            try {
+              new MutationObserver(function () {
+                var now = Date.now();
+                if (now - lastHideSweep > 700) { lastHideSweep = now; sweepHidden(); }
+              }).observe(document.documentElement, { childList: true, subtree: true });
+            } catch (e) {}
+            setInterval(sweepPlayer, 400);
+            setInterval(function () { sweepHidden(); post(); }, 2000);
+            document.addEventListener("yt-navigate-finish", function () {
+              restoreFromAd();
+              setTimeout(sweepHidden, 120);
+            });
+          }
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", start);
+          } else {
+            start();
+          }
+        })()
+        """#
+    }
+}
+'''
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+if "enum TrapTubeAdBlockInstaller" not in s:
+    s = s.rstrip("\n") + "\n" + ROUND4_SWIFT
+    p.write_text(s)
+
+# --- Settings: Block Ads toggle + session counter directly under
+# the OLED toggle in the Video discovery card.
+p = file("SettingsView.swift")
+s = p.read_text()
+s = rep(s, """    @AppStorage("TrapTube.Streaming.MaxQuality") private var streamingCap = 0
+""",
+        """    @AppStorage("TrapTube.Streaming.MaxQuality") private var streamingCap = 0
+    @ObservedObject private var adBlockCenter = TrapTubeAdBlockCenter.shared
+""", "settings ad center wiring")
+s = rep(s, r"""                    Toggle(isOn: $theme.oledEnabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("OLED Dark Mode").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Pure black backgrounds - saves battery on OLED screens.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }
+                    .tint(theme.accent)""",
+        r"""                    Toggle(isOn: $theme.oledEnabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("OLED Dark Mode").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Pure black backgrounds - saves battery on OLED screens.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                    }
+                    .tint(theme.accent)
+                    Toggle(isOn: $adBlockCenter.enabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Block Ads").font(.subheadline.bold()).foregroundStyle(.white)
+                            Text("Hides sponsored items and skips or fast-forwards video ads in Home and You. Works on the page content itself - no requests are blocked, the same approach as the YouTube build.").font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .tint(theme.accent)
+                    if adBlockCenter.enabled {
+                        Text("Ads neutralized this session: \(adBlockCenter.neutralizedCount)")
+                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                    }""",
+        "settings block ads toggle")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
