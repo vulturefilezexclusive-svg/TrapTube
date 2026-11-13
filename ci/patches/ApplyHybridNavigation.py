@@ -2554,7 +2554,7 @@ final class TrapTubePlayerSession: ObservableObject {
     func applyQualityCapToAll() {
         let cap = TrapTubeStreamingQuality.cap
         for (_, view) in webViews {
-            view.evaluateJavaScript("window.__trapTubeSetQualityCap && window.__trapTubeSetQualityCap(\(cap))", in: nil, in: WKContentWorld.page, completionHandler: { _, _ in })
+            view.evaluateJavaScript("window.__trapTubeSetQualityCap && window.__trapTubeSetQualityCap(\(cap))", in: nil, in: WKContentWorld.page, completionHandler: { _ in })
         }
     }
 
