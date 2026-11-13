@@ -8573,4 +8573,873 @@ if "Round 7 native stream player" not in s:
         raise SystemExit("round7 native player anchor missing")
     s = s[:s.index(r7_marker)] + ROUND7_NATIVE_PLAYER_SWIFT + "\n"
 p.write_text(s)
+
+
+# =====================================================================
+# Round 9: STOP GUESSING - crash-trail instrumentation for the
+# native player's audio start path, plus the one proven defect on
+# the causal path (nil AVAudioConverter cached by format).
+#
+# Two audit rounds fixed what code reading could prove and the
+# device still crashed - per the user, "right after it says eq
+# attaching". So this round's primary deliverable is EVIDENCE: a
+# persistent breadcrumb trail (TrapTubeCrashTrail) that survives a
+# hard crash and names the exact last step on the next launch.
+# Round 8 invariants stay untouched: canonical stream format,
+# feed generation counter, connectGraph Bool, STREAMED -> FILE ->
+# TAP ladder, honest status text.
+# =====================================================================
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+# --- The crash trail type itself, inserted before the ghost section.
+s = rep(s, r'''// MARK: - Ghost audio path (Round 7)''',
+        r'''// MARK: - Crash trail (Round 9)
+//
+// Diagnosis-first instrumentation for the native player's audio
+// start path. Every stage of session start, resolve, the ghost
+// primes, the tap attach sequence and the EQ layer appends one
+// short line to a small file in Application Support, and each
+// append ends in synchronize() (fsync), so the last line
+// survives a hard crash and is read back on the next launch as
+// "Last run reached: ..." in the player's status area.
+//
+// Why a file and not UserDefaults: defaults writes are buffered
+// by cfprefsd and flushed on its schedule, so a crash can lose
+// the final steps - exactly the ones that matter. A direct file
+// write + fsync is durable across a process crash.
+//
+// The one place that must never do file I/O is the audio tap's
+// render callbacks. Those write step codes into preallocated
+// slots on TapState instead (see AudioEngineManager.swift), and
+// a main-queue flusher turns new codes into trail lines.
+enum TrapTubeCrashTrail {
+    private static let queue = DispatchQueue(label: "com.traptube.crashtrail")
+    private static let startUptime = ProcessInfo.processInfo.systemUptime
+    private static var storedPreviousSummary: String?
+
+    /// Runs exactly once, on first touch from ANY entry point,
+    /// before that entry point writes: reads the previous run's
+    /// trail (the summary the player surfaces) and trims the file.
+    private static let boot: Void = TrapTubeCrashTrail.performBoot()
+
+    private static let fileURL: URL? = {
+        let manager = FileManager.default
+        let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? manager.urls(for: .documentDirectory, in: .userDomainMask).first
+        guard let base else { return nil }
+        let directory = base.appendingPathComponent("TrapTube", isDirectory: true)
+        try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("crash-trail.log")
+    }()
+
+    static var previousRunSummary: String? {
+        _ = boot
+        return storedPreviousSummary
+    }
+
+    private static func performBoot() {
+        guard let fileURL else { return }
+        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            return
+        }
+        let lines = text.split(separator: "\n").map(String.init)
+        storedPreviousSummary = summarize(lines)
+        if text.utf8.count > 65_536 {
+            let tail = lines.suffix(120).joined(separator: "\n") + "\n"
+            try? tail.write(to: fileURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private static func summarize(_ lines: [String]) -> String? {
+        let meaningful = lines.filter { !$0.contains("heartbeat") }
+        guard let last = meaningful.last else { return nil }
+        if last.contains("session stop (clean)") { return nil }
+        // A previous run that reached healthy playback after its
+        // last load began left no crash residue to surface.
+        var sawLoad = false
+        var healthyAfterLoad = false
+        for line in meaningful {
+            if line.contains("load begin") { sawLoad = true; healthyAfterLoad = false }
+            if line.contains("run healthy") { healthyAfterLoad = true }
+        }
+        if sawLoad && healthyAfterLoad { return nil }
+        let step = stripTimestamp(last)
+        let facts = meaningful.last {
+            $0.contains("(track fmt:") || $0.contains("prepare (fmt:") || $0.contains("canonical format")
+        }
+        if let facts, facts != last { return step + " | " + stripTimestamp(facts) }
+        return step
+    }
+
+    private static func stripTimestamp(_ line: String) -> String {
+        guard let close = line.firstIndex(of: "]") else { return line }
+        return String(line[line.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Synchronous append + fsync: when record() returns, the
+    /// step is durable even if the very next statement crashes.
+    /// Called from the session, the ghost and attach - never
+    /// from a render callback.
+    static func record(_ step: String) {
+        _ = boot
+        queue.sync {
+            guard let fileURL, let handle = try? FileHandle(forWritingTo: fileURL) else { return }
+            let elapsed = ProcessInfo.processInfo.systemUptime - startUptime
+            let line = String(format: "[%7.2fs] %@\n", elapsed, step)
+            _ = try? handle.seekToEnd()
+            if let data = line.data(using: .utf8) { try? handle.write(contentsOf: data) }
+            try? handle.synchronize()
+            try? handle.close()
+        }
+    }
+
+    /// Detached liveness markers at +3s/+6s/+10s after a load or
+    /// an attach begins: if they keep landing while the UI is
+    /// frozen, the process was alive (a hang); if they stop, it
+    /// died (a crash).
+    static func armHeartbeat() {
+        Task.detached {
+            let marks: [(delay: UInt64, label: String)] = [
+                (3_000_000_000, "+3s"), (3_000_000_000, "+6s"), (4_000_000_000, "+10s")
+            ]
+            for mark in marks {
+                try? await Task.sleep(nanoseconds: mark.delay)
+                record("heartbeat \(mark.label)")
+            }
+        }
+    }
+
+    // MARK: Format facts
+
+    static func describeASBD(_ asbd: AudioStreamBasicDescription) -> String {
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        return "\(Int(asbd.mSampleRate)) Hz, \(asbd.mChannelsPerFrame) ch, \(isFloat ? "float" : "int")\(asbd.mBitsPerChannel), \(nonInterleaved ? "non-interleaved" : "interleaved")"
+    }
+
+    static func describeAudioFormat(_ format: AVAudioFormat) -> String {
+        describeASBD(format.streamDescription.pointee)
+    }
+
+    /// The reader track's ACTUAL emitted format description -
+    /// the fact two audit rounds could only guess at.
+    static func describeTrackFormat(_ track: AVAssetTrack) -> String {
+        guard let desc = track.formatDescriptions.first,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
+        var layoutTag: UInt32 = 0
+        var layoutSize = 0
+        if let layout = CMAudioFormatDescriptionGetChannelLayout(desc, &layoutSize) {
+            layoutTag = layout.pointee.mChannelLayoutTag
+        }
+        return describeASBD(asbd) + ", layout tag \(layoutTag)"
+    }
+
+    static func trackMatchesCanonical(_ track: AVAssetTrack, canonical: AVAudioFormat) -> Bool {
+        guard let desc = track.formatDescriptions.first else { return false }
+        return AVAudioFormat(cmAudioFormatDescription: desc) == canonical
+    }
+
+    static func describeSampleBufferFormat(_ sampleBuffer: CMSampleBuffer) -> String {
+        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return "unavailable" }
+        return describeASBD(asbd)
+    }
+}
+
+// MARK: - Ghost audio path (Round 7)''',
+        "round9 crash trail type")
+
+# --- Ghost: first-conversion breadcrumb flag.
+s = rep(s, r'''    private var streamConverter: AVAudioConverter?
+    private var streamConverterFormat: AVAudioFormat?''',
+        r'''    private var streamConverter: AVAudioConverter?
+    private var streamConverterFormat: AVAudioFormat?
+    /// Round 9: the first conversion outcome is breadcrumbed
+    /// once per start() (reset there).
+    private var trailConversionRecorded = false''',
+        "round9 ghost converter flag")
+
+# --- Ghost: applyParameters breadcrumb (only once connected, so
+# the init-time call at singleton creation stays silent).
+s = rep(s, r'''    private func applyParameters() {
+        for (index, frequency) in Self.bandFrequencies.enumerated() {''',
+        r'''    private func applyParameters() {
+        if connected { TrapTubeCrashTrail.record("ghost applyParameters") }
+        for (index, frequency) in Self.bandFrequencies.enumerated() {''',
+        "round9 ghost applyParameters crumb")
+
+# --- Ghost: start() breadcrumbs.
+s = rep(s, r'''    func start(source: Source, position: @escaping () -> TimeInterval) async -> Feed {
+        self.source = source
+        teardownFeed(deleteTemp: true)''',
+        r'''    func start(source: Source, position: @escaping () -> TimeInterval) async -> Feed {
+        TrapTubeCrashTrail.record("ghost start begin")
+        trailConversionRecorded = false
+        self.source = source
+        teardownFeed(deleteTemp: true)''',
+        "round9 ghost start begin")
+s = rep(s, r'''        feed = .none
+        return .none
+    }''',
+        r'''        TrapTubeCrashTrail.record("ghost start -> none (both feeds failed)")
+        feed = .none
+        return .none
+    }''',
+        "round9 ghost start none")
+
+# --- Ghost: primeStreamed breadcrumbs.
+s = rep(s, r'''    private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
+        let asset = AVURLAsset(url: source.url, options: [''',
+        r'''    private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
+        TrapTubeCrashTrail.record("ghost prime begin (streamed, startAt \(Int(startAt))s)")
+        let asset = AVURLAsset(url: source.url, options: [''',
+        "round9 prime streamed begin")
+s = rep(s, r'''        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let format = streamFormat,
+              let newReader = try? AVAssetReader(asset: asset) else { return false }''',
+        r'''        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let format = streamFormat,
+              let newReader = try? AVAssetReader(asset: asset) else { return false }
+        TrapTubeCrashTrail.record("ghost reader created (track fmt: \(TrapTubeCrashTrail.describeTrackFormat(track)))")
+        TrapTubeCrashTrail.record("ghost canonical format (\(TrapTubeCrashTrail.describeAudioFormat(format)); track matches canonical: \(TrapTubeCrashTrail.trackMatchesCanonical(track, canonical: format)))")''',
+        "round9 reader created crumb")
+s = rep(s, r'''        guard connectGraph(format: format) else { return false }
+        node.stop()
+        reader = newReader''',
+        r'''        let graphOK = connectGraph(format: format)
+        TrapTubeCrashTrail.record("ghost graph connect -> \(graphOK)")
+        guard graphOK else { return false }
+        node.stop()
+        reader = newReader''',
+        "round9 graph connect crumb")
+s = rep(s, r'''        guard newReader.startReading() else {
+            teardownFeed(deleteTemp: false)
+            return false
+        }
+        feed = .streamed
+        startPump()
+        if !engine.isRunning { try? engine.start() }
+        if desiredPlaying { node.play() }
+        return true''',
+        r'''        let reading = newReader.startReading()
+        TrapTubeCrashTrail.record("ghost reader startReading -> \(reading)")
+        guard reading else {
+            teardownFeed(deleteTemp: false)
+            return false
+        }
+        feed = .streamed
+        startPump()
+        if !engine.isRunning {
+            try? engine.start()
+            TrapTubeCrashTrail.record("ghost engine start -> \(engine.isRunning ? "running" : "FAILED")")
+        }
+        if desiredPlaying { node.play(); TrapTubeCrashTrail.record("ghost node play") }
+        TrapTubeCrashTrail.record("ghost feed live (streamed)")
+        return true''',
+        "round9 startReading crumbs")
+
+# --- Ghost: file route breadcrumbs.
+s = rep(s, r'''        guard let downloaded = try? await TrapTubeDirectDownloader.shared.download(
+            from: source.url, userAgent: source.userAgent, onProgress: { _ in }) else { return false }''',
+        r'''        TrapTubeCrashTrail.record("ghost file prime begin (downloading)")
+        let downloadedFile = try? await TrapTubeDirectDownloader.shared.download(
+            from: source.url, userAgent: source.userAgent, onProgress: { _ in })
+        TrapTubeCrashTrail.record("ghost file download -> \(downloadedFile != nil ? "ok" : "FAILED")")
+        guard let downloaded = downloadedFile else { return false }''',
+        "round9 file download crumbs")
+s = rep(s, r'''        // A degenerate processing format would poison the
+        // frame math below and the graph connection alike.
+        guard format.sampleRate > 0, format.channelCount > 0 else { return false }''',
+        r'''        // A degenerate processing format would poison the
+        // frame math below and the graph connection alike.
+        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
+        TrapTubeCrashTrail.record("ghost file opened (fmt: \(TrapTubeCrashTrail.describeAudioFormat(format)), duration \(Int(Double(file.length) / format.sampleRate))s)")''',
+        "round9 file opened crumb")
+s = rep(s, r'''        node.scheduleSegment(file, startingFrame: startFrame,
+                             frameCount: AVAudioFrameCount(frames), at: nil)
+        feed = .file
+        if !engine.isRunning { try? engine.start() }
+        if desiredPlaying { node.play() }
+        return true''',
+        r'''        node.scheduleSegment(file, startingFrame: startFrame,
+                             frameCount: AVAudioFrameCount(frames), at: nil)
+        TrapTubeCrashTrail.record("ghost file segment scheduled (\(frames) frames)")
+        feed = .file
+        if !engine.isRunning {
+            try? engine.start()
+            TrapTubeCrashTrail.record("ghost engine start -> \(engine.isRunning ? "running" : "FAILED")")
+        }
+        if desiredPlaying { node.play(); TrapTubeCrashTrail.record("ghost node play") }
+        TrapTubeCrashTrail.record("ghost feed live (file)")
+        return true''',
+        "round9 file segment crumbs")
+
+# --- Ghost: pump firsts.
+s = rep(s, r'''        guard let pumpReader = reader, let pumpOutput = readerOutput else { return }
+        let generation = feedGeneration
+        pumpTask = Task { [weak self] in''',
+        r'''        guard let pumpReader = reader, let pumpOutput = readerOutput else { return }
+        let generation = feedGeneration
+        var trailRawRecorded = false
+        var trailScheduleRecorded = false
+        pumpTask = Task { [weak self] in''',
+        "round9 pump flags")
+s = rep(s, r'''                if let sampleBuffer = pumpOutput.copyNextSampleBuffer() {''',
+        r'''                if let sampleBuffer = pumpOutput.copyNextSampleBuffer() {
+                    if !trailRawRecorded {
+                        trailRawRecorded = true
+                        TrapTubeCrashTrail.record("ghost first raw buffer (fmt: \(TrapTubeCrashTrail.describeSampleBufferFormat(sampleBuffer)))")
+                    }''',
+        "round9 first raw buffer crumb")
+s = rep(s, r'''                        self.node.scheduleBuffer(pcm, completionHandler: nil)
+                        self.scheduledFrames += AVAudioFramePosition(pcm.frameLength)
+                        self.lastBufferAt = Date()''',
+        r'''                        self.node.scheduleBuffer(pcm, completionHandler: nil)
+                        if !trailScheduleRecorded {
+                            trailScheduleRecorded = true
+                            TrapTubeCrashTrail.record("ghost first scheduleBuffer (\(pcm.frameLength) frames)")
+                        }
+                        self.scheduledFrames += AVAudioFramePosition(pcm.frameLength)
+                        self.lastBufferAt = Date()''',
+        "round9 first schedule crumb")
+
+# --- Ghost: conversion breadcrumbs + the proven nil-converter fix.
+s = rep(s, r'''        if raw.format == target { return raw }''',
+        r'''        if raw.format == target {
+            if !trailConversionRecorded {
+                trailConversionRecorded = true
+                TrapTubeCrashTrail.record("ghost first conversion -> passthrough (raw already canonical)")
+            }
+            return raw
+        }''',
+        "round9 conversion passthrough crumb")
+s = rep(s, r'''        if streamConverterFormat != raw.format {
+            streamConverter = AVAudioConverter(from: raw.format, to: target)
+            streamConverterFormat = raw.format
+        }
+        guard let converter = streamConverter, raw.frameLength > 0 else { return nil }''',
+        r'''        if streamConverterFormat != raw.format {
+            // Round 9 (proven defect on the crash's causal path):
+            // a nil converter used to be cached by format anyway,
+            // so one failed AVAudioConverter creation poisoned
+            // every later buffer in that format for the ghost's
+            // whole lifetime - the streamed feed could only
+            // starve and escalate. Cache the format only on
+            // success, so a later buffer may retry creation.
+            let created = AVAudioConverter(from: raw.format, to: target)
+            streamConverter = created
+            streamConverterFormat = created != nil ? raw.format : nil
+        }
+        guard let converter = streamConverter, raw.frameLength > 0 else {
+            if !trailConversionRecorded {
+                trailConversionRecorded = true
+                TrapTubeCrashTrail.record("ghost first conversion -> NIL CONVERTER (from \(TrapTubeCrashTrail.describeAudioFormat(raw.format)))")
+            }
+            return nil
+        }''',
+        "round9 converter nil fix")
+s = rep(s, r'''        guard status != .error, converted.frameLength > 0 else { return nil }
+        return converted''',
+        r'''        if !trailConversionRecorded {
+            trailConversionRecorded = true
+            if status == .error {
+                TrapTubeCrashTrail.record("ghost first conversion -> ERROR (status \(status.rawValue))")
+            } else if converted.frameLength > 0 {
+                TrapTubeCrashTrail.record("ghost first conversion -> ok (\(converted.frameLength) frames)")
+            } else {
+                TrapTubeCrashTrail.record("ghost first conversion -> empty output (status \(status.rawValue))")
+            }
+        }
+        guard status != .error, converted.frameLength > 0 else { return nil }
+        return converted''',
+        "round9 conversion outcome crumb")
+
+# --- Ghost: node play via setDesiredPlaying.
+s = rep(s, r'''    func setDesiredPlaying(_ playing: Bool) {
+        desiredPlaying = playing
+        guard feed != .none else { return }
+        if playing {
+            if !engine.isRunning { try? engine.start() }
+            node.play()
+        } else {
+            node.pause()
+        }
+    }''',
+        r'''    func setDesiredPlaying(_ playing: Bool) {
+        desiredPlaying = playing
+        guard feed != .none else { return }
+        if playing {
+            if !engine.isRunning { try? engine.start() }
+            node.play()
+            TrapTubeCrashTrail.record("ghost node play (setDesiredPlaying)")
+        } else {
+            node.pause()
+        }
+    }''',
+        "round9 setDesiredPlaying crumb")
+
+# --- Session: last-run residue surface + healthy marker.
+s = rep(s, r'''    @Published private(set) var driftMs: Int?
+    @Published private(set) var usingFallbackTap = false''',
+        r'''    @Published private(set) var driftMs: Int?
+    /// Round 9 crash trail: the previous run's last recorded
+    /// step (+ format facts), surfaced in the player's status
+    /// area until a healthy play in this run clears it.
+    @Published private(set) var lastRunReached: String?
+    @Published private(set) var usingFallbackTap = false''',
+        "round9 session lastRun property")
+s = rep(s, r'''    private var lastHardResync = Date.distantPast''',
+        r'''    private var lastHardResync = Date.distantPast
+    private var trailHealthyRecorded = false''',
+        "round9 session healthy flag")
+s = rep(s, r'''    var remainingLabel: String {''',
+        r'''    /// Round 9: a genuinely healthy play (ghost feed live,
+    /// tap attached, or the first drift tick) retires the
+    /// previous run's crash residue and marks this run healthy
+    /// in the trail.
+    private func markRunHealthy() {
+        guard !trailHealthyRecorded else { return }
+        trailHealthyRecorded = true
+        lastRunReached = nil
+        TrapTubeCrashTrail.record("run healthy")
+    }
+
+    var remainingLabel: String {''',
+        "round9 markRunHealthy")
+
+# --- Session: init reads the residue BEFORE this run writes.
+s = rep(s, r'''        pipHolder.session = self
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in''',
+        r'''        pipHolder.session = self
+        // Round 9: read the previous run's crash residue BEFORE
+        // this run's first trail write (the trail's boot read
+        // happens on first touch, so the order matters here).
+        lastRunReached = TrapTubeCrashTrail.previousRunSummary
+        TrapTubeCrashTrail.record("app launch")
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in''',
+        "round9 session init crumb")
+
+# --- Session: setAudioPath / setEQEnabled breadcrumbs.
+s = rep(s, r'''    func setAudioPath(_ path: AudioPath) {
+        guard path != audioPath else { return }
+        audioPath = path''',
+        r'''    func setAudioPath(_ path: AudioPath) {
+        guard path != audioPath else { return }
+        audioPath = path
+        TrapTubeCrashTrail.record("audio path set -> \(path.rawValue)")''',
+        "round9 audio path crumb")
+s = rep(s, r'''    func setEQEnabled(_ enabled: Bool) {
+        eqEnabled = enabled
+        TrapTubeTapEQ.shared.setEnabled(enabled)''',
+        r'''    func setEQEnabled(_ enabled: Bool) {
+        eqEnabled = enabled
+        TrapTubeCrashTrail.record("eq enable toggled -> \(enabled ? "on" : "off")")
+        TrapTubeTapEQ.shared.setEnabled(enabled)''',
+        "round9 eq toggle crumb")
+
+# --- Session: load() breadcrumbs + healthy on tap attach.
+s = rep(s, r'''        currentTime = 0
+        duration = 0
+        autoFadeStarted = false
+        itemUsesGhost = audioPath == .ghost''',
+        r'''        currentTime = 0
+        duration = 0
+        autoFadeStarted = false
+        trailHealthyRecorded = false
+        TrapTubeCrashTrail.record("load begin (path: \(audioPath == .ghost ? "ghost" : "tap"))")
+        TrapTubeCrashTrail.armHeartbeat()
+        itemUsesGhost = audioPath == .ghost''',
+        "round9 load begin crumb")
+s = rep(s, r'''                let item = try await Self.makePlayerItem(info: info)''',
+        r'''                let item = try await Self.makePlayerItem(info: info)
+                TrapTubeCrashTrail.record("resolve done (\(info.muxed.isEmpty ? "composition avc+aac" : "muxed mp4"), ua: \(String(info.userAgent.prefix(24))))")''',
+        "round9 resolve crumb")
+s = rep(s, r'''                    self.attachTask = Task { [weak self] in
+                        let attached = await TrapTubeTapEQ.shared.attach(to: item)''',
+        r'''                    TrapTubeCrashTrail.record("tap attach begin (path: tap)")
+                    self.attachTask = Task { [weak self] in
+                        let attached = await TrapTubeTapEQ.shared.attach(to: item)''',
+        "round9 tap begin crumb")
+s = rep(s, r'''                        self.equalizerActive = attached
+                        self.eqAttachFinished = true
+                    }
+                }
+                // A single-video launch grows into the watch-next''',
+        r'''                        self.equalizerActive = attached
+                        self.eqAttachFinished = true
+                        if attached { self.markRunHealthy() }
+                    }
+                }
+                // A single-video launch grows into the watch-next''',
+        "round9 tap healthy")
+
+# --- Session: ghost start outcome + fallback breadcrumbs.
+s = rep(s, r'''            if feed == .none {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            self.ghostFeed = feed
+            self.equalizerActive = true
+            self.eqAttachFinished = true''',
+        r'''            TrapTubeCrashTrail.record("ghost start returned (\(feed == .none ? "none - tap fallback next" : (feed == .file ? "file" : "streamed")))")
+            if feed == .none {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            self.ghostFeed = feed
+            self.equalizerActive = true
+            self.eqAttachFinished = true
+            self.markRunHealthy()''',
+        "round9 ghost outcome crumbs")
+s = rep(s, r'''        attachTask?.cancel()
+        attachTask = Task { [weak self] in
+            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            guard let self, self.generation == loadGeneration, self.playerItem === item else { return }
+            self.equalizerActive = attached
+            self.eqAttachFinished = true
+        }''',
+        r'''        attachTask?.cancel()
+        TrapTubeCrashTrail.record("tap attach begin (path: ghost-fallback)")
+        attachTask = Task { [weak self] in
+            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            guard let self, self.generation == loadGeneration, self.playerItem === item else { return }
+            self.equalizerActive = attached
+            self.eqAttachFinished = true
+            if attached { self.markRunHealthy() }
+        }''',
+        "round9 fallback crumbs")
+
+# --- Session: first drift tick breadcrumb.
+s = rep(s, r'''        var waitingOnVideo = false''',
+        r'''        var waitingOnVideo = false
+        var trailDriftRecorded = false''',
+        "round9 drift flag")
+s = rep(s, r'''                let drift = audioTime - videoTime
+                self.driftMs = Int((drift * 1000).rounded())''',
+        r'''                let drift = audioTime - videoTime
+                self.driftMs = Int((drift * 1000).rounded())
+                if !trailDriftRecorded {
+                    trailDriftRecorded = true
+                    TrapTubeCrashTrail.record("ghost first drift tick (drift \(self.driftMs ?? 0) ms)")
+                    self.markRunHealthy()
+                }''',
+        "round9 first drift crumb")
+
+# --- Session: clean-stop marker + tick flushes tap breadcrumbs.
+s = rep(s, r'''    func stop() {
+        generation += 1''',
+        r'''    func stop() {
+        TrapTubeCrashTrail.record("session stop (clean)")
+        generation += 1''',
+        "round9 stop crumb")
+s = rep(s, r'''    private func tick(time: CMTime) {
+        let seconds = time.seconds''',
+        r'''    private func tick(time: CMTime) {
+        // Round 9: flush any new render-thread tap breadcrumbs.
+        TrapTubeTapEQ.shared.drainTapTrail()
+        let seconds = time.seconds''',
+        "round9 tick drain")
+
+# --- Player view: surface "Last run reached:" under the status.
+s = rep(s, r'''    private var statusRow: some View {
+        Text(session.statusText)
+            .font(.system(size: 10, weight: .bold))
+            .tracking(1.2)
+            .foregroundStyle(session.eqAudiblyActive ? theme.accent : .white.opacity(0.45))
+            .padding(.top, 12)
+    }''',
+        r'''    private var statusRow: some View {
+        VStack(spacing: 3) {
+            Text(session.statusText)
+                .font(.system(size: 10, weight: .bold))
+                .tracking(1.2)
+                .foregroundStyle(session.eqAudiblyActive ? theme.accent : .white.opacity(0.45))
+            if let lastRun = session.lastRunReached {
+                Text("Last run reached: \(lastRun)")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 12)
+    }''',
+        "round9 status last run line")
+
+# --- EQ sheet: opened + preset breadcrumbs.
+s = rep(s, r'''        .preferredColorScheme(.dark)
+        .alert("Save Preset", isPresented: $showSavePrompt) {''',
+        r'''        .preferredColorScheme(.dark)
+        .onAppear { TrapTubeCrashTrail.record("eq sheet opened (bind: \(ghostLive ? "ghost" : "tap-model"))") }
+        .alert("Save Preset", isPresented: $showSavePrompt) {''',
+        "round9 eq sheet crumb")
+s = rep(s, r'''    private func apply(_ preset: TrapTubeEQPreset) {
+        if ghostLive {''',
+        r'''    private func apply(_ preset: TrapTubeEQPreset) {
+        TrapTubeCrashTrail.record("eq preset applied (\(preset.name), bind: \(ghostLive ? "ghost" : "tap-model"))")
+        if ghostLive {''',
+        "round9 preset crumb")
+p.write_text(s)
+
+# =====================================================================
+# AudioEngineManager.swift: the tap attach sequence at fine
+# granularity, and the render-callback breadcrumb slots.
+# =====================================================================
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+
+# --- TrapTubeTapEQ: last-state retention + the trail flusher.
+s = rep(s, r'''    private let lock: UnsafeMutablePointer<os_unfair_lock>
+    private let values: UnsafeMutablePointer<Float>
+    private var version: UInt64 = 1''',
+        r'''    private let lock: UnsafeMutablePointer<os_unfair_lock>
+    private let values: UnsafeMutablePointer<Float>
+    private var version: UInt64 = 1
+
+    /// Round 9: the most recent tap's state, retained so the
+    /// crash trail's flusher can drain its render-thread
+    /// breadcrumb slots even after the tap is finalized.
+    private(set) var lastTapState: TapState?
+    private var trailDrainedFor: ObjectIdentifier?
+    private var trailDrainedCount = 0
+
+    /// Main-queue flusher for the tap's render-thread breadcrumb
+    /// slots: turns new step codes into crash-trail lines. Cheap
+    /// no-op when nothing new was recorded. The slots are written
+    /// by the tap's single render thread (CoreAudio serializes
+    /// one tap's callbacks) with plain aligned 32-bit stores,
+    /// the count stored last as the commit word; this reader
+    /// formats only committed codes. (Format-flag facts: bit 0
+    /// of the ASBD flags is kAudioFormatFlagIsFloat, bit 7 is
+    /// kAudioFormatFlagIsNonInterleaved.)
+    func drainTapTrail() {
+        guard let state = lastTapState else { return }
+        let identity = ObjectIdentifier(state)
+        if trailDrainedFor != identity {
+            trailDrainedFor = identity
+            trailDrainedCount = 0
+        }
+        let available = min(Int(state.trailCount), 8)
+        guard available > trailDrainedCount else { return }
+        for index in trailDrainedCount..<available {
+            let code = state.trailCodes[index]
+            let a = state.trailValues[index * 4]
+            let b = state.trailValues[index * 4 + 1]
+            let c = state.trailValues[index * 4 + 2]
+            let d = state.trailValues[index * 4 + 3]
+            switch code {
+            case 1:
+                TrapTubeCrashTrail.record("tap callback: initialize")
+            case 2:
+                let floatWord = (c & 1) != 0 ? "float" : "int"
+                let layoutWord = (c & 128) != 0 ? "non-interleaved" : "interleaved"
+                TrapTubeCrashTrail.record("tap callback: prepare (fmt: \(a) Hz, \(b) ch, \(floatWord)\(d)-bit, \(layoutWord))")
+            case 3:
+                TrapTubeCrashTrail.record("tap callback: first frames rendered (\(a) frames)")
+            case 4:
+                TrapTubeCrashTrail.record("tap callback: unprepare")
+            case 5:
+                TrapTubeCrashTrail.record("tap callback: finalize")
+            default:
+                break
+            }
+        }
+        trailDrainedCount = available
+    }
+
+    /// Round 9: after an audioMix assignment, drain on a short
+    /// fuse so callback breadcrumbs land in the trail promptly
+    /// even if nothing else ticks.
+    func scheduleTrailDrains() {
+        for delay in [0.05, 0.3, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.drainTapTrail()
+            }
+        }
+    }''',
+        "round9 tap trail flusher")
+
+# --- attach(): fine-grained breadcrumbs around the sequence
+# the user named ("crashes right after it says eq attaching").
+s = rep(s, r'''    func attach(to item: AVPlayerItem) async -> Bool {
+        // Round 5: never stack a second tap on an item that already
+        // carries one (a re-attach on sheet re-presentation used to
+        // orphan the first tap's retained state).
+        if let existingParameters = item.audioMix?.inputParameters,
+           existingParameters.contains(where: { $0.audioTapProcessor != nil }) {
+            return true
+        }
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .audio), let track = tracks.first else { return false }
+        let state = TapState()''',
+        r'''    func attach(to item: AVPlayerItem) async -> Bool {
+        TrapTubeCrashTrail.record("tap attach called")
+        TrapTubeCrashTrail.armHeartbeat()
+        // Round 5: never stack a second tap on an item that already
+        // carries one (a re-attach on sheet re-presentation used to
+        // orphan the first tap's retained state).
+        let existingParameters = item.audioMix?.inputParameters
+        TrapTubeCrashTrail.record("tap attach: audioMix read (existing tap: \(existingParameters?.contains(where: { $0.audioTapProcessor != nil }) ?? false))")
+        if let existingParameters,
+           existingParameters.contains(where: { $0.audioTapProcessor != nil }) {
+            TrapTubeCrashTrail.record("tap attach: item already carries a tap")
+            return true
+        }
+        let audioTracks = try? await item.asset.loadTracks(withMediaType: .audio)
+        TrapTubeCrashTrail.record("tap attach: tracks loaded (audio track: \(audioTracks?.first != nil))")
+        guard let track = audioTracks?.first else { return false }
+        let state = TapState()
+        lastTapState = state
+        trailDrainedFor = nil
+        trailDrainedCount = 0''',
+        "round9 attach head crumbs")
+s = rep(s, r'''        var tap: MTAudioProcessingTap?
+        let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
+        guard status == noErr, let tap else {''',
+        r'''        var tap: MTAudioProcessingTap?
+        let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
+        TrapTubeCrashTrail.record("tap attach: TapCreate -> \(status == noErr ? "ok" : "OSStatus \(status)")")
+        guard status == noErr, let tap else {''',
+        "round9 tapcreate crumb")
+s = rep(s, r'''        let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTapProcessor = tap
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [parameters]
+        item.audioMix = mix
+        return true
+    }''',
+        r'''        let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTapProcessor = tap
+        TrapTubeCrashTrail.record("tap attach: mix params built")
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [parameters]
+        item.audioMix = mix
+        TrapTubeCrashTrail.record("tap attach: audioMix ASSIGNED")
+        scheduleTrailDrains()
+        TrapTubeCrashTrail.record("tap attach returned (attached: true)")
+        return true
+    }''',
+        "round9 attach assign crumbs")
+
+# --- TapState: preallocated breadcrumb slots. NOT freed by
+# release() (prepare calls release() before noting its own
+# step); they live and die with the state object.
+s = rep(s, r'''    private var appliedVersion: UInt64 = 0
+    private var preamp: Float = 1
+    private let delayLength = 2 * TrapTubeTapEQ.sectionCount + 2''',
+        r'''    private var appliedVersion: UInt64 = 0
+    private var preamp: Float = 1
+    private let delayLength = 2 * TrapTubeTapEQ.sectionCount + 2
+
+    // Round 9 crash-trail slots (see TrapTubeCrashTrail): the
+    // render callbacks note step codes here - plain aligned
+    // 32-bit stores from the tap's one render thread, the count
+    // stored last as the commit word - and the main-queue
+    // flusher on TrapTubeTapEQ turns them into trail lines. No
+    // locks, no allocation, no I/O on the render path.
+    let trailCodes: UnsafeMutablePointer<Int32>
+    let trailValues: UnsafeMutablePointer<Int32>
+    var trailCount: Int32 = 0
+    private var trailProcessNoted = false
+
+    init() {
+        trailCodes = .allocate(capacity: 8)
+        trailCodes.initialize(repeating: 0, count: 8)
+        trailValues = .allocate(capacity: 32)
+        trailValues.initialize(repeating: 0, count: 32)
+    }
+
+    /// Render-thread breadcrumb: codes 1 initialize, 2 prepare,
+    /// 3 first process, 4 unprepare, 5 finalize. Values carry
+    /// per-code facts (prepare: sample rate, channels, format
+    /// flags, bits per channel; process: frame count).
+    func noteTrail(_ code: Int32, _ a: Int32 = 0, _ b: Int32 = 0, _ c: Int32 = 0, _ d: Int32 = 0) {
+        let index = Int(trailCount)
+        guard index < 8 else { return }
+        trailCodes[index] = code
+        trailValues[index * 4] = a
+        trailValues[index * 4 + 1] = b
+        trailValues[index * 4 + 2] = c
+        trailValues[index * 4 + 3] = d
+        trailCount = Int32(index + 1)
+    }
+
+    func noteProcessIfFirst(frames: Int32) {
+        guard !trailProcessNoted else { return }
+        trailProcessNoted = true
+        noteTrail(3, frames)
+    }''',
+        "round9 tapstate trail slots")
+s = rep(s, r'''    deinit { release() }''',
+        r'''    deinit {
+        release()
+        trailCodes.deallocate()
+        trailValues.deallocate()
+    }''',
+        "round9 tapstate deinit")
+
+# --- The callbacks themselves note their steps.
+s = rep(s, r'''private let tapInit: MTAudioProcessingTapInitCallback = { _, clientInfo, storageOut in
+    storageOut.pointee = clientInfo
+}
+private let tapFinalize: MTAudioProcessingTapFinalizeCallback = { tap in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
+}
+private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().prepare(format.pointee)
+}
+private let tapUnprepare: MTAudioProcessingTapUnprepareCallback = { tap in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().release()
+}
+private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
+    guard MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut) == noErr else { return }
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+        .process(bufferList, frames: Int(framesOut.pointee))
+}''',
+        r'''private let tapInit: MTAudioProcessingTapInitCallback = { _, clientInfo, storageOut in
+    storageOut.pointee = clientInfo
+    if let clientInfo {
+        Unmanaged<TapState>.fromOpaque(clientInfo).takeUnretainedValue().noteTrail(1)
+    }
+}
+private let tapFinalize: MTAudioProcessingTapFinalizeCallback = { tap in
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue().noteTrail(5)
+    Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
+}
+private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.prepare(format.pointee)
+    state.noteTrail(2, Int32(format.pointee.mSampleRate), Int32(format.pointee.mChannelsPerFrame),
+                    Int32(format.pointee.mFormatFlags), Int32(format.pointee.mBitsPerChannel))
+}
+private let tapUnprepare: MTAudioProcessingTapUnprepareCallback = { tap in
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.release()
+    state.noteTrail(4)
+}
+private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
+    guard MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut) == noErr else { return }
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.noteProcessIfFirst(frames: Int32(framesOut.pointee))
+    state.process(bufferList, frames: Int(framesOut.pointee))
+}''',
+        "round9 tap callback crumbs")
+
+# --- Downloaded-file player: name its attach path + drain after.
+s = rep(s, r'''        let playGeneration = generation
+        attachTask = Task { [weak self] in''',
+        r'''        let playGeneration = generation
+        TrapTubeCrashTrail.record("tap attach begin (path: downloaded-player)")
+        attachTask = Task { [weak self] in''',
+        "round9 downloaded attach crumb")
+s = rep(s, r'''            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            guard let self, self.generation == playGeneration, self.currentItem === item else { return }''',
+        r'''            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            TrapTubeTapEQ.shared.drainTapTrail()
+            guard let self, self.generation == playGeneration, self.currentItem === item else { return }''',
+        "round9 downloaded drain")
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
