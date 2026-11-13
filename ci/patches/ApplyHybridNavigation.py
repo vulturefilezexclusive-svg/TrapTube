@@ -1961,7 +1961,8 @@ if "themeHue" not in s:
         let defaults = UserDefaults.standard
         let saved = defaults.string(forKey: "theme.accent") ?? "E50920"
         let isValidHex = saved.count == 6 && saved.allSatisfy { $0.isHexDigit }
-        accentHex = isValidHex ? saved.uppercased() : "E50920"
+        let initialHex = isValidHex ? saved.uppercased() : "E50920"
+        accentHex = initialHex
         if defaults.object(forKey: "TrapTube.Theme.Hue") != nil {
             themeHue = defaults.double(forKey: "TrapTube.Theme.Hue")
             themeSaturation = defaults.double(forKey: "TrapTube.Theme.Saturation")
@@ -1971,7 +1972,7 @@ if "themeHue" not in s:
             accentHex = TrapTubeHSV.hex(hue: themeHue, saturation: themeSaturation, brightness: themeBrightness)
             defaults.set(accentHex, forKey: "theme.accent")
         } else {
-            let hsv = TrapTubeHSV.hsv(fromHex: accentHex)
+            let hsv = TrapTubeHSV.hsv(fromHex: initialHex)
             themeHue = hsv.hue
             themeSaturation = hsv.saturation
             themeBrightness = hsv.brightness
