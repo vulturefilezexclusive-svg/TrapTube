@@ -9701,10 +9701,15 @@ s = rep(s, r'''    struct Source {
         "round10 ghost sourceRefresher property")
 
 # Ghost FILE route: fetch through downloadWithRemint.
+# (Round 10-fix: the property is hoisted into a local BEFORE the
+# closure - referencing sourceRefresher directly inside the
+# escaping closure is a compile error, "reference to property
+# ... requires explicit use of 'self'", build #408.)
 s = rep(s, r'''        let downloadedFile = try? await TrapTubeDirectDownloader.shared.download(
             from: source.url, userAgent: source.userAgent, onProgress: { _ in })''',
-        r'''        let remint: TrapTubeStreamRefresher = {
-            guard let refresh = sourceRefresher else { return nil }
+        r'''        let refresher = sourceRefresher
+        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = refresher else { return nil }
             guard let fresh = await refresh() else { return nil }
             return (url: fresh.url, userAgent: fresh.userAgent)
         }
