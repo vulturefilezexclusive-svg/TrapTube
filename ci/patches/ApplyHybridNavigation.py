@@ -9936,4 +9936,266 @@ s = rep(s, r'''    private func settingsToggle(_ title: String, detail: String, 
 
 p.write_text(s)
 
+# =====================================================================
+# Round 11 - THE tap crash fix, from the device trail verdict
+# (Round 10): "Last run reached: tap callback: prepare (fmt:
+# 44100 Hz, 2 ch, float32-bit, interleaved)" - prepare committed
+# its breadcrumb WITH the format facts and "first frames
+# rendered" never committed, so the crash is inside the first
+# process call on a 44.1 kHz float32 INTERLEAVED stereo stream
+# (ONE AudioBuffer). Line-by-line simulation of that format:
+# the delay line is EXACT (sectionCount = 17 = 16 bands + bass
+# shelf; vDSP needs 2*17+2 = 36 delay floats per channel and
+# prepare allocates delayLength(36) * channels(2) = 72), the
+# interleaved buffer walk is in-bounds, prepare allocates
+# nothing keyed to maxFrames, CreateSetupD's optional is never
+# force-unwrapped, and the trail slot store is bounds-checked.
+# The one off-contract usage on the path: the biquad setup's
+# precision family. The setup was created with
+# vDSP_biquad_CreateSetupD and refreshed with
+# vDSP_biquad_SetCoefficientsDouble, but the samples are
+# rendered with the single-precision vDSP_biquad - Apple's
+# documented pairings are CreateSetup/SetCoefficients with
+# vDSP_biquad, CreateSetupD/SetCoefficientsDouble with
+# vDSP_biquadD. First contact between the Float render routine
+# and a Double-family setup is exactly where the trail stops.
+# Fix: ONE precision family end to end - Float coefficients
+# (design math unchanged, still computed in Double and stored
+# as Float, so the curves are identical), vDSP_biquad_
+# CreateSetup, vDSP_biquad_SetCoefficients, vDSP_biquad_
+# DestroySetup. Plus defense in depth in process(): a channel
+# ceiling at prepare, a frame-count sanity bound, and a
+# per-buffer capacity proof (mDataByteSize vs frames x
+# channels) before any DSP - any mismatch leaves the buffer's
+# source audio untouched, so this tap passes audio through
+# instead of dying on an unexpected format. The downloaded
+# player shares TapState and inherits both changes. Trail
+# steps are unchanged - they are how we verify.
+# =====================================================================
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+
+s = rep(s, r'''    private var setup: vDSP_biquad_Setup?
+    private var delays: UnsafeMutablePointer<Float>?
+    private var coefficients: UnsafeMutablePointer<Double>?''',
+        r'''    private var setup: vDSP_biquad_Setup?
+    private var delays: UnsafeMutablePointer<Float>?
+    /// Round 11: coefficients are Float - the same precision
+    /// family as the render buffers. The setup is created with
+    /// vDSP_biquad_CreateSetup and refreshed with
+    /// vDSP_biquad_SetCoefficients, the documented partners of
+    /// the single-precision vDSP_biquad that process() runs.
+    /// The old code created and refreshed the setup through the
+    /// Double family (CreateSetupD / SetCoefficientsDouble)
+    /// while rendering through the Float routine - a pairing
+    /// outside vDSP's documented contract. Device trail verdict
+    /// (Round 10): prepare committed, the first process call
+    /// never rendered a frame.
+    private var coefficients: UnsafeMutablePointer<Float>?''',
+        "round11 tap coefficients are Float")
+
+s = rep(s, r'''    func prepare(_ format: AudioStreamBasicDescription) {
+        release()
+        sampleRate = format.mSampleRate
+        channels = Int(format.mChannelsPerFrame)
+        isFloat32 = format.mFormatID == kAudioFormatLinearPCM
+            && (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32
+        interleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+        guard isFloat32, channels > 0, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
+        let count = TrapTubeTapEQ.sectionCount
+        // Round 5: no force unwraps on the render path - build
+        // through locals and publish the pointers once, fully built.
+        let newCoefficients = UnsafeMutablePointer<Double>.allocate(capacity: 5 * count)
+        for section in 0..<count { Self.identity(newCoefficients + section * 5) }
+        coefficients = newCoefficients
+        setup = vDSP_biquad_CreateSetupD(newCoefficients, vDSP_Length(count))
+        let newDelays = UnsafeMutablePointer<Float>.allocate(capacity: delayLength * channels)
+        newDelays.initialize(repeating: 0, count: delayLength * channels)
+        delays = newDelays
+        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 19)
+        newSnapshot.initialize(repeating: 0, count: 19)
+        newSnapshot[17] = 1
+        newSnapshot[18] = 1
+        snapshot = newSnapshot
+        appliedVersion = 0
+    }''',
+        r'''    func prepare(_ format: AudioStreamBasicDescription) {
+        release()
+        sampleRate = format.mSampleRate
+        channels = Int(format.mChannelsPerFrame)
+        isFloat32 = format.mFormatID == kAudioFormatLinearPCM
+            && (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32
+        interleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+        guard isFloat32, channels > 0, channels <= 8, sampleRate > 0 else { return }   // unsupported format: audio passes through untouched
+        let count = TrapTubeTapEQ.sectionCount
+        // Round 5: no force unwraps on the render path - build
+        // through locals and publish the pointers once, fully built.
+        let newCoefficients = UnsafeMutablePointer<Float>.allocate(capacity: 5 * count)
+        for section in 0..<count { Self.identity(newCoefficients + section * 5) }
+        coefficients = newCoefficients
+        setup = vDSP_biquad_CreateSetup(newCoefficients, vDSP_Length(count))
+        let newDelays = UnsafeMutablePointer<Float>.allocate(capacity: delayLength * channels)
+        newDelays.initialize(repeating: 0, count: delayLength * channels)
+        delays = newDelays
+        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 19)
+        newSnapshot.initialize(repeating: 0, count: 19)
+        newSnapshot[17] = 1
+        newSnapshot[18] = 1
+        snapshot = newSnapshot
+        appliedVersion = 0
+    }''',
+        "round11 tap prepare float setup")
+
+s = rep(s, r'''        if let setup { vDSP_biquad_DestroySetupD(setup) }''',
+        r'''        if let setup { vDSP_biquad_DestroySetup(setup) }''',
+        "round11 tap destroy setup")
+
+s = rep(s, r'''    func process(_ list: UnsafeMutablePointer<AudioBufferList>, frames: Int) {
+        guard let setup, let delays, let coefficients, let snapshot, frames > 0 else { return }
+        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot), version != appliedVersion {
+            Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
+            vDSP_biquad_SetCoefficientsDouble(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
+            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        // Round 7: EQ disabled from the player sheet - leave the
+        // buffers exactly as the source delivered them.
+        if snapshot[18] < 0.5 { return }
+        var gain = preamp
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        if interleaved {
+            for buffer in buffers {
+                guard let raw = buffer.mData else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                let stride = max(1, Int(buffer.mNumberChannels))
+                for channel in 0..<min(stride, channels) {
+                    let start = data + channel
+                    vDSP_biquad(setup, delays + channel * delayLength, start, vDSP_Stride(stride), start, vDSP_Stride(stride), vDSP_Length(frames))
+                    vDSP_vsmul(start, vDSP_Stride(stride), &gain, start, vDSP_Stride(stride), vDSP_Length(frames))
+                }
+            }
+        } else {
+            for (channel, buffer) in buffers.enumerated() where channel < channels {
+                guard let raw = buffer.mData else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
+                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
+            }
+        }
+    }''',
+        r'''    func process(_ list: UnsafeMutablePointer<AudioBufferList>, frames: Int) {
+        // Round 11 defensive rule: the source audio is already
+        // sitting in these buffers when process() runs, so ANY
+        // doubt means "return without touching them" - clean
+        // passthrough instead of a crash. Every size, count and
+        // pointer below is proven against the prepare-time
+        // allocations and each buffer's own stated capacity
+        // before DSP runs.
+        guard let setup, let delays, let coefficients, let snapshot,
+              frames > 0, frames <= 1_048_576, channels > 0, channels <= 8 else { return }
+        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot), version != appliedVersion {
+            Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
+            vDSP_biquad_SetCoefficients(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
+            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        // Round 7: EQ disabled from the player sheet - leave the
+        // buffers exactly as the source delivered them.
+        if snapshot[18] < 0.5 { return }
+        var gain = preamp
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        if interleaved {
+            for buffer in buffers {
+                let bufferChannels = Int(buffer.mNumberChannels)
+                // A channel count prepare allocated no delay
+                // state for, or a buffer too small for the
+                // frames requested: pass it through untouched.
+                guard let raw = buffer.mData, bufferChannels > 0, bufferChannels <= channels,
+                      Int(buffer.mDataByteSize) >= frames * bufferChannels * MemoryLayout<Float>.size else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                for channel in 0..<bufferChannels {
+                    let start = data + channel
+                    vDSP_biquad(setup, delays + channel * delayLength, start, vDSP_Stride(bufferChannels), start, vDSP_Stride(bufferChannels), vDSP_Length(frames))
+                    vDSP_vsmul(start, vDSP_Stride(bufferChannels), &gain, start, vDSP_Stride(bufferChannels), vDSP_Length(frames))
+                }
+            }
+        } else {
+            for (channel, buffer) in buffers.enumerated() where channel < channels {
+                guard let raw = buffer.mData,
+                      Int(buffer.mDataByteSize) >= frames * MemoryLayout<Float>.size else { continue }
+                let data = raw.assumingMemoryBound(to: Float.self)
+                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
+                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
+            }
+        }
+    }''',
+        "round11 tap process defensive passthrough")
+
+s = rep(s, r'''    private static func identity(_ section: UnsafeMutablePointer<Double>) {
+        section[0] = 1; section[1] = 0; section[2] = 0; section[3] = 0; section[4] = 0
+    }
+
+    /// RBJ cookbook biquads in vDSP order [b0, b1, b2, a1, a2], normalised by a0.
+    /// Peaking bands use Q = 1.4142 (about one octave); the bass shelf is a low shelf at 90 Hz, Q = 0.7.
+    private static func design(into out: UnsafeMutablePointer<Double>, sampleRate: Double, values: UnsafeMutablePointer<Float>) {
+        for band in 0..<16 {
+            let section = out + band * 5
+            let gain = Double(values[band])
+            let f0 = Double(TrapTubeTapEQ.bandFrequencies[band])
+            guard abs(gain) > 0.01, f0 < sampleRate * 0.45 else { identity(section); continue }
+            let a = pow(10, gain / 40), w = 2 * Double.pi * f0 / sampleRate
+            let alpha = sin(w) / (2 * 1.4142), c = cos(w)
+            let a0 = 1 + alpha / a
+            section[0] = (1 + alpha * a) / a0; section[1] = -2 * c / a0; section[2] = (1 - alpha * a) / a0
+            section[3] = -2 * c / a0;          section[4] = (1 - alpha / a) / a0
+        }
+        let shelf = out + 16 * 5
+        let bass = Double(values[16])
+        guard bass > 0.01 else { identity(shelf); return }
+        let a = pow(10, bass / 40), w = 2 * Double.pi * 90 / sampleRate
+        let c = cos(w), alpha = sin(w) / (2 * 0.7), s = 2 * a.squareRoot() * alpha
+        let a0 = (a + 1) + (a - 1) * c + s
+        shelf[0] = a * ((a + 1) - (a - 1) * c + s) / a0
+        shelf[1] = 2 * a * ((a - 1) - (a + 1) * c) / a0
+        shelf[2] = a * ((a + 1) - (a - 1) * c - s) / a0
+        shelf[3] = -2 * ((a - 1) + (a + 1) * c) / a0
+        shelf[4] = ((a + 1) + (a - 1) * c - s) / a0
+    }''',
+        r'''    private static func identity(_ section: UnsafeMutablePointer<Float>) {
+        section[0] = 1; section[1] = 0; section[2] = 0; section[3] = 0; section[4] = 0
+    }
+
+    /// RBJ cookbook biquads in vDSP order [b0, b1, b2, a1, a2], normalised by a0.
+    /// Peaking bands use Q = 1.4142 (about one octave); the bass shelf is a low shelf at 90 Hz, Q = 0.7.
+    /// Round 11: the design math still runs in Double, so the curves
+    /// are identical; only the stored coefficients are Float,
+    /// matching the single-precision setup and render path.
+    private static func design(into out: UnsafeMutablePointer<Float>, sampleRate: Double, values: UnsafeMutablePointer<Float>) {
+        for band in 0..<16 {
+            let section = out + band * 5
+            let gain = Double(values[band])
+            let f0 = Double(TrapTubeTapEQ.bandFrequencies[band])
+            guard abs(gain) > 0.01, f0 < sampleRate * 0.45 else { identity(section); continue }
+            let a = pow(10, gain / 40), w = 2 * Double.pi * f0 / sampleRate
+            let alpha = sin(w) / (2 * 1.4142), c = cos(w)
+            let a0 = 1 + alpha / a
+            section[0] = Float((1 + alpha * a) / a0); section[1] = Float(-2 * c / a0); section[2] = Float((1 - alpha * a) / a0)
+            section[3] = Float(-2 * c / a0);          section[4] = Float((1 - alpha / a) / a0)
+        }
+        let shelf = out + 16 * 5
+        let bass = Double(values[16])
+        guard bass > 0.01 else { identity(shelf); return }
+        let a = pow(10, bass / 40), w = 2 * Double.pi * 90 / sampleRate
+        let c = cos(w), alpha = sin(w) / (2 * 0.7), s = 2 * a.squareRoot() * alpha
+        let a0 = (a + 1) + (a - 1) * c + s
+        shelf[0] = Float(a * ((a + 1) - (a - 1) * c + s) / a0)
+        shelf[1] = Float(2 * a * ((a - 1) - (a + 1) * c) / a0)
+        shelf[2] = Float(a * ((a + 1) - (a - 1) * c - s) / a0)
+        shelf[3] = Float(-2 * ((a - 1) + (a + 1) * c) / a0)
+        shelf[4] = Float(((a + 1) + (a - 1) * c - s) / a0)
+    }''',
+        "round11 tap design stores Float coefficients")
+
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
