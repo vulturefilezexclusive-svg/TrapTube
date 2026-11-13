@@ -10598,4 +10598,256 @@ s = rep(s, '                messages.append("\\(source.lastPathComponent): \\(er
         'round13 library error names picked file')
 p.write_text(s)
 
+# =====================================================================
+# Round 14 - three trail-proven fixes: the tap's first-call
+# settings refresh, the ghost streamed prime's opaque error,
+# and the ghost file route's refused fetch stack.
+#
+# Tap: the Round 12/13 device trail finally brackets the
+# crash inside the first process() call: "tap process:
+# entered" and "tap process: source fetched (3779 frames)"
+# commit, then death - no "settings applied", no entry-guard
+# crumb. The only work between those points is the settings
+# refresh (version check -> copyValues -> design() ->
+# vDSP_biquad_SetCoefficientsDouble), and it was GUARANTEED
+# to run there: the shared TrapTubeTapEQ version starts at 1
+# while prepare() resets appliedVersion to 0, so the first
+# render call after every prepare always executed it - in
+# the render callback, at the worst possible moment. Round
+# 14 eliminates it by construction: prepare() (pre-render,
+# provably completes on device) now reads the current shared
+# values, runs design() and applies them to the new setup,
+# recording the applied version; the first process() call's
+# refresh check then compares equal and no-ops. The
+# in-process refresh remains for genuine mid-playback
+# changes, and gains a begin crumb; the prepared no-op gets
+# a distinct "settings current (prepared)" crumb. A
+# fresh-eyes re-read of the refresh segment found no second
+# defect: the pointers are allocated in prepare, published
+# once and freed only in release()/unprepare/deinit;
+# copyValues is trylock-guarded with exact 19/19 counts;
+# design() writes exactly 17x5 doubles into the 85-double
+# buffer; SetCoefficientsDouble receives the setup's exact
+# section count. The defect was WHERE the refresh ran.
+#
+# Ghost streamed prime: the asset ALREADY goes out with the
+# working header shape (UA + Referer via
+# AVURLAssetHTTPHeaderFieldsKey, identical to the video
+# item's construction), so there is no header fix to make;
+# instead the prime's throw breadcrumbs now record the
+# NSError domain + code, because the localizedDescription
+# on device is an opaque "(unknown error)" while the real
+# AVFoundation reason lives in the domain/code.
+#
+# Ghost file route: AVAssetDownloadURLSession was evaluated
+# as the media-stack fetch and is NOT viable here - it is
+# an HLS-only offline-download API (makeAssetDownloadTask
+# returns nil for non-HLS assets, and HLS downloads land as
+# a .movpkg bundle, not a file AVAudioFile can open); the
+# ghost leg is a progressive MP4 URL. The blocker is the
+# media kind, not the session/delegate shape. So the
+# URLSession path stays, and gains the facts that separate
+# a stale or egress-bound mint from a refused fetch stack:
+# each attempted URL's expire epoch (with seconds of life
+# left) and whether its signature binds an ip parameter
+# (presence + address family only - the value is never
+# recorded). downloadWithRemint re-mints before the first
+# byte and once more after a 403, so the remint closure
+# records each fetched URL's facts in attempt order.
+# =====================================================================
+
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+
+s = rep(s, r'''    func noteFirstProcessSettingsApplied() {
+        guard firstProcessStage == 2 else { return }
+        firstProcessStage = 3
+        TrapTubeCrashTrail.record("tap process: settings applied")
+    }''',
+        r'''    func noteFirstProcessSettingsApplied() {
+        guard firstProcessStage == 2 else { return }
+        firstProcessStage = 3
+        TrapTubeCrashTrail.record("tap process: settings applied")
+    }
+
+    // Round 14: the refresh segment inside the first process
+    // call gets a begin crumb when it actually runs, and a
+    // distinct "current" crumb when it no-ops because
+    // prepare already applied the same version (the normal
+    // case since Round 14 pre-applies in prepare). Both test
+    // the stage and leave it at 2, so "settings applied"
+    // still closes the segment exactly as before.
+    func noteFirstProcessRefreshBegin(version: UInt64) {
+        guard firstProcessStage == 2 else { return }
+        TrapTubeCrashTrail.record("tap process: settings refresh begin (version \(version))")
+    }
+
+    func noteFirstProcessSettingsCurrent(version: UInt64) {
+        guard firstProcessStage == 2 else { return }
+        TrapTubeCrashTrail.record("tap process: settings current (prepared, version \(version))")
+    }''',
+        "round14 tap refresh breadcrumb pair")
+
+s = rep(s, r'''        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 19)
+        newSnapshot.initialize(repeating: 0, count: 19)
+        newSnapshot[17] = 1
+        newSnapshot[18] = 1
+        snapshot = newSnapshot
+        appliedVersion = 0
+    }''',
+        r'''        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 19)
+        newSnapshot.initialize(repeating: 0, count: 19)
+        newSnapshot[17] = 1
+        newSnapshot[18] = 1
+        snapshot = newSnapshot
+        appliedVersion = 0
+        // Round 14: pre-apply the current EQ settings HERE,
+        // in prepare - a pre-render context that provably
+        // completes on device - instead of leaving the whole
+        // refresh (copyValues -> design ->
+        // vDSP_biquad_SetCoefficientsDouble) to the first
+        // process() call. The Round 12/13 device trail
+        // brackets the tap crash to exactly that segment:
+        // "source fetched" commits, then death, and no
+        // "settings applied" ever follows. The refresh was
+        // guaranteed to land there: the shared version starts
+        // at 1 and every prepare reset appliedVersion to 0,
+        // so the first render call always ran it. Applying
+        // here records the version, so the first process()
+        // call's refresh check compares equal and no-ops;
+        // the in-process refresh still handles genuine
+        // mid-playback changes. If the shared lock is busy
+        // at this instant (copyValues returns nil),
+        // appliedVersion stays 0 and the first process call
+        // refreshes the old way - a degraded fallback, not
+        // a new failure mode.
+        if let newSetup = setup, let version = TrapTubeTapEQ.shared.copyValues(into: newSnapshot) {
+            Self.design(into: newCoefficients, sampleRate: sampleRate, values: newSnapshot)
+            vDSP_biquad_SetCoefficientsDouble(newSetup, newCoefficients, 0, vDSP_Length(count))
+            preamp = newSnapshot[17]
+            appliedVersion = version
+            TrapTubeCrashTrail.record("tap prepare: settings pre-applied (version \(version))")
+        }
+    }''',
+        "round14 tap prepare pre-applies settings")
+
+s = rep(s, r'''        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot), version != appliedVersion {
+            Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
+            vDSP_biquad_SetCoefficientsDouble(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
+            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        noteFirstProcessSettingsApplied()''',
+        r'''        if let version = TrapTubeTapEQ.shared.copyValues(into: snapshot) {
+            if version != appliedVersion {
+                // Round 14: a genuine settings change (sliders,
+                // preset, enable toggle). Since prepare now
+                // pre-applies, the FIRST call normally compares
+                // equal and lands in the else branch instead;
+                // this branch still serves every later change
+                // exactly as before.
+                noteFirstProcessRefreshBegin(version: version)
+                Self.design(into: coefficients, sampleRate: sampleRate, values: snapshot)
+                vDSP_biquad_SetCoefficientsDouble(setup, coefficients, 0, vDSP_Length(TrapTubeTapEQ.sectionCount))
+                preamp = snapshot[17]
+                appliedVersion = version
+            } else {
+                noteFirstProcessSettingsCurrent(version: version)
+            }
+        }
+        noteFirstProcessSettingsApplied()''',
+        "round14 tap process refresh breadcrumbs")
+
+p.write_text(s)
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+s = rep(s, r'''        } catch {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): track load threw (\(error.localizedDescription))")
+            return false
+        }''',
+        r'''        } catch {
+            // Round 14: the localizedDescription of this
+            // failure is an opaque "(unknown error)" on
+            // device; the NSError domain + code carry the
+            // actionable AVFoundation reason. (The asset
+            // already goes out with the working header shape
+            // - UA + Referer via AVURLAssetHTTPHeaderFieldsKey,
+            // identical to the video item's construction - so
+            // headers are not the missing piece.)
+            let nsError = error as NSError
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): track load threw (\(nsError.domain) \(nsError.code): \(error.localizedDescription))")
+            return false
+        }''',
+        "round14 ghost track load error domain code")
+
+s = rep(s, r'''        } catch {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): reader init threw (\(error.localizedDescription))")
+            return false
+        }''',
+        r'''        } catch {
+            // Round 14: same opaque-description problem as
+            // the track load above - record domain + code.
+            let nsError = error as NSError
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): reader init threw (\(nsError.domain) \(nsError.code): \(error.localizedDescription))")
+            return false
+        }''',
+        "round14 ghost reader init error domain code")
+
+s = rep(s, r'''    private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {''',
+        r'''    /// Round 14: non-sensitive facts about a minted
+    /// googlevideo URL for the trail: the signature's
+    /// `expire` epoch with the seconds of life it has left,
+    /// and whether the signature binds an `ip` parameter -
+    /// presence and address family only; the ip VALUE is
+    /// never recorded. The Round 12/13 trails prove the
+    /// wiring correct and the re-minted retry still refused
+    /// (403) on this device, so these facts are what
+    /// separates "the retried mint was already stale, or
+    /// bound to an egress the device had left" from "this
+    /// fetch stack is refused whatever mint it carries".
+    private static func ghostURLFacts(_ url: URL) -> String {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        var expireText = "expire absent"
+        if let raw = items.first(where: { $0.name == "expire" })?.value, let epoch = Int(raw) {
+            expireText = "expire \(epoch) (\(epoch - Int(Date().timeIntervalSince1970))s left)"
+        }
+        var ipText = "ip absent"
+        if let ip = items.first(where: { $0.name == "ip" })?.value, !ip.isEmpty {
+            ipText = ip.contains(":") ? "ip v6" : "ip v4"
+        }
+        return "\(expireText), \(ipText)"
+    }
+
+    private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {''',
+        "round14 ghost URL facts helper")
+
+s = rep(s, r'''        TrapTubeCrashTrail.record("ghost file source (host: \(source.url.host ?? "?"), refresher: \(refresher != nil ? "set" : "MISSING"))")''',
+        r'''        TrapTubeCrashTrail.record("ghost file source (host: \(source.url.host ?? "?"), refresher: \(refresher != nil ? "set" : "MISSING"))")
+        // Round 14: the handed-in mint's facts (the
+        // downloader re-mints before the first byte, so the
+        // remint facts below are the URLs actually fetched).
+        TrapTubeCrashTrail.record("ghost file URL facts (\(Self.ghostURLFacts(source.url)))")''',
+        "round14 ghost file source URL facts")
+
+s = rep(s, r'''        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = refresher else { return nil }
+            guard let fresh = await refresh() else { return nil }
+            return (url: fresh.url, userAgent: fresh.userAgent)
+        }''',
+        r'''        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = refresher else { return nil }
+            guard let fresh = await refresh() else { return nil }
+            // Round 14: downloadWithRemint calls this before
+            // the first byte and once more after a 403, so
+            // these lines are the fetched URLs' facts, in
+            // attempt order.
+            TrapTubeCrashTrail.record("ghost file remint URL facts (\(Self.ghostURLFacts(fresh.url)))")
+            return (url: fresh.url, userAgent: fresh.userAgent)
+        }''',
+        "round14 ghost remint URL facts")
+
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
