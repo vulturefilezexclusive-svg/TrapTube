@@ -10107,4 +10107,391 @@ s = rep(s, r'''    func process(_ list: UnsafeMutablePointer<AudioBufferList>, f
 
 p.write_text(s)
 
+
+# =====================================================================
+# Round 12 - the tap's callback glue, aimed by the FULL device
+# trail, plus the ghost feeder's silent failures.
+#
+# Tap: eight consecutive device runs end the same way - the
+# attach sequence completes (TapCreate ok, audioMix ASSIGNED,
+# attach returned, "run healthy"), tap initialize records,
+# tap prepare records WITH its format facts (44100 Hz, 2 ch,
+# float32, interleaved) - then death, and no run ever records
+# a process step. The glue audit re-read the entire tap
+# (MTAudioProcessingTapCallbacks construction, the
+# @convention(c) callbacks, TapState retention, the trail
+# slot/flusher machinery) against Apple's canonical pattern
+# and cleared the named suspects with numbers, in the
+# comments at the new breadcrumb state below. What the trail
+# CANNOT currently prove is whether the first process call
+# was even entered: slot 3 is stored before state.process()
+# runs but reaches the file only through main-queue drains on
+# a +0.05/+0.3/+1.0s fuse (plus 0.25s player ticks), so a
+# crash inside the first render call - or inside
+# GetSourceAudio itself - leaves the file exactly as
+# observed. Round 12 therefore adds FIRST-PROCESS SUB-STEP
+# BREADCRUMBS: on the first process call of each tap only,
+# direct fsync writes to the trail at entry -> source
+# fetched (status + actual frames) -> settings applied ->
+# DSP done -> about to return, plus a first-prepare entry
+# note covering the one run that died between initialize and
+# prepare. Steady-state calls test one Int and write
+# nothing. Round 11's process() guards are untouched.
+#
+# Ghost: two device runs on the ghost path fail identically -
+# the streamed prime exits ~1.2-1.7s after "prime begin" with
+# NO error breadcrumb, then the file route's download fails
+# and its error is swallowed by a try?. Three fixes: (1) the
+# streamed prime's combined guard is split so every exit
+# names its reason (track load threw / no audio track /
+# reader init threw / output refused), and the attempted
+# source's host + UA are recorded at prime begin; (2) the
+# file route catches and records the download error (the
+# downloader's descriptions already carry HTTP status +
+# host) and records whether the session's re-mint closure
+# was actually installed; (3) SELECTION - the ghost audio
+# leg is no longer taken from the aggregate resolver's
+# audioOnly (per-itag dedupe, ANDROID first, whose adaptive
+# audio is SABR-only/URL-less in the current regime):
+# TrapTubeInnerTube.fetchGhostAudioSource mints it from the
+# first direct-URL profile (IOS, then WEB_EMBEDDED, then
+# ANDROID) and the session's source + refresher both use
+# it, the aggregate pick kept only as last resort.
+# primeFile's silent exits get the same treatment.
+# =====================================================================
+
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+
+s = rep(s, r'''    func noteProcessIfFirst(frames: Int32) {
+        guard !trailProcessNoted else { return }
+        trailProcessNoted = true
+        noteTrail(3, frames)
+    }''',
+        r'''    func noteProcessIfFirst(frames: Int32) {
+        guard !trailProcessNoted else { return }
+        trailProcessNoted = true
+        noteTrail(3, frames)
+    }
+
+    // Round 12: first-process sub-step breadcrumbs. The Round 9
+    // slots reach the trail file only when a main-queue drain
+    // runs (the +0.05/+0.3/+1.0s fuse after an audioMix
+    // assignment, or a 0.25s player tick), so a crash inside
+    // the first render call can store slot 3 and still never
+    // reach the file - eight device runs ended at "prepare"
+    // without proving process() was even entered. These notes
+    // write DIRECTLY to the trail (fsync'd by record()) from
+    // the render thread, gated by a stage counter only that
+    // thread advances, and only while this tap's first process
+    // call is in flight; steady-state calls test one Int and
+    // never touch the file. If the crash survives this round,
+    // the last of these lines in the trail IS the dying
+    // sub-step. The glue audit behind this round cleared the
+    // canonical-pattern suspects with numbers: the callbacks
+    // struct is Apple's documented shape (the tap's storage
+    // is a single pointer slot - this API has no storageSize
+    // field - and tapInit stores exactly that one pointer);
+    // the process wrapper fetches into the framework's own
+    // buffer list and already honors the fetch status and the
+    // actual frame count; the clientInfo retain is balanced
+    // by finalize, or by attach's failure path; and the
+    // settings snapshot is 19 floats on both sides of
+    // copyValues (16 bands + bass + master + bypass) - an
+    // exact match, no overflow on the first-call refresh.
+    private var firstProcessStage = 0
+    private var firstPrepareNoted = false
+
+    func noteFirstPrepareEntered(_ format: AudioStreamBasicDescription) {
+        guard !firstPrepareNoted else { return }
+        firstPrepareNoted = true
+        TrapTubeCrashTrail.record("tap prepare: entered (fmt: \(Int(format.mSampleRate)) Hz, \(format.mChannelsPerFrame) ch, flags \(format.mFormatFlags), \(format.mBitsPerChannel)-bit)")
+    }
+
+    func noteFirstProcessEntry(requestedFrames: Int32) {
+        guard firstProcessStage == 0 else { return }
+        firstProcessStage = 1
+        TrapTubeCrashTrail.record("tap process: entered (requested \(requestedFrames) frames)")
+    }
+
+    func noteFirstProcessSourceFetched(status: OSStatus, frames: Int32) {
+        guard firstProcessStage == 1 else { return }
+        firstProcessStage = 2
+        if status == noErr {
+            TrapTubeCrashTrail.record("tap process: source fetched (\(frames) frames)")
+        } else {
+            TrapTubeCrashTrail.record("tap process: source fetch FAILED (OSStatus \(status))")
+        }
+    }
+
+    func noteFirstProcessGuardExit() {
+        guard firstProcessStage == 2 else { return }
+        firstProcessStage = 9
+        TrapTubeCrashTrail.record("tap process: entry guard failed - passthrough (no DSP state or bad counts)")
+    }
+
+    func noteFirstProcessSettingsApplied() {
+        guard firstProcessStage == 2 else { return }
+        firstProcessStage = 3
+        TrapTubeCrashTrail.record("tap process: settings applied")
+    }
+
+    func noteFirstProcessDSPDone() {
+        guard firstProcessStage == 3 else { return }
+        firstProcessStage = 4
+        TrapTubeCrashTrail.record("tap process: DSP done")
+    }
+
+    func noteFirstProcessReturning() {
+        guard firstProcessStage >= 2, firstProcessStage < 9 else { return }
+        firstProcessStage = 9
+        TrapTubeCrashTrail.record("tap process: returning (first frames rendered)")
+    }''',
+        "round12 tap first-process breadcrumb state")
+
+s = rep(s, r'''private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.prepare(format.pointee)''',
+        r'''private let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, _, format in
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.noteFirstPrepareEntered(format.pointee)
+    state.prepare(format.pointee)''',
+        "round12 tap prepare entry breadcrumb")
+
+s = rep(s, r'''private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
+    guard MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut) == noErr else { return }
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.noteProcessIfFirst(frames: Int32(framesOut.pointee))
+    state.process(bufferList, frames: Int(framesOut.pointee))
+}''',
+        r'''private let tapProcess: MTAudioProcessingTapProcessCallback = { tap, frames, _, bufferList, framesOut, flagsOut in
+    let state = Unmanaged<TapState>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
+    state.noteFirstProcessEntry(requestedFrames: Int32(frames))
+    let fetchStatus = MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut)
+    state.noteFirstProcessSourceFetched(status: fetchStatus, frames: fetchStatus == noErr ? Int32(framesOut.pointee) : 0)
+    guard fetchStatus == noErr else { return }
+    state.noteProcessIfFirst(frames: Int32(framesOut.pointee))
+    state.process(bufferList, frames: Int(framesOut.pointee))
+}''',
+        "round12 tap process sub-step breadcrumbs")
+
+s = rep(s, r'''        guard let setup, let delays, let coefficients, let snapshot,
+              frames > 0, frames <= 1_048_576, channels > 0, channels <= 8 else { return }''',
+        r'''        guard let setup, let delays, let coefficients, let snapshot,
+              frames > 0, frames <= 1_048_576, channels > 0, channels <= 8 else { noteFirstProcessGuardExit(); return }''',
+        "round12 tap process guard-exit breadcrumb")
+
+s = rep(s, r'''        // Round 7: EQ disabled from the player sheet - leave the
+        // buffers exactly as the source delivered them.
+        if snapshot[18] < 0.5 { return }''',
+        r'''        noteFirstProcessSettingsApplied()
+        // Round 7: EQ disabled from the player sheet - leave the
+        // buffers exactly as the source delivered them.
+        if snapshot[18] < 0.5 { noteFirstProcessReturning(); return }''',
+        "round12 tap process settings breadcrumb")
+
+s = rep(s, r'''                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
+                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
+            }
+        }
+    }''',
+        r'''                vDSP_biquad(setup, delays + channel * delayLength, data, 1, data, 1, vDSP_Length(frames))
+                vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(frames))
+            }
+        }
+        noteFirstProcessDSPDone()
+        noteFirstProcessReturning()
+    }''',
+        "round12 tap process DSP-done breadcrumb")
+
+p.write_text(s)
+
+p = file("YouTubeView.swift")
+s = p.read_text()
+
+s = rep(s, r'''        TrapTubeCrashTrail.record("ghost prime begin (streamed, startAt \(Int(startAt))s)")''',
+        r'''        TrapTubeCrashTrail.record("ghost prime begin (streamed, startAt \(Int(startAt))s)")
+        TrapTubeCrashTrail.record("ghost prime source (host: \(source.url.host ?? "?"), ua: \(String(source.userAgent.prefix(28))))")''',
+        "round12 ghost prime source facts")
+
+s = rep(s, r'''        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let format = streamFormat,
+              let newReader = try? AVAssetReader(asset: asset) else { return false }
+        TrapTubeCrashTrail.record("ghost reader created")''',
+        r'''        // Round 12: this guard used to exit silently, and
+        // the device trail showed the streamed prime dying
+        // here with no reason recorded. Each element now
+        // names itself on the way out.
+        let tracks: [AVAssetTrack]
+        do {
+            tracks = try await asset.loadTracks(withMediaType: .audio)
+        } catch {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): track load threw (\(error.localizedDescription))")
+            return false
+        }
+        guard let track = tracks.first else {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): no audio track in source (host: \(source.url.host ?? "?"))")
+            return false
+        }
+        guard let format = streamFormat else {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): canonical stream format unavailable")
+            return false
+        }
+        let newReader: AVAssetReader
+        do {
+            newReader = try AVAssetReader(asset: asset)
+        } catch {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): reader init threw (\(error.localizedDescription))")
+            return false
+        }
+        TrapTubeCrashTrail.record("ghost reader created")''',
+        "round12 ghost prime exit reasons")
+
+s = rep(s, r'''        guard newReader.canAdd(output) else { return false }''',
+        r'''        guard newReader.canAdd(output) else {
+            TrapTubeCrashTrail.record("ghost prime exit (streamed): reader refused the track output")
+            return false
+        }''',
+        "round12 ghost prime canAdd exit reason")
+
+s = rep(s, r'''            audioOnly: audioOnly,
+            captions: captions)
+    }''',
+        r'''            audioOnly: audioOnly,
+            captions: captions)
+    }
+
+    /// Round 12: the ghost feeder's own mint. fetchInfo
+    /// aggregates every profile and dedupes formats by itag
+    /// with the FIRST profile (ANDROID) winning - and in the
+    /// current regime ANDROID's adaptive audio is SABR-only:
+    /// its entries carry no direct URL, so parseFormats drops
+    /// them and the aggregate's audioOnly is whatever the
+    /// later profiles happened to contribute, or nothing.
+    /// The ghost engine needs exactly one thing - an
+    /// audio-only format with a direct URL, minted by a
+    /// profile that serves direct URLs, fetched with THAT
+    /// profile's user agent - independent of which profile
+    /// supplied the video item. Profiles are asked in IOS,
+    /// WEB_EMBEDDED, ANDROID order; the first that yields an
+    /// AAC leg (or any audio leg) wins.
+    static func fetchGhostAudioSource(videoID: String) async -> (url: URL, userAgent: String, profile: String)? {
+        for profile in [profiles[1], profiles[2], profiles[0]] {
+            guard let json = try? await playerResponse(videoID: videoID, profile: profile),
+                  let streaming = json["streamingData"] as? [String: Any] else { continue }
+            let audio = parseFormats(streaming["adaptiveFormats"], userAgent: profile.userAgent)
+                .filter { !$0.hasVideo && $0.hasAudio }
+            let pick = audio.filter { $0.isAACAudio }.max(by: { $0.bitrate < $1.bitrate })
+                ?? audio.max(by: { $0.bitrate < $1.bitrate })
+            if let pick, let url = URL(string: pick.url) {
+                return (url, profile.userAgent, profile.name)
+            }
+        }
+        return nil
+    }''',
+        "round12 ghost audio source mint")
+
+s = rep(s, r'''            guard let source = Self.ghostSource(info: info) else {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            let ghostVideoID = info.videoID
+            self.ghost.sourceRefresher = {
+                guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: ghostVideoID) else { return nil }
+                return Self.ghostSource(info: fresh)
+            }''',
+        r'''            // Round 12: the ghost audio leg is minted on
+            // its own (fetchGhostAudioSource, IOS first) -
+            // NOT taken from the aggregate resolver's
+            // audioOnly, whose per-itag dedupe lets the first
+            // profile (ANDROID, whose adaptive audio is
+            // SABR-only and URL-less in the current regime)
+            // decide what the ghost engine is fed. The
+            // aggregate pick remains only as the last resort.
+            let source: TrapTubeGhostAudio.Source
+            if let minted = await TrapTubeInnerTube.fetchGhostAudioSource(videoID: info.videoID) {
+                TrapTubeCrashTrail.record("ghost source selected (profile: \(minted.profile), host: \(minted.url.host ?? "?"))")
+                source = TrapTubeGhostAudio.Source(url: minted.url, userAgent: minted.userAgent)
+            } else if let aggregate = Self.ghostSource(info: info) {
+                TrapTubeCrashTrail.record("ghost source selected (aggregate fallback, host: \(aggregate.url.host ?? "?"))")
+                source = aggregate
+            } else {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            let ghostVideoID = info.videoID
+            self.ghost.sourceRefresher = {
+                if let minted = await TrapTubeInnerTube.fetchGhostAudioSource(videoID: ghostVideoID) {
+                    return TrapTubeGhostAudio.Source(url: minted.url, userAgent: minted.userAgent)
+                }
+                guard let fresh = try? await TrapTubeInnerTube.fetchInfo(videoID: ghostVideoID) else { return nil }
+                return Self.ghostSource(info: fresh)
+            }''',
+        "round12 ghost source selection")
+
+s = rep(s, r'''    private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {
+        TrapTubeCrashTrail.record("ghost file prime begin (downloading)")
+        let refresher = sourceRefresher
+        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = refresher else { return nil }
+            guard let fresh = await refresh() else { return nil }
+            return (url: fresh.url, userAgent: fresh.userAgent)
+        }
+        let downloadedFile = try? await TrapTubeDirectDownloader.shared.downloadWithRemint(
+            from: source.url, userAgent: source.userAgent, remint: remint, onProgress: { _ in })
+        TrapTubeCrashTrail.record("ghost file download -> \(downloadedFile != nil ? "ok" : "FAILED")")
+        guard let downloaded = downloadedFile else { return false }''',
+        r'''    private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {
+        TrapTubeCrashTrail.record("ghost file prime begin (downloading)")
+        let refresher = sourceRefresher
+        // Round 12: the wiring facts, on the record - whether
+        // the session's re-mint closure is actually installed
+        // on this path, and which host gets downloaded.
+        TrapTubeCrashTrail.record("ghost file source (host: \(source.url.host ?? "?"), refresher: \(refresher != nil ? "set" : "MISSING"))")
+        let remint: TrapTubeStreamRefresher = {
+            guard let refresh = refresher else { return nil }
+            guard let fresh = await refresh() else { return nil }
+            return (url: fresh.url, userAgent: fresh.userAgent)
+        }
+        let downloadedFile: URL?
+        do {
+            downloadedFile = try await TrapTubeDirectDownloader.shared.downloadWithRemint(
+                from: source.url, userAgent: source.userAgent, remint: remint, onProgress: { _ in })
+        } catch {
+            // Round 12: name the failure instead of a bare
+            // FAILED - the downloader's error descriptions
+            // already carry the HTTP status and the host.
+            TrapTubeCrashTrail.record("ghost file download -> FAILED (\(error.localizedDescription))")
+            return false
+        }
+        TrapTubeCrashTrail.record("ghost file download -> ok")
+        guard let downloaded = downloadedFile else { return false }''',
+        "round12 ghost file download error surfacing")
+
+s = rep(s, r'''        guard let file = try? AVAudioFile(forReading: localURL) else { return false }''',
+        r'''        let file: AVAudioFile
+        do {
+            file = try AVAudioFile(forReading: localURL)
+        } catch {
+            TrapTubeCrashTrail.record("ghost prime exit (file): AVAudioFile threw (\(error.localizedDescription))")
+            return false
+        }''',
+        "round12 ghost file open exit reason")
+
+s = rep(s, r'''        guard connectGraph(format: format) else { return false }''',
+        r'''        guard connectGraph(format: format) else {
+            TrapTubeCrashTrail.record("ghost prime exit (file): graph connect failed")
+            return false
+        }''',
+        "round12 ghost file graph exit reason")
+
+s = rep(s, r'''        guard frames > 0 else { return false }''',
+        r'''        guard frames > 0 else {
+            TrapTubeCrashTrail.record("ghost prime exit (file): no frames after the start offset")
+            return false
+        }''',
+        "round12 ghost file frames exit reason")
+
+p.write_text(s)
+
 print("Build II hybrid navigation applied.")
