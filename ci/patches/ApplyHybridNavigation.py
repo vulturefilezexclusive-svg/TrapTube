@@ -9202,7 +9202,7 @@ s = rep(s, r'''    private let lock: UnsafeMutablePointer<os_unfair_lock>
     /// Round 9: the most recent tap's state, retained so the
     /// crash trail's flusher can drain its render-thread
     /// breadcrumb slots even after the tap is finalized.
-    private(set) var lastTapState: TapState?
+    fileprivate private(set) var lastTapState: TapState?
     private var trailDrainedFor: ObjectIdentifier?
     private var trailDrainedCount = 0
 
