@@ -6422,6 +6422,29 @@ final class TrapTubeGhostAudio {
     private var stallReported = false
     var onStreamStalled: (() -> Void)?
 
+    /// The ONE format the streamed feed connects the graph with
+    /// and schedules in: the standard format (48 kHz float32
+    /// interleaved stereo), the most universally accepted format
+    /// for every unit in the chain. Reader buffers are never
+    /// trusted to already be in it — AVAssetReaderTrackOutput
+    /// delivers its own layout (the non-interleaved request in
+    /// the output settings is not reliably honored, and the
+    /// emitted format description can carry a channel layout
+    /// that makes an otherwise-identical AVAudioFormat unequal),
+    /// while AVAudioPlayerNode.scheduleBuffer raises an
+    /// uncatchable NSException when a buffer's format differs
+    /// from the connection format in ANY detail. So every reader
+    /// buffer is converted into exactly this format (see
+    /// schedulableBuffer) and re-checked against the graph
+    /// format immediately before the schedule call.
+    private let streamFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)
+    private var streamConverter: AVAudioConverter?
+    private var streamConverterFormat: AVAudioFormat?
+    /// Bumped by teardownFeed on every feed replacement; a pump
+    /// whose captured generation no longer matches exits before
+    /// it can touch the new feed's reader or the node.
+    private var feedGeneration = 0
+
     private var loadedFile: AVAudioFile?
     private var tempFileURL: URL?
 
@@ -6487,8 +6510,17 @@ final class TrapTubeGhostAudio {
 
     // MARK: Graph
 
-    private func connectGraph(format: AVAudioFormat) {
-        if connected, graphFormat == format { return }
+    /// Connects node -> varispeed -> EQ -> mixer in `format`.
+    /// engine.connect raises an uncatchable exception on a
+    /// format it cannot route, and scheduling into a node whose
+    /// connections were never made raises too — so a degenerate
+    /// format is refused here and the caller aborts the prime
+    /// (degrading to the next feed) instead of proceeding with a
+    /// half-built graph.
+    @discardableResult
+    private func connectGraph(format: AVAudioFormat) -> Bool {
+        if connected, graphFormat == format { return true }
+        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
         // A format change needs fresh connections; reset() drops
         // them (and node parameters), so re-apply ours after.
         engine.reset()
@@ -6498,6 +6530,7 @@ final class TrapTubeGhostAudio {
         graphFormat = format
         connected = true
         applyParameters()
+        return true
     }
 
     // MARK: Starting feeds
@@ -6529,8 +6562,12 @@ final class TrapTubeGhostAudio {
         let asset = AVURLAsset(url: source.url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": source.userAgent, "Referer": "https://www.youtube.com/"]
         ])
+        // The graph format is the canonical stream format, NOT
+        // a locally rebuilt twin of what we hope the reader
+        // emits: the pump converts every emitted buffer into
+        // exactly this format before scheduling.
         guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
-              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false),
+              let format = streamFormat,
               let newReader = try? AVAssetReader(asset: asset) else { return false }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -6538,7 +6575,7 @@ final class TrapTubeGhostAudio {
             AVNumberOfChannelsKey: 2,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true
+            AVLinearPCMIsNonInterleaved: false
         ])
         output.alwaysCopiesSampleData = false
         guard newReader.canAdd(output) else { return false }
@@ -6547,7 +6584,12 @@ final class TrapTubeGhostAudio {
             newReader.timeRange = CMTimeRange(start: CMTime(seconds: startAt, preferredTimescale: 600),
                                               duration: .positiveInfinity)
         }
-        connectGraph(format: format)
+        // Retire any previous feed first (its pump is cancelled
+        // and generation-invalidated) so two pumps can never read
+        // one output or schedule into one node concurrently;
+        // resync reaches this prime without an outer teardown.
+        teardownFeed(deleteTemp: false)
+        guard connectGraph(format: format) else { return false }
         node.stop()
         reader = newReader
         readerOutput = output
@@ -6586,7 +6628,16 @@ final class TrapTubeGhostAudio {
     private func primeFile(localURL: URL, startAt: TimeInterval) -> Bool {
         guard let file = try? AVAudioFile(forReading: localURL) else { return false }
         let format = file.processingFormat
-        connectGraph(format: format)
+        // A degenerate processing format would poison the
+        // frame math below and the graph connection alike.
+        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
+        // Same retirement as the streamed prime: scheduleSegment
+        // must be the only producer on this node.
+        teardownFeed(deleteTemp: false)
+        // The file's own processing format is the one format
+        // scheduleSegment accepts for it — self-consistent by
+        // construction.
+        guard connectGraph(format: format) else { return false }
         node.stop()
         loadedFile = file
         primeOffset = min(max(startAt, 0), Double(file.length) / format.sampleRate)
@@ -6608,14 +6659,22 @@ final class TrapTubeGhostAudio {
 
     private func startPump() {
         pumpTask?.cancel()
+        // The pump works on CAPTURED reader/output values and
+        // the feed generation at prime time — never on the live
+        // properties, which a resync may swap mid-loop. The
+        // identity + generation checks make a superseded pump
+        // exit before its next read or schedule.
+        guard let pumpReader = reader, let pumpOutput = readerOutput else { return }
+        let generation = feedGeneration
         pumpTask = Task { [weak self] in
             guard let self else { return }
-            while !Task.isCancelled, self.feed == .streamed, let reader = self.reader {
-                if reader.status == .failed {
+            while !Task.isCancelled, self.feedGeneration == generation,
+                  self.feed == .streamed, self.reader === pumpReader {
+                if pumpReader.status == .failed {
                     self.reportStall()
                     return
                 }
-                if reader.status == .completed {
+                if pumpReader.status == .completed {
                     self.streamEnded = true
                     return
                 }
@@ -6623,9 +6682,18 @@ final class TrapTubeGhostAudio {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     continue
                 }
-                guard let output = self.readerOutput else { return }
-                if let sampleBuffer = output.copyNextSampleBuffer() {
-                    if let pcm = Self.pcmBuffer(from: sampleBuffer) {
+                if let sampleBuffer = pumpOutput.copyNextSampleBuffer() {
+                    // Convert into the graph's one format and
+                    // re-verify equality immediately before the
+                    // schedule call: scheduleBuffer raises an
+                    // uncatchable exception on ANY format
+                    // mismatch, so a buffer that is not provably
+                    // in the connection format is dropped, never
+                    // scheduled. Persistent conversion failure
+                    // starves the pump, which the branch below
+                    // escalates to the file feed.
+                    if let pcm = self.schedulableBuffer(from: sampleBuffer),
+                       pcm.format == self.graphFormat {
                         self.node.scheduleBuffer(pcm, completionHandler: nil)
                         self.scheduledFrames += AVAudioFramePosition(pcm.frameLength)
                         self.lastBufferAt = Date()
@@ -6658,16 +6726,57 @@ final class TrapTubeGhostAudio {
         return scheduledEnd - (position() ?? primeOffset)
     }
 
-    private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+    /// The reader's samples in the reader's OWN format,
+    /// whatever layout the emitted format description actually
+    /// carries. Never scheduled directly — this is only the
+    /// input to the canonical conversion below.
+    private static func rawPCMBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
         let format = AVAudioFormat(cmAudioFormatDescription: formatDescription)
         let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0,
+        guard frameCount > 0, format.sampleRate > 0, format.channelCount > 0,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return nil }
         buffer.frameLength = frameCount
         let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
             sampleBuffer, at: 0, frameCount: Int32(frameCount), into: buffer.mutableAudioBufferList)
         return status == noErr ? buffer : nil
+    }
+
+    /// The only buffer the pump may schedule: the raw samples
+    /// converted into the graph's canonical stream format.
+    /// AVAudioConverter reports failure as a status (it never
+    /// raises), so any stream whose layout cannot be converted
+    /// yields nil — the chunk is dropped, and if that keeps
+    /// happening the pump's starve detection escalates the feed
+    /// to FILE, then the session to TAP. Degradation instead of
+    /// the format-mismatch exception this replaces.
+    private func schedulableBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let target = streamFormat,
+              let raw = Self.rawPCMBuffer(from: sampleBuffer) else { return nil }
+        if raw.format == target { return raw }
+        if streamConverterFormat != raw.format {
+            streamConverter = AVAudioConverter(from: raw.format, to: target)
+            streamConverterFormat = raw.format
+        }
+        guard let converter = streamConverter, raw.frameLength > 0 else { return nil }
+        let ratio = target.sampleRate / raw.format.sampleRate
+        guard ratio.isFinite, ratio > 0 else { return nil }
+        let capacity = AVAudioFrameCount((Double(raw.frameLength) * ratio).rounded(.up)) + 32
+        guard capacity > 32,
+              let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        var supplied = false
+        var conversionError: NSError?
+        let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
+            if supplied {
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            supplied = true
+            inputStatus.pointee = .haveData
+            return raw
+        }
+        guard status != .error, converted.frameLength > 0 else { return nil }
+        return converted
     }
 
     // MARK: Position + transport
@@ -6720,6 +6829,11 @@ final class TrapTubeGhostAudio {
     }
 
     func teardownFeed(deleteTemp: Bool) {
+        // Invalidate any live pump BEFORE cancelling it: Task
+        // cancellation is cooperative, so the generation check
+        // is what actually stops a mid-loop pump from touching
+        // the next feed's reader or node.
+        feedGeneration += 1
         pumpTask?.cancel()
         pumpTask = nil
         reader?.cancelReading()
@@ -6906,7 +7020,9 @@ final class TrapTubeNativeSession: ObservableObject {
     }
 
     var remainingLabel: String {
-        guard duration > 0 else { return "-0:00" }
+        // Until the item's duration is known there is no
+        // remaining time to show — a placeholder, not "-0:00".
+        guard duration > 0, duration.isFinite else { return "--:--" }
         return "-" + Self.timeLabel(max(0, duration - currentTime))
     }
 
