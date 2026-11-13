@@ -5863,4 +5863,2598 @@ s = rep(s, r'''                guard http.statusCode == 206 else {
         "round6 chunk 416 completion")
 p.write_text(s)
 
+
+# ------------------------------------------------------------------
+# Round 7: Musi-style native stream player.
+#
+# The native stream player becomes the primary way to watch, modeled
+# on the user's Musi screen recording (see musi-player-reference.md):
+# a persistent session owns the AVPlayer + queue (watch-next "Mix"),
+# collapse leaves a mini bar in RootView, and the player's EQ sheet
+# is the Musi "Settings" sheet - enable/bypass toggle, 10 vertical
+# band sliders mapped onto the real 16-band model, named presets
+# that jump the sliders, reset, save-your-own.
+#
+# Invariants kept: Round 6's crash-proofed composition + lifecycle
+# (generation tokens, clamped ranges, PLAYBACK FAILED surfacing),
+# the EQ button -> native player routing, downloads behavior.
+# Base fix carried here (Round 6 CI #399): the startAt seek used the
+# async seek variant without await; every seek in this round uses
+# the completionHandler variant.
+
+# (a) TrapTubeTapEQ: a real enable/bypass flag for the render path.
+# A 19th shared value slot carries "enabled"; when 0 the tap leaves
+# the buffers untouched (true passthrough) while gains stay stored.
+p = file("AudioEngineManager.swift")
+s = p.read_text()
+s = rep(s, r'''        values = .allocate(capacity: 18); values.initialize(repeating: 0, count: 18)
+        values[17] = 1''', r'''        values = .allocate(capacity: 19); values.initialize(repeating: 0, count: 19)
+        values[17] = 1
+        values[18] = UserDefaults.standard.object(forKey: "TrapTube.EQ.Enabled") as? Bool ?? true ? 1 : 0''',
+        "round7 tap values capacity")
+s = rep(s, r'''        destination.update(from: values, count: 18)''',
+        r'''        destination.update(from: values, count: 19)''',
+        "round7 tap copy count")
+s = rep(s, r'''    /// Render-thread read. Returns false (keep the previous settings) if the lock is busy.
+    fileprivate func copyValues(into destination: UnsafeMutablePointer<Float>) -> UInt64? {''',
+        r'''    /// Round 7: the player's EQ sheet enable toggle. Persisted;
+    /// the render callback reads slot 18 and passes audio through
+    /// untouched while it is 0 (true bypass - gains stay stored and
+    /// return when re-enabled).
+    var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: "TrapTube.EQ.Enabled") as? Bool ?? true
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "TrapTube.EQ.Enabled")
+        os_unfair_lock_lock(lock)
+        values[18] = enabled ? 1 : 0
+        version &+= 1
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Render-thread read. Returns false (keep the previous settings) if the lock is busy.
+    fileprivate func copyValues(into destination: UnsafeMutablePointer<Float>) -> UInt64? {''',
+        "round7 tap enable api")
+s = rep(s, r'''        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 18)
+        newSnapshot.initialize(repeating: 0, count: 18)
+        newSnapshot[17] = 1''', r'''        let newSnapshot = UnsafeMutablePointer<Float>.allocate(capacity: 19)
+        newSnapshot.initialize(repeating: 0, count: 19)
+        newSnapshot[17] = 1
+        newSnapshot[18] = 1''',
+        "round7 tap snapshot capacity")
+s = rep(s, r'''            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        var gain = preamp''', r'''            preamp = snapshot[17]
+            appliedVersion = version
+        }
+        // Round 7: EQ disabled from the player sheet - leave the
+        // buffers exactly as the source delivered them.
+        if snapshot[18] < 0.5 { return }
+        var gain = preamp''',
+        "round7 tap bypass")
+p.write_text(s)
+
+# (b) YouTubeView.swift: watch-next for the queue, favorites in the
+# downloads view, host-level covers moved to RootView (done in (c)).
+p = file("YouTubeView.swift")
+s = p.read_text()
+s = rep(s, r'''    private static func playerResponse(videoID: String, profile: ClientProfile) async throws -> [String: Any] {''',
+        r'''    /// Round 7: watch-next recommendations - the native player's
+    /// queue (the "YouTube Mix" in the reference recording). Uses
+    /// the ANDROID profile against the /next endpoint and walks the
+    /// response for compactVideoRenderer entries. Best-effort by
+    /// design: any failure returns an empty list and the player's
+    /// queue stays a single video.
+    static func fetchRelated(videoID: String) async -> [TrapTubeQueueItem] {
+        let profile = profiles[0]
+        var client = profile.client
+        if let visitor = await fetchVisitorData() { client["visitorData"] = visitor }
+        let body: [String: Any] = ["context": ["client": client], "videoId": videoID,
+                                   "racyCheckOk": true, "contentCheckOk": true]
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/next?key=\(profile.apiKey)&prettyPrint=false"),
+              let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return [] }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = bodyData
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        var results: [TrapTubeQueueItem] = []
+        var seen: Set<String> = [videoID]
+        collectRelated(json, into: &results, seen: &seen)
+        return Array(results.prefix(25))
+    }
+
+    private static func collectRelated(_ node: Any, into results: inout [TrapTubeQueueItem], seen: inout Set<String>) {
+        if results.count >= 25 { return }
+        if let dict = node as? [String: Any] {
+            if let renderer = dict["compactVideoRenderer"] as? [String: Any],
+               let id = renderer["videoId"] as? String, !id.isEmpty, !seen.contains(id) {
+                let title = rendererText(renderer["title"])
+                let author = rendererText(renderer["shortBylineText"] ?? renderer["longBylineText"])
+                if !title.isEmpty {
+                    seen.insert(id)
+                    results.append(TrapTubeQueueItem(videoID: id, title: title, channel: author))
+                }
+            }
+            for value in dict.values { collectRelated(value, into: &results, seen: &seen) }
+        } else if let list = node as? [Any] {
+            for value in list { collectRelated(value, into: &results, seen: &seen) }
+        }
+    }
+
+    private static func rendererText(_ node: Any?) -> String {
+        guard let dict = node as? [String: Any] else { return "" }
+        if let simple = dict["simpleText"] as? String { return simple }
+        if let runs = dict["runs"] as? [[String: Any]] {
+            return runs.compactMap { $0["text"] as? String }.joined()
+        }
+        return ""
+    }
+
+    private static func playerResponse(videoID: String, profile: ClientProfile) async throws -> [String: Any] {''',
+        "round7 watch-next fetch")
+s = rep(s, r'''    @State private var laterItems: [TrapTubeDownloadLaterItem] = TrapTubeDownloadLaterStore.items''',
+        r'''    @State private var laterItems: [TrapTubeDownloadLaterItem] = TrapTubeDownloadLaterStore.items
+    @ObservedObject private var favoritesStore = TrapTubeFavoritesStore.shared''',
+        "round7 downloads favorites store")
+s = rep(s, r'''                                .accessibilityLabel("Remove from Download later")
+                            }
+                            .padding(12)
+                            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                        }
+                    }
+                }
+
+                if !manager.jobs.isEmpty {''',
+        r'''                                .accessibilityLabel("Remove from Download later")
+                            }
+                            .padding(12)
+                            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                        }
+                    }
+                }
+
+                if !favoritesStore.items.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Favorites").font(.headline.bold()).foregroundStyle(.white)
+                        ForEach(favoritesStore.items) { entry in
+                            HStack(spacing: 11) {
+                                AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(entry.videoID)/hqdefault.jpg")) { image in
+                                    image.resizable().scaledToFill()
+                                } placeholder: {
+                                    Color.white.opacity(0.07)
+                                }
+                                .frame(width: 96, height: 60)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(entry.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2)
+                                    Text(entry.channel.isEmpty ? "Saved from the player" : entry.channel)
+                                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6")).lineLimit(1)
+                                }
+                                Spacer(minLength: 4)
+                                Button("Play") {
+                                    TrapTubeNativePlayCenter.shared.present(videoID: entry.videoID, title: entry.title, contextName: "Favorites")
+                                }
+                                .font(.caption.bold()).foregroundStyle(Color(hex: "FF7A84"))
+                                Button { favoritesStore.remove(videoID: entry.videoID) } label: {
+                                    Image(systemName: "trash").foregroundStyle(Color(hex: "A6A4A6"))
+                                }
+                                .accessibilityLabel("Remove from Favorites")
+                            }
+                            .padding(12)
+                            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                        }
+                    }
+                }
+
+                if !manager.jobs.isEmpty {''',
+        "round7 downloads favorites section")
+s = rep(s, r'''                if manager.completed.isEmpty && manager.jobs.isEmpty && laterItems.isEmpty {''',
+        r'''                if manager.completed.isEmpty && manager.jobs.isEmpty && laterItems.isEmpty && favoritesStore.items.isEmpty {''',
+        "round7 downloads empty state")
+s = rep(s, """    @ObservedObject private var homeNativePlayCenter = TrapTubeNativePlayCenter.shared
+""", "", "round7 home center property")
+s = rep(s, """        .fullScreenCover(item: $homeNativePlayCenter.activeRequest) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }
+""", "", "round7 home native cover")
+s = rep(s, """    @ObservedObject private var nativePlayCenter = TrapTubeNativePlayCenter.shared
+""", "", "round7 account center property")
+s = rep(s, """        .fullScreenCover(item: $nativePlayCenter.activeRequest) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .preferredColorScheme(.dark)
+        }
+""", "", "round7 account native cover")
+p.write_text(s)
+
+# (c) RootView.swift: the native player's cover lives here now (one
+# presentation host, reachable from every tab), and collapsing the
+# player leaves the native mini bar in the bottom inset.
+p = file("RootView.swift")
+s = p.read_text()
+s = rep(s, r'''    @ObservedObject private var webSession = TrapTubePlayerSession.shared''',
+        r'''    @ObservedObject private var webSession = TrapTubePlayerSession.shared
+    @ObservedObject private var nativePlayCenter = TrapTubeNativePlayCenter.shared
+    @ObservedObject private var nativeSession = TrapTubeNativeSession.shared''',
+        "round7 root native observers")
+s = rep(s, r'''                MiniPlayer { showPlayer = true }
+                    .environmentObject(player).environmentObject(theme)''',
+        r'''                if nativeSession.hasActiveContent, nativePlayCenter.activeRequest == nil {
+                    TrapTubeNativeMiniBar()
+                        .environmentObject(theme)
+                }
+                MiniPlayer { showPlayer = true }
+                    .environmentObject(player).environmentObject(theme)''',
+        "round7 root native mini bar")
+s = rep(s, r'''        .fullScreenCover(isPresented: $showPlayer) {''',
+        r'''        .fullScreenCover(item: $nativePlayCenter.activeRequest) { playRequest in
+            TrapTubeNativeStreamPlayer(request: playRequest)
+                .environmentObject(player).environmentObject(theme)
+                .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(isPresented: $showPlayer) {''',
+        "round7 root native cover")
+p.write_text(s)
+
+# (d) Replace the Round 6 native player block with the Round 7
+# Musi-style player: persistent session + queue, mini bar, EQ sheet.
+p = file("YouTubeView.swift")
+s = p.read_text()
+ROUND7_NATIVE_PLAYER_SWIFT = r'''
+
+// MARK: - Round 7 native stream player (Musi-style) + session
+//
+// Modeled on the user's Musi screen recording: the native player
+// is the primary way to watch. A persistent session owns the
+// AVPlayer and the queue, so collapsing the player (chevron) keeps
+// playback alive behind the mini bar in RootView. The queue starts
+// as the launched video and fills with watch-next recommendations
+// (the "YouTube Mix"); playback auto-advances through it. The EQ
+// sheet is Musi's "Settings" sheet: enable/bypass toggle, ten
+// vertical band sliders mapped exactly onto the 16-band model,
+// named presets, reset, save-your-own.
+//
+// Round 6 invariants kept: composition ranges come from each
+// track's OWN loaded timeRange (clamped, guarded, do/catch), the
+// generation-token lifecycle, attach-in-own-task, and every failure
+// lands in the PLAYBACK FAILED state. All seeks use the
+// completionHandler variant (the async variant without await was
+// the Round 6 CI #399 build error).
+
+struct TrapTubeQueueItem: Codable, Identifiable, Equatable {
+    let videoID: String
+    var title: String
+    var channel: String
+    var id: String { videoID }
+}
+
+struct TrapTubeNativePlayRequest: Identifiable {
+    let videoID: String
+    let title: String
+    var startAt: TimeInterval = 0
+    var contextName: String = "YouTube"
+    var id: String { videoID }
+}
+
+/// The single presentation path for the native player. RootView
+/// observes this center and presents the player as a full-screen
+/// cover; the mod sheet, the stream EQ sheet, the in-player EQ
+/// button and the Favorites section all land here.
+final class TrapTubeNativePlayCenter: ObservableObject {
+    static let shared = TrapTubeNativePlayCenter()
+    @Published var activeRequest: TrapTubeNativePlayRequest?
+    private var pendingPresent: DispatchWorkItem?
+    private init() {}
+
+    /// When the caller is a sheet it dismisses itself first and the
+    /// presentation is deferred briefly so the dismissal completes -
+    /// a cover presented over a still-dismissing sheet can be
+    /// dropped by SwiftUI's presentation machinery.
+    func present(videoID: String, title: String, startAt: TimeInterval = 0, contextName: String = "YouTube", afterSheetDismissal: Bool = false) {
+        let request = TrapTubeNativePlayRequest(videoID: videoID, title: title, startAt: startAt, contextName: contextName)
+        DispatchQueue.main.async {
+            self.pendingPresent?.cancel()
+            if afterSheetDismissal {
+                let work = DispatchWorkItem { [weak self] in self?.activeRequest = request }
+                self.pendingPresent = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+            } else {
+                self.activeRequest = request
+            }
+        }
+    }
+
+    /// Mini bar / PiP restore: re-present whatever the persistent
+    /// session is playing. begin() no-ops for the already-loaded
+    /// video, so playback continues untouched.
+    func reopenSession() {
+        let session = TrapTubeNativeSession.shared
+        guard let entry = session.currentEntry else { return }
+        let request = TrapTubeNativePlayRequest(videoID: entry.videoID, title: entry.title, contextName: session.contextName)
+        DispatchQueue.main.async {
+            self.pendingPresent?.cancel()
+            self.activeRequest = request
+        }
+    }
+}
+
+enum TrapTubeNativePlayRouter {
+    /// The in-player EQ button's intent: open the page's current
+    /// video in the native TrapTube player with the EQ attached.
+    /// Falls back to the stream EQ sheet only when no video id is
+    /// known for the tapped surface.
+    static func openEQ(host: TrapTubeHostTab?, videoID: String?, startAt: TimeInterval) {
+        let session = TrapTubePlayerSession.shared
+        var resolvedID = (videoID?.isEmpty == false) ? videoID : nil
+        if resolvedID == nil, let host, session.watchHost == host {
+            resolvedID = session.watchVideoID
+        }
+        if let host, let resolvedID {
+            // The native player takes over the audio; pause the page
+            // video so the two never play over each other.
+            session.pauseWatchVideo(for: host)
+            TrapTubeNativePlayCenter.shared.present(videoID: resolvedID, title: session.watchTitle, startAt: startAt)
+        } else {
+            TrapTubeWebEQCenter.shared.present(host: host)
+        }
+    }
+}
+
+/// The heart button's store: favorites persist in UserDefaults and
+/// surface as a Favorites section in the TrapTube tab, playable in
+/// the native player.
+final class TrapTubeFavoritesStore: ObservableObject {
+    static let shared = TrapTubeFavoritesStore()
+    @Published private(set) var items: [TrapTubeQueueItem] = []
+    private let defaultsKey = "TrapTube.Favorites"
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let decoded = try? JSONDecoder().decode([TrapTubeQueueItem].self, from: data) {
+            items = decoded
+        }
+    }
+
+    func contains(videoID: String) -> Bool { items.contains { $0.videoID == videoID } }
+
+    func toggle(_ item: TrapTubeQueueItem) {
+        if contains(videoID: item.videoID) {
+            remove(videoID: item.videoID)
+        } else {
+            items.insert(item, at: 0)
+            save()
+        }
+    }
+
+    func remove(videoID: String) {
+        items.removeAll { $0.videoID == videoID }
+        save()
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(items) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        }
+    }
+}
+
+struct TrapTubeEQPreset: Identifiable, Codable, Equatable {
+    let name: String
+    /// Gains (dB) at the ten anchor frequencies below.
+    let anchors: [Float]
+    let bass: Float
+    var id: String { name }
+}
+
+enum TrapTubeEQPresetLib {
+    static let anchorFrequencies: [Double] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+    /// The ten reference bands are exact members of the model's 16
+    /// bands, at these indices - the sheet's sliders drive real DSP.
+    static let displayIndices = [0, 1, 2, 3, 4, 5, 6, 8, 12, 15]
+    static let displayLabels = ["32", "64", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"]
+
+    static let builtins: [TrapTubeEQPreset] = [
+        TrapTubeEQPreset(name: "Bando", anchors: [9, 8, 6, 3, 0, -1, 0, 2, 3, 2], bass: 10),
+        TrapTubeEQPreset(name: "Default", anchors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], bass: 0),
+        TrapTubeEQPreset(name: "Bass", anchors: [6, 5, 4, 2, 1, 0, 0, 0, 0, 0], bass: 6),
+        TrapTubeEQPreset(name: "Bass++", anchors: [10, 9, 7, 5, 2, 0, 0, 0, 0, 0], bass: 12),
+        TrapTubeEQPreset(name: "Acoustic", anchors: [5, 4, 3, 2, 3, 3, 4, 4, 3, 2], bass: 2),
+        TrapTubeEQPreset(name: "Classical", anchors: [4, 3, 2, 1, 0, 0, -1, -2, -3, -4], bass: 0),
+        TrapTubeEQPreset(name: "Dance", anchors: [6, 5, 3, 1, 0, 0, 2, 3, 4, 3], bass: 6),
+        TrapTubeEQPreset(name: "Deep", anchors: [7, 6, 5, 4, 3, 2, 1, 0, -1, -2], bass: 6),
+        TrapTubeEQPreset(name: "Electronic", anchors: [5, 4, 3, 1, 0, 1, 2, 3, 4, 3], bass: 4),
+        TrapTubeEQPreset(name: "Flat", anchors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], bass: 0),
+        TrapTubeEQPreset(name: "Hip Hop", anchors: [6, 5, 4, 2, 0, -1, 0, 2, 3, 3], bass: 8),
+        TrapTubeEQPreset(name: "Jazz", anchors: [3, 3, 2, 2, 2, 3, 2, 3, 3, 2], bass: 2),
+        TrapTubeEQPreset(name: "Loudness", anchors: [5, 4, 3, 1, 0, 0, 2, 4, 5, 5], bass: 4),
+        TrapTubeEQPreset(name: "Lounge", anchors: [3, 2, 2, 1, 2, 2, 2, 1, 1, 0], bass: 2),
+        TrapTubeEQPreset(name: "Pop", anchors: [1, 1, 2, 3, 3, 2, 1, 0, -1, -1], bass: 0),
+        TrapTubeEQPreset(name: "Rock", anchors: [5, 4, 2, 1, 0, -1, 1, 2, 3, 3], bass: 2),
+        TrapTubeEQPreset(name: "Spoken Word", anchors: [-2, -1, 0, 2, 4, 5, 5, 4, 2, 0], bass: 0),
+        TrapTubeEQPreset(name: "Trap", anchors: [9, 8, 6, 3, 0, -1, 0, 1, 3, 4], bass: 10),
+        TrapTubeEQPreset(name: "Drill", anchors: [8, 7, 5, 2, 0, 0, 1, 2, 4, 5], bass: 8),
+        TrapTubeEQPreset(name: "Clarity", anchors: [-2, -1, 0, 1, 2, 3, 4, 5, 5, 4], bass: 0)
+    ]
+
+    static let flat = TrapTubeEQPreset(name: "Flat", anchors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], bass: 0)
+
+    /// Expands a 10-anchor curve onto the model's 16 bands by
+    /// log-frequency interpolation. The ten anchors land exactly;
+    /// the in-between bands (3k/5k/6k/7k/10k/12k) follow the curve.
+    static func expand(_ anchors: [Float]) -> [Float] {
+        guard anchors.count == anchorFrequencies.count else { return Array(repeating: 0, count: 16) }
+        return AudioEngineManager.frequencies.map { frequency in
+            let f = Double(frequency)
+            if let exact = anchorFrequencies.firstIndex(of: f) { return anchors[exact] }
+            let lower = anchorFrequencies.lastIndex { $0 < f } ?? 0
+            let upper = anchorFrequencies.firstIndex { $0 > f } ?? (anchorFrequencies.count - 1)
+            if lower == upper { return anchors[lower] }
+            let t = (log(f) - log(anchorFrequencies[lower])) / (log(anchorFrequencies[upper]) - log(anchorFrequencies[lower]))
+            return Float(Double(anchors[lower]) + (Double(anchors[upper]) - Double(anchors[lower])) * t)
+        }
+    }
+
+    private static let customsKey = "TrapTube.PlayerEQ.CustomPresets"
+
+    static func customPresets() -> [TrapTubeEQPreset] {
+        guard let data = UserDefaults.standard.data(forKey: customsKey),
+              let decoded = try? JSONDecoder().decode([TrapTubeEQPreset].self, from: data) else { return [] }
+        return decoded
+    }
+
+    static func saveCustom(_ preset: TrapTubeEQPreset) {
+        var list = customPresets()
+        list.removeAll { $0.name == preset.name }
+        list.append(preset)
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: customsKey)
+        }
+    }
+
+    static func deleteCustoms(at offsets: IndexSet) {
+        var list = customPresets()
+        for index in offsets.sorted(by: >) { list.remove(at: index) }
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: customsKey)
+        }
+    }
+}
+
+/// Owns the AVPictureInPictureController for the player's layer.
+final class TrapTubePiPHolder: NSObject, AVPictureInPictureControllerDelegate {
+    private var controller: AVPictureInPictureController?
+    private weak var attachedLayer: AVPlayerLayer?
+    weak var session: TrapTubeNativeSession?
+
+    var isSupported: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
+
+    func attach(layer: AVPlayerLayer) {
+        guard isSupported else { return }
+        if attachedLayer == layer, controller != nil { return }
+        attachedLayer = layer
+        let created = AVPictureInPictureController(playerLayer: layer)
+        created.delegate = self
+        controller = created
+    }
+
+    func toggle() {
+        guard let controller else { return }
+        if controller.isPictureInPictureActive {
+            controller.stopPictureInPicture()
+        } else {
+            controller.startPictureInPicture()
+        }
+    }
+
+    func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        let activeSession = session
+        Task { @MainActor in activeSession?.pipStateChanged(active: true) }
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        let activeSession = session
+        Task { @MainActor in activeSession?.pipStateChanged(active: false) }
+    }
+
+    func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        TrapTubeNativePlayCenter.shared.reopenSession()
+        completionHandler(true)
+    }
+}
+
+// MARK: - Ghost audio path (Round 7)
+
+/// Ghost path: the AVPlayer plays the video muted while this
+/// engine renders the audio-only stream through TrapTube's own
+/// graph - player node -> varispeed -> 10-band EQ -> main mixer -
+/// so the player's EQ is a real AVAudioUnitEQ that the Musi-style
+/// sheet drives directly, with no tap in the chain. Two feeds:
+/// STREAMED (an AVAssetReader pump schedules decoded PCM into the
+/// node a few seconds ahead) and FILE (the whole audio file,
+/// fetched with the Round 6 downloader, scheduled on the same
+/// node) for streams the reader cannot run.
+@MainActor
+final class TrapTubeGhostAudio {
+    enum Feed {
+        case none, streamed, file
+    }
+
+    struct Source {
+        let url: URL
+        let userAgent: String
+    }
+
+    static let bandFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+
+    private(set) var feed: Feed = .none
+    var isLive: Bool { feed != .none }
+    private(set) var streamEnded = false
+    private(set) var audioDuration: TimeInterval = 0
+
+    private let engine = AVAudioEngine()
+    private let node = AVAudioPlayerNode()
+    private let varispeed = AVAudioUnitVarispeed()
+    private let eqUnit = AVAudioUnitEQ(numberOfBands: 10)
+
+    private var connected = false
+    private var graphFormat: AVAudioFormat?
+    private var bandGains: [Float] = Array(repeating: 0, count: 10)
+    private var bypassed: Bool
+    private var baselineRate: Float = 1
+    private var correction: Float = 1
+    private var outputLevelValue: Float = 1
+
+    private var source: Source?
+    private var desiredPlaying = false
+
+    private var reader: AVAssetReader?
+    private var readerOutput: AVAssetReaderTrackOutput?
+    private var pumpTask: Task<Void, Never>?
+    private var scheduledFrames: AVAudioFramePosition = 0
+    private var primeOffset: TimeInterval = 0
+    private var lastBufferAt = Date.distantPast
+    private var stallReported = false
+    var onStreamStalled: (() -> Void)?
+
+    private var loadedFile: AVAudioFile?
+    private var tempFileURL: URL?
+
+    init() {
+        bypassed = !TrapTubeTapEQ.shared.isEnabled
+        engine.attach(node)
+        engine.attach(varispeed)
+        engine.attach(eqUnit)
+        applyParameters()
+    }
+
+    // MARK: Parameters (cached: an engine reset must not lose them)
+
+    private func applyParameters() {
+        for (index, frequency) in Self.bandFrequencies.enumerated() {
+            let band = eqUnit.bands[index]
+            band.filterType = .parametric
+            band.frequency = frequency
+            band.bandwidth = 1.0
+            band.gain = bandGains[index]
+            band.bypass = false
+        }
+        eqUnit.bypass = bypassed
+        varispeed.rate = baselineRate * correction
+        engine.mainMixerNode.outputVolume = outputLevelValue
+    }
+
+    func bandGain(_ index: Int) -> Float { bandGains[index] }
+
+    func setBand(_ index: Int, gain: Float) {
+        let clamped = min(max(gain, -12), 12)
+        bandGains[index] = clamped
+        eqUnit.bands[index].gain = clamped
+    }
+
+    func applyCurve(_ gains: [Float]) {
+        for index in 0..<10 {
+            setBand(index, gain: gains.indices.contains(index) ? gains[index] : 0)
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        bypassed = !enabled
+        eqUnit.bypass = bypassed
+    }
+
+    func setBaselineRate(_ rate: Float) {
+        baselineRate = rate
+        varispeed.rate = baselineRate * correction
+    }
+
+    /// Micro-correction from the sync loop: 1 = locked to the
+    /// baseline rate; the loop clamps its input to ±3%.
+    func setCorrection(_ factor: Float) {
+        correction = min(max(factor, 0.97), 1.03)
+        varispeed.rate = baselineRate * correction
+    }
+
+    func setOutputLevel(_ level: Float) {
+        outputLevelValue = min(max(level, 0), 1)
+        engine.mainMixerNode.outputVolume = outputLevelValue
+    }
+
+    // MARK: Graph
+
+    private func connectGraph(format: AVAudioFormat) {
+        if connected, graphFormat == format { return }
+        // A format change needs fresh connections; reset() drops
+        // them (and node parameters), so re-apply ours after.
+        engine.reset()
+        engine.connect(node, to: varispeed, format: format)
+        engine.connect(varispeed, to: eqUnit, format: format)
+        engine.connect(eqUnit, to: engine.mainMixerNode, format: format)
+        graphFormat = format
+        connected = true
+        applyParameters()
+    }
+
+    // MARK: Starting feeds
+
+    /// Tries the streamed feed first, then the file feed. The
+    /// position provider is consulted at the moment each feed
+    /// actually primes, so a slow download still lands on the
+    /// video's current position.
+    func start(source: Source, position: @escaping () -> TimeInterval) async -> Feed {
+        self.source = source
+        teardownFeed(deleteTemp: true)
+        if await primeStreamed(source: source, startAt: position()) {
+            return .streamed
+        }
+        if await primeFileRoute(source: source, position: position) {
+            return .file
+        }
+        feed = .none
+        return .none
+    }
+
+    func switchToFile(position: @escaping () -> TimeInterval) async -> Bool {
+        guard let source else { return false }
+        teardownFeed(deleteTemp: true)
+        return await primeFileRoute(source: source, position: position)
+    }
+
+    private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
+        let asset = AVURLAsset(url: source.url, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": source.userAgent, "Referer": "https://www.youtube.com/"]
+        ])
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false),
+              let newReader = try? AVAssetReader(asset: asset) else { return false }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: true
+        ])
+        output.alwaysCopiesSampleData = false
+        guard newReader.canAdd(output) else { return false }
+        newReader.add(output)
+        if startAt > 0 {
+            newReader.timeRange = CMTimeRange(start: CMTime(seconds: startAt, preferredTimescale: 600),
+                                              duration: .positiveInfinity)
+        }
+        connectGraph(format: format)
+        node.stop()
+        reader = newReader
+        readerOutput = output
+        primeOffset = startAt
+        scheduledFrames = 0
+        streamEnded = false
+        stallReported = false
+        lastBufferAt = Date()
+        audioDuration = 0
+        guard newReader.startReading() else {
+            teardownFeed(deleteTemp: false)
+            return false
+        }
+        feed = .streamed
+        startPump()
+        if !engine.isRunning { try? engine.start() }
+        if desiredPlaying { node.play() }
+        return true
+    }
+
+    private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {
+        guard let downloaded = try? await TrapTubeDirectDownloader.shared.download(
+            from: source.url, userAgent: source.userAgent, onProgress: { _ in }) else { return false }
+        // AVAudioFile needs a real audio extension to open the
+        // container; the downloader's temp files carry none.
+        let local = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tt-ghost-\(UUID().uuidString).m4a")
+        if (try? FileManager.default.moveItem(at: downloaded, to: local)) == nil {
+            guard (try? FileManager.default.copyItem(at: downloaded, to: local)) != nil else { return false }
+            try? FileManager.default.removeItem(at: downloaded)
+        }
+        tempFileURL = local
+        return primeFile(localURL: local, startAt: position())
+    }
+
+    private func primeFile(localURL: URL, startAt: TimeInterval) -> Bool {
+        guard let file = try? AVAudioFile(forReading: localURL) else { return false }
+        let format = file.processingFormat
+        connectGraph(format: format)
+        node.stop()
+        loadedFile = file
+        primeOffset = min(max(startAt, 0), Double(file.length) / format.sampleRate)
+        scheduledFrames = file.length
+        audioDuration = Double(file.length) / format.sampleRate
+        streamEnded = false
+        let startFrame = AVAudioFramePosition(primeOffset * format.sampleRate)
+        let frames = file.length - startFrame
+        guard frames > 0 else { return false }
+        node.scheduleSegment(file, startingFrame: startFrame,
+                             frameCount: AVAudioFrameCount(frames), at: nil)
+        feed = .file
+        if !engine.isRunning { try? engine.start() }
+        if desiredPlaying { node.play() }
+        return true
+    }
+
+    // MARK: The reader pump
+
+    private func startPump() {
+        pumpTask?.cancel()
+        pumpTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, self.feed == .streamed, let reader = self.reader {
+                if reader.status == .failed {
+                    self.reportStall()
+                    return
+                }
+                if reader.status == .completed {
+                    self.streamEnded = true
+                    return
+                }
+                if self.scheduledAhead() > 3.5 {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+                guard let output = self.readerOutput else { return }
+                if let sampleBuffer = output.copyNextSampleBuffer() {
+                    if let pcm = Self.pcmBuffer(from: sampleBuffer) {
+                        self.node.scheduleBuffer(pcm)
+                        self.scheduledFrames += AVAudioFramePosition(pcm.frameLength)
+                        self.lastBufferAt = Date()
+                    }
+                    continue
+                }
+                // Nothing available right now: a live feed that
+                // starves for over five seconds while playing is
+                // treated as failed so the session can fall back
+                // to the file feed.
+                if self.desiredPlaying, self.scheduledAhead() < 0.5,
+                   Date().timeIntervalSince(self.lastBufferAt) > 5 {
+                    self.reportStall()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 60_000_000)
+            }
+        }
+    }
+
+    private func reportStall() {
+        guard !stallReported else { return }
+        stallReported = true
+        onStreamStalled?()
+    }
+
+    private func scheduledAhead() -> TimeInterval {
+        guard let format = graphFormat else { return 0 }
+        let scheduledEnd = primeOffset + Double(scheduledFrames) / format.sampleRate
+        return scheduledEnd - (position() ?? primeOffset)
+    }
+
+    private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+        let format = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return nil }
+        buffer.frameLength = frameCount
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frameCount), into: buffer.mutableAudioBufferList)
+        return status == noErr ? buffer : nil
+    }
+
+    // MARK: Position + transport
+
+    /// The audio timeline position: where the stream primed plus
+    /// what the node has actually rendered since (the player-node
+    /// clock follows real consumption, varispeed included).
+    func position() -> TimeInterval? {
+        guard feed != .none,
+              let nodeTime = node.lastRenderTime,
+              let playerTime = node.playerTime(forNodeTime: nodeTime),
+              playerTime.sampleRate > 0 else { return nil }
+        return primeOffset + Double(playerTime.sampleTime) / playerTime.sampleRate
+    }
+
+    func setDesiredPlaying(_ playing: Bool) {
+        desiredPlaying = playing
+        guard feed != .none else { return }
+        if playing {
+            if !engine.isRunning { try? engine.start() }
+            node.play()
+        } else {
+            node.pause()
+        }
+    }
+
+    /// Stall-follow: pauses rendering without changing the
+    /// desired state the session asked for.
+    func pauseRendering() { node.pause() }
+
+    func resumeRendering() {
+        guard desiredPlaying, feed != .none else { return }
+        if !engine.isRunning { try? engine.start() }
+        node.play()
+    }
+
+    /// Hard resync: flush the node and re-prime the same feed at
+    /// the video's current position.
+    func resync(to position: TimeInterval) async -> Bool {
+        guard let source, feed != .none else { return false }
+        switch feed {
+        case .streamed:
+            return await primeStreamed(source: source, startAt: position)
+        case .file:
+            guard let tempFileURL else { return false }
+            return primeFile(localURL: tempFileURL, startAt: position)
+        case .none:
+            return false
+        }
+    }
+
+    func teardownFeed(deleteTemp: Bool) {
+        pumpTask?.cancel()
+        pumpTask = nil
+        reader?.cancelReading()
+        reader = nil
+        readerOutput = nil
+        node.stop()
+        loadedFile = nil
+        feed = .none
+        streamEnded = false
+        if deleteTemp, let tempFileURL {
+            try? FileManager.default.removeItem(at: tempFileURL)
+            self.tempFileURL = nil
+        }
+    }
+
+    func shutdown() {
+        teardownFeed(deleteTemp: true)
+        engine.stop()
+        source = nil
+        desiredPlaying = false
+    }
+}
+
+/// The persistent native playback session: one AVPlayer, one
+/// queue, alive across presentations of the player view.
+@MainActor
+final class TrapTubeNativeSession: ObservableObject {
+    static let shared = TrapTubeNativeSession()
+
+    enum Phase {
+        case idle
+        case resolving
+        case playing
+        case failed(String)
+    }
+
+    enum RepeatMode: Int {
+        case off, all, one
+    }
+
+    enum AudioPath: String {
+        case ghost, tap
+    }
+
+    let player = AVPlayer()
+    let pipHolder = TrapTubePiPHolder()
+
+    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var queue: [TrapTubeQueueItem] = []
+    @Published private(set) var queueIndex = 0
+    @Published private(set) var contextName = "YouTube"
+    @Published private(set) var currentInfo: TrapTubeVideoInfo?
+    @Published private(set) var equalizerActive = false
+    @Published private(set) var eqAttachFinished = false
+    @Published private(set) var isPlaying = false
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var rate: Float = 1
+    @Published private(set) var volume: Float = 1
+    @Published private(set) var isFavorite = false
+    @Published var isShuffled = false
+    @Published var repeatMode: RepeatMode = .off
+    @Published private(set) var crossfadeSeconds: Double = 0
+    @Published private(set) var eqEnabled: Bool = true
+    @Published private(set) var pipActive = false
+    @Published private(set) var audioPath: AudioPath = .ghost
+    @Published private(set) var ghostFeed: TrapTubeGhostAudio.Feed = .none
+    @Published private(set) var driftMs: Int?
+    @Published private(set) var usingFallbackTap = false
+
+    let ghost = TrapTubeGhostAudio()
+
+    private var startTask: Task<Void, Never>?
+    private var attachTask: Task<Void, Never>?
+    private var relatedTask: Task<Void, Never>?
+    private var fadeTask: Task<Void, Never>?
+    private var statusObservation: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
+    private var playerItem: AVPlayerItem?
+    private var generation = 0
+    private var autoFadeStarted = false
+    private var ghostTask: Task<Void, Never>?
+    private var syncTask: Task<Void, Never>?
+    private var itemUsesGhost = false
+    private var lastHardResync = Date.distantPast
+    private var outputGain: Float = 1
+
+    private init() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "TrapTube.NativePlayer.Volume") != nil {
+            volume = min(max(defaults.float(forKey: "TrapTube.NativePlayer.Volume"), 0), 1)
+        }
+        crossfadeSeconds = defaults.double(forKey: "TrapTube.NativePlayer.Crossfade")
+        eqEnabled = TrapTubeTapEQ.shared.isEnabled
+        player.volume = volume
+        outputGain = volume
+        if let savedPath = defaults.string(forKey: "TrapTube.NativePlayer.AudioPath"),
+           let path = AudioPath(rawValue: savedPath) {
+            audioPath = path
+        }
+        pipHolder.session = self
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
+            guard let self else { return }
+            Task { @MainActor in self.tick(time: time) }
+        }
+    }
+
+    var currentEntry: TrapTubeQueueItem? {
+        queue.indices.contains(queueIndex) ? queue[queueIndex] : nil
+    }
+
+    var hasActiveContent: Bool { !queue.isEmpty }
+
+    var failureMessage: String? {
+        if case .failed(let message) = phase { return message }
+        return nil
+    }
+
+    var isResolving: Bool {
+        if case .resolving = phase { return true }
+        return false
+    }
+
+    /// The honest state line (no badge theater). On the ghost
+    /// path it is the live path + drift readout the sync is judged
+    /// by; on the tap path it is the attach state; a ghost item
+    /// that fell back says so.
+    var statusText: String {
+        switch phase {
+        case .idle: return ""
+        case .resolving: return "RESOLVING…"
+        case .failed: return "PLAYBACK FAILED"
+        case .playing:
+            if itemUsesGhost {
+                if usingFallbackTap {
+                    if !eqAttachFinished { return "TAP (FALLBACK) · EQ ATTACHING…" }
+                    if !eqEnabled { return "TAP (FALLBACK) · EQ OFF" }
+                    return equalizerActive ? "TAP (FALLBACK)" : "TAP (FALLBACK) · EQ UNAVAILABLE"
+                }
+                if ghostFeed == .none { return "GHOST STARTING…" }
+                var text = ghostFeed == .file ? "GHOST (FILE)" : "GHOST (STREAMED)"
+                if !eqEnabled { text += " · EQ OFF" }
+                if let driftMs {
+                    text += " · drift \(driftMs) ms"
+                } else {
+                    text += " · SYNCING…"
+                }
+                return text
+            }
+            if !eqEnabled { return "EQ OFF — BYPASSED" }
+            if !eqAttachFinished { return "EQ ATTACHING…" }
+            return equalizerActive ? "TRAPTUBE EQ ACTIVE" : "EQ UNAVAILABLE FOR THIS STREAM"
+        }
+    }
+
+    /// True when the EQ the user hears is engaged right now -
+    /// drives the accent tint on the player's EQ affordances.
+    var eqAudiblyActive: Bool {
+        guard eqEnabled else { return false }
+        if itemUsesGhost, !usingFallbackTap { return ghostFeed != .none }
+        return equalizerActive && eqAttachFinished
+    }
+
+    /// The user's volume, routed to whichever output is live:
+    /// the ghost mixer's gain, or the player's own volume on the
+    /// tap path. Ramps and fades all write through here.
+    private func applyOutputGain() {
+        if itemUsesGhost {
+            ghost.setOutputLevel(outputGain)
+        } else {
+            player.volume = outputGain
+        }
+    }
+
+    func setAudioPath(_ path: AudioPath) {
+        guard path != audioPath else { return }
+        audioPath = path
+        UserDefaults.standard.set(path.rawValue, forKey: "TrapTube.NativePlayer.AudioPath")
+        // On-device A/B: restart the current track at the same
+        // position through the newly chosen path.
+        if hasActiveContent, case .playing = phase {
+            load(index: queueIndex, startAt: currentTime, fadeIn: 0)
+        }
+    }
+
+    var remainingLabel: String {
+        guard duration > 0 else { return "-0:00" }
+        return "-" + Self.timeLabel(max(0, duration - currentTime))
+    }
+
+    static func timeLabel(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        let minutes = total / 60
+        let rest = total % 60
+        return rest < 10 ? "\(minutes):0\(rest)" : "\(minutes):\(rest)"
+    }
+
+    func pipStateChanged(active: Bool) { pipActive = active }
+
+    // MARK: Starting and loading
+
+    func begin(request: TrapTubeNativePlayRequest) {
+        if let current = currentEntry, current.videoID == request.videoID, player.currentItem != nil {
+            if case .failed = phase {
+                load(index: queueIndex, startAt: 0, fadeIn: 0)
+            }
+            return
+        }
+        queue = [TrapTubeQueueItem(videoID: request.videoID, title: request.title, channel: "")]
+        queueIndex = 0
+        contextName = request.contextName
+        load(index: 0, startAt: request.startAt, fadeIn: 0)
+    }
+
+    func retry() {
+        guard !queue.isEmpty else { return }
+        load(index: queueIndex, startAt: 0, fadeIn: 0)
+    }
+
+    private func load(index: Int, startAt: TimeInterval, fadeIn: TimeInterval) {
+        guard queue.indices.contains(index) else { return }
+        queueIndex = index
+        generation += 1
+        let loadGeneration = generation
+        startTask?.cancel()
+        attachTask?.cancel()
+        relatedTask?.cancel()
+        fadeTask?.cancel()
+        ghostTask?.cancel()
+        syncTask?.cancel()
+        ghost.onStreamStalled = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        removeEndObserver()
+        playerItem = nil
+        phase = .resolving
+        equalizerActive = false
+        eqAttachFinished = false
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        autoFadeStarted = false
+        itemUsesGhost = audioPath == .ghost
+        usingFallbackTap = false
+        ghostFeed = .none
+        driftMs = nil
+        outputGain = volume
+        applyOutputGain()
+
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        let entry = queue[index]
+        startTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let info = try await TrapTubeInnerTube.fetchInfo(videoID: entry.videoID)
+                guard !Task.isCancelled, self.generation == loadGeneration else { return }
+                let item = try await Self.makePlayerItem(info: info)
+                guard !Task.isCancelled, self.generation == loadGeneration else { return }
+                self.currentInfo = info
+                var updatedQueue = self.queue
+                if updatedQueue.indices.contains(index) {
+                    updatedQueue[index] = TrapTubeQueueItem(
+                        videoID: info.videoID,
+                        title: info.title.isEmpty ? entry.title : info.title,
+                        channel: info.author)
+                    self.queue = updatedQueue
+                }
+                self.isFavorite = TrapTubeFavoritesStore.shared.contains(videoID: entry.videoID)
+                self.playerItem = item
+                self.statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+                    guard observedItem.status == .failed else { return }
+                    let message = observedItem.error?.localizedDescription ?? "The stream failed to load."
+                    Task { @MainActor in self?.failCurrentItem(message: message) }
+                }
+                self.endObserver = NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.handleItemEnd() }
+                }
+                // The previous item's ghost feed ends exactly
+                // when its video does.
+                self.ghost.teardownFeed(deleteTemp: false)
+                self.ghostFeed = .none
+                self.driftMs = nil
+                self.player.replaceCurrentItem(with: item)
+                self.phase = .playing
+                // Ghost items play video-only; the engine owns
+                // the audio. Tap items (and ghost fallbacks)
+                // play the stream's own audio.
+                self.player.isMuted = self.itemUsesGhost
+                if startAt > 5 {
+                    // Pick up roughly where the page video left off;
+                    // the completionHandler seek variant (the async
+                    // variant without await failed CI in Round 6).
+                    self.player.seek(to: CMTime(seconds: startAt, preferredTimescale: 600),
+                                     toleranceBefore: CMTime(seconds: 2, preferredTimescale: 600),
+                                     toleranceAfter: .zero) { _ in }
+                }
+                self.play()
+                if fadeIn > 0 {
+                    self.outputGain = 0
+                    self.applyOutputGain()
+                    self.rampVolume(to: self.volume, duration: fadeIn)
+                }
+                if self.itemUsesGhost {
+                    self.startGhost(info: info, generation: loadGeneration, item: item)
+                } else {
+                    // The EQ tap attaches alongside playback in its
+                    // own task: it never gates playback, and stop()
+                    // can cancel it cleanly.
+                    self.attachTask = Task { [weak self] in
+                        let attached = await TrapTubeTapEQ.shared.attach(to: item)
+                        guard let self, self.generation == loadGeneration, self.playerItem === item else { return }
+                        self.equalizerActive = attached
+                        self.eqAttachFinished = true
+                    }
+                }
+                // A single-video launch grows into the watch-next
+                // queue ("YouTube Mix") when YouTube offers one.
+                if self.queue.count == 1 {
+                    let sourceID = entry.videoID
+                    self.relatedTask = Task { [weak self] in
+                        let related = await TrapTubeInnerTube.fetchRelated(videoID: sourceID)
+                        guard let self, !Task.isCancelled, self.generation == loadGeneration,
+                              self.queue.count == 1, self.queue.first?.videoID == sourceID,
+                              !related.isEmpty else { return }
+                        self.queue = self.queue + related
+                        if self.contextName == "YouTube" { self.contextName = "YouTube Mix" }
+                    }
+                }
+            } catch {
+                if !Task.isCancelled, self.generation == loadGeneration {
+                    self.phase = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    // MARK: Ghost orchestration
+
+    /// The ghost's audio source for an item: the best AAC
+    /// audio-only stream (the same family the composition path
+    /// uses), or the muxed file's own audio track when no
+    /// adaptive audio exists.
+    private static func ghostSource(info: TrapTubeVideoInfo) -> TrapTubeGhostAudio.Source? {
+        if let aac = info.audioOnly.filter({ $0.isAACAudio }).max(by: { $0.bitrate < $1.bitrate }),
+           let url = URL(string: aac.url) {
+            return TrapTubeGhostAudio.Source(
+                url: url, userAgent: aac.userAgent.isEmpty ? info.userAgent : aac.userAgent)
+        }
+        if let muxed = info.muxed.first, let url = URL(string: muxed.url) {
+            return TrapTubeGhostAudio.Source(
+                url: url, userAgent: muxed.userAgent.isEmpty ? info.userAgent : muxed.userAgent)
+        }
+        return nil
+    }
+
+    private func startGhost(info: TrapTubeVideoInfo, generation loadGeneration: Int, item: AVPlayerItem) {
+        ghostTask?.cancel()
+        ghost.onStreamStalled = { [weak self] in
+            guard let self, self.generation == loadGeneration else { return }
+            self.escalateGhostToFile(generation: loadGeneration)
+        }
+        ghostTask = Task { [weak self] in
+            guard let self else { return }
+            guard let source = Self.ghostSource(info: info) else {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            self.ghost.setBaselineRate(self.rate)
+            self.ghost.setEnabled(self.eqEnabled)
+            let feed = await self.ghost.start(source: source) { [weak self] in
+                self?.player.currentTime().seconds ?? 0
+            }
+            guard !Task.isCancelled, self.generation == loadGeneration, self.playerItem === item else { return }
+            if feed == .none {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+                return
+            }
+            self.ghostFeed = feed
+            self.equalizerActive = true
+            self.eqAttachFinished = true
+            self.ghost.setDesiredPlaying(self.isPlaying || self.player.timeControlStatus == .playing)
+            self.startSyncLoop(generation: loadGeneration)
+        }
+    }
+
+    /// A streamed feed that fails or starves escalates to the
+    /// file feed at the video's current position.
+    private func escalateGhostToFile(generation loadGeneration: Int) {
+        guard itemUsesGhost, !usingFallbackTap, ghostFeed == .streamed else { return }
+        ghostTask?.cancel()
+        ghostTask = Task { [weak self] in
+            guard let self else { return }
+            let ok = await self.ghost.switchToFile { [weak self] in
+                self?.player.currentTime().seconds ?? 0
+            }
+            guard !Task.isCancelled, self.generation == loadGeneration else { return }
+            if ok {
+                self.ghostFeed = .file
+                self.ghost.setDesiredPlaying(self.isPlaying || self.player.timeControlStatus == .playing)
+            } else if let item = self.playerItem {
+                self.beginTapFallback(generation: loadGeneration, item: item)
+            }
+        }
+    }
+
+    /// Ghost failed outright on this item: unmute the stream and
+    /// run the Round 5/6 tap attach for it instead.
+    private func beginTapFallback(generation loadGeneration: Int, item: AVPlayerItem) {
+        guard generation == loadGeneration, playerItem === item else { return }
+        usingFallbackTap = true
+        ghostFeed = .none
+        driftMs = nil
+        syncTask?.cancel()
+        ghost.teardownFeed(deleteTemp: true)
+        player.isMuted = false
+        outputGain = volume
+        applyOutputGain()
+        attachTask?.cancel()
+        attachTask = Task { [weak self] in
+            let attached = await TrapTubeTapEQ.shared.attach(to: item)
+            guard let self, self.generation == loadGeneration, self.playerItem === item else { return }
+            self.equalizerActive = attached
+            self.eqAttachFinished = true
+        }
+    }
+
+    /// The 5 Hz sync loop. Deadband ±25 ms does nothing; 25-120 ms
+    /// of error bends the varispeed rate (proportional, clamped to
+    /// ±3%) until the audio is back inside the deadband; beyond
+    /// 120 ms - or when the video comes back from a stall - the
+    /// feed hard-resyncs at the video's position. While AVPlayer
+    /// waits on the network, the ghost node waits with it.
+    private func startSyncLoop(generation loadGeneration: Int) {
+        syncTask?.cancel()
+        lastHardResync = Date.distantPast
+        var waitingOnVideo = false
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self, self.generation == loadGeneration,
+                      self.itemUsesGhost, !self.usingFallbackTap,
+                      self.ghostFeed != .none, case .playing = self.phase else { continue }
+                if self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                    if !waitingOnVideo {
+                        waitingOnVideo = true
+                        self.ghost.pauseRendering()
+                    }
+                    continue
+                }
+                if waitingOnVideo {
+                    waitingOnVideo = false
+                    self.ghost.resumeRendering()
+                    await self.hardResyncGhost()
+                    continue
+                }
+                guard let audioTime = self.ghost.position() else { continue }
+                let videoTime = self.player.currentTime().seconds
+                guard videoTime.isFinite else { continue }
+                let drift = audioTime - videoTime
+                self.driftMs = Int((drift * 1000).rounded())
+                guard self.isPlaying else { continue }
+                let magnitude = abs(drift)
+                if magnitude <= 0.025 {
+                    self.ghost.setCorrection(1)
+                } else if magnitude <= 0.120 {
+                    self.ghost.setCorrection(Float(min(max(1 - drift * 0.8, 0.97), 1.03)))
+                } else if !self.ghost.streamEnded,
+                          Date().timeIntervalSince(self.lastHardResync) > 1.5 {
+                    await self.hardResyncGhost()
+                }
+            }
+        }
+    }
+
+    private func hardResyncGhost() async {
+        lastHardResync = Date()
+        ghost.setCorrection(1)
+        let target = player.currentTime().seconds
+        let ok = await ghost.resync(to: target.isFinite ? target : 0)
+        guard itemUsesGhost, !usingFallbackTap else { return }
+        if !ok {
+            if ghostFeed == .streamed {
+                escalateGhostToFile(generation: generation)
+            } else if let item = playerItem {
+                beginTapFallback(generation: generation, item: item)
+            }
+        }
+    }
+
+    func stop() {
+        generation += 1
+        startTask?.cancel(); startTask = nil
+        attachTask?.cancel(); attachTask = nil
+        relatedTask?.cancel(); relatedTask = nil
+        fadeTask?.cancel(); fadeTask = nil
+        ghostTask?.cancel(); ghostTask = nil
+        syncTask?.cancel(); syncTask = nil
+        ghost.onStreamStalled = nil
+        ghost.shutdown()
+        itemUsesGhost = false
+        usingFallbackTap = false
+        ghostFeed = .none
+        driftMs = nil
+        statusObservation?.invalidate(); statusObservation = nil
+        removeEndObserver()
+        playerItem = nil
+        player.pause()
+        player.isMuted = false
+        player.replaceCurrentItem(with: nil)
+        queue = []
+        queueIndex = 0
+        currentInfo = nil
+        phase = .idle
+        equalizerActive = false
+        eqAttachFinished = false
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        outputGain = volume
+        player.volume = volume
+    }
+
+    private func removeEndObserver() {
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+    }
+
+    private func failCurrentItem(message: String) {
+        if case .playing = phase {
+            phase = .failed(message)
+            // A dead video must not leave ghost audio running.
+            if itemUsesGhost { ghost.pauseRendering() }
+        }
+    }
+
+    // MARK: Transport
+
+    func play() {
+        fadeTask?.cancel()
+        autoFadeStarted = false
+        outputGain = volume
+        applyOutputGain()
+        let wasPlaying = isPlaying
+        player.play()
+        if rate != 1 { player.rate = rate }
+        if itemUsesGhost, !usingFallbackTap, ghostFeed != .none {
+            ghost.setDesiredPlaying(true)
+            // Resuming is a sync event: re-prime the feed at the
+            // video's position rather than trusting the pause gap.
+            if !wasPlaying {
+                Task { [weak self] in await self?.hardResyncGhost() }
+            }
+        }
+    }
+
+    func pause() {
+        player.pause()
+        if itemUsesGhost { ghost.setDesiredPlaying(false) }
+    }
+
+    func togglePlay() {
+        if isPlaying {
+            pause()
+        } else if case .failed = phase {
+            retry()
+        } else {
+            play()
+        }
+    }
+
+    func seek(toSeconds seconds: TimeInterval) {
+        let clamped = max(0, seconds)
+        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            // A completed seek is a sync event for the ghost feed.
+            guard finished, let self, self.itemUsesGhost, !self.usingFallbackTap,
+                  self.ghostFeed != .none else { return }
+            Task { [weak self] in await self?.hardResyncGhost() }
+        }
+        currentTime = clamped
+        autoFadeStarted = false
+        fadeTask?.cancel()
+        if isPlaying { outputGain = volume; applyOutputGain() }
+    }
+
+    func seek(toFraction fraction: Double) {
+        guard duration > 0 else { return }
+        seek(toSeconds: min(max(fraction, 0), 1) * duration)
+    }
+
+    func setRate(_ newRate: Float) {
+        rate = newRate
+        player.defaultRate = newRate
+        if isPlaying { player.rate = newRate }
+        // The varispeed unit takes the same baseline rate (it
+        // pitch-shifts with speed, which is expected at non-1x).
+        ghost.setBaselineRate(newRate)
+    }
+
+    func setVolume(_ newVolume: Float) {
+        volume = min(max(newVolume, 0), 1)
+        fadeTask?.cancel()
+        autoFadeStarted = false
+        outputGain = volume
+        applyOutputGain()
+        UserDefaults.standard.set(volume, forKey: "TrapTube.NativePlayer.Volume")
+    }
+
+    func setCrossfade(_ seconds: Double) {
+        crossfadeSeconds = min(max(seconds, 0), 12)
+        UserDefaults.standard.set(crossfadeSeconds, forKey: "TrapTube.NativePlayer.Crossfade")
+    }
+
+    func setEQEnabled(_ enabled: Bool) {
+        eqEnabled = enabled
+        TrapTubeTapEQ.shared.setEnabled(enabled)
+        ghost.setEnabled(enabled)
+    }
+
+    func toggleFavorite() {
+        guard let entry = currentEntry else { return }
+        TrapTubeFavoritesStore.shared.toggle(entry)
+        isFavorite = TrapTubeFavoritesStore.shared.contains(videoID: entry.videoID)
+    }
+
+    func cycleRepeatMode() {
+        repeatMode = RepeatMode(rawValue: (repeatMode.rawValue + 1) % 3) ?? .off
+    }
+
+    // MARK: Queue
+
+    func nextIndex(auto: Bool) -> Int? {
+        guard !queue.isEmpty else { return nil }
+        if isShuffled, queue.count > 1 {
+            var candidate = queueIndex
+            while candidate == queueIndex { candidate = Int.random(in: queue.indices) }
+            return candidate
+        }
+        if queueIndex + 1 < queue.count { return queueIndex + 1 }
+        if repeatMode == .all { return 0 }
+        return nil
+    }
+
+    var hasNext: Bool { nextIndex(auto: false) != nil }
+    var hasPrevious: Bool { queueIndex > 0 || repeatMode == .all }
+
+    func playNext() {
+        guard let target = nextIndex(auto: false) else { return }
+        transition(to: target)
+    }
+
+    func playPrevious() {
+        if currentTime > 3 {
+            seek(toSeconds: 0)
+        } else if queueIndex > 0 {
+            transition(to: queueIndex - 1)
+        } else if repeatMode == .all, !queue.isEmpty {
+            transition(to: queue.count - 1)
+        } else {
+            seek(toSeconds: 0)
+        }
+    }
+
+    func playQueueItem(at index: Int) {
+        guard index != queueIndex, queue.indices.contains(index) else { return }
+        transition(to: index)
+    }
+
+    private func transition(to index: Int) {
+        let fade = crossfadeSeconds
+        if fade > 0, isPlaying {
+            rampVolume(to: 0, duration: min(fade, 0.7)) { [weak self] in
+                self?.load(index: index, startAt: 0, fadeIn: min(fade, 1.2))
+            }
+        } else {
+            load(index: index, startAt: 0, fadeIn: min(fade, 1.2))
+        }
+    }
+
+    private func handleItemEnd() {
+        isPlaying = false
+        if repeatMode == .one {
+            let fade = crossfadeSeconds
+            if fade > 0 { outputGain = 0; applyOutputGain() }
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                guard let self else { return }
+                self.autoFadeStarted = false
+                self.player.play()
+                if self.rate != 1 { self.player.rate = self.rate }
+                if self.itemUsesGhost, !self.usingFallbackTap, self.ghostFeed != .none {
+                    self.ghost.setDesiredPlaying(true)
+                    Task { [weak self] in await self?.hardResyncGhost() }
+                }
+                if fade > 0 { self.rampVolume(to: self.volume, duration: min(fade, 1.5)) }
+            }
+            return
+        }
+        if let target = nextIndex(auto: true) {
+            load(index: target, startAt: 0, fadeIn: min(crossfadeSeconds, 2.0))
+        } else {
+            outputGain = volume
+            applyOutputGain()
+            currentTime = duration
+        }
+    }
+
+    // MARK: Progress + crossfade
+
+    private func tick(time: CMTime) {
+        let seconds = time.seconds
+        if seconds.isFinite, seconds >= 0 { currentTime = seconds }
+        if let itemDuration = player.currentItem?.duration.seconds,
+           itemDuration.isFinite, itemDuration > 0 {
+            duration = itemDuration
+        }
+        let playing = player.timeControlStatus == .playing
+        if playing != isPlaying { isPlaying = playing }
+        if playing, rate != 1, abs(player.rate - rate) > 0.01 { player.rate = rate }
+        // Crossfade: begin the fade-out early enough to land
+        // exactly on the item's end; the next entry fades in.
+        if crossfadeSeconds > 0, !autoFadeStarted, playing, duration > 0,
+           case .playing = phase {
+            let remaining = duration - currentTime
+            if remaining <= crossfadeSeconds, remaining > 0.1,
+               repeatMode == .one || nextIndex(auto: true) != nil {
+                autoFadeStarted = true
+                rampVolume(to: 0, duration: remaining)
+            }
+        }
+    }
+
+    private func rampVolume(to target: Float, duration: TimeInterval, completion: @escaping () -> Void = {}) {
+        fadeTask?.cancel()
+        guard duration > 0.05 else {
+            outputGain = target
+            applyOutputGain()
+            completion()
+            return
+        }
+        let start = outputGain
+        let steps = max(4, Int(duration / 0.05))
+        fadeTask = Task { [weak self] in
+            for step in 1...steps {
+                try? await Task.sleep(nanoseconds: UInt64(duration / Double(steps) * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.outputGain = start + (target - start) * Float(step) / Float(steps)
+                self.applyOutputGain()
+            }
+            guard !Task.isCancelled else { return }
+            completion()
+        }
+    }
+
+    // MARK: Stream construction (Round 6 crash-proofed)
+
+    /// Muxed MP4 when YouTube offers one; otherwise an AVC + AAC
+    /// composition built from the adaptive streams (the same pairing
+    /// the download merge uses).
+    private static func makePlayerItem(info: TrapTubeVideoInfo) async throws -> AVPlayerItem {
+        if let muxed = info.muxed.first, let url = URL(string: muxed.url) {
+            let asset = AVURLAsset(url: url, options: headerOptions(userAgent: muxed.userAgent.isEmpty ? info.userAgent : muxed.userAgent))
+            return AVPlayerItem(asset: asset)
+        }
+        guard let video = info.adaptiveVideo.first(where: { $0.isAVCVideo }),
+              let audio = info.audioOnly.first(where: { $0.isAACAudio }),
+              let videoURL = URL(string: video.url),
+              let audioURL = URL(string: audio.url) else {
+            throw TrapTubeModError.unplayable("no stream this player can use (it needs a muxed MP4 or an AVC + AAC pair)")
+        }
+        let videoAsset = AVURLAsset(url: videoURL, options: headerOptions(userAgent: video.userAgent.isEmpty ? info.userAgent : video.userAgent))
+        let audioAsset = AVURLAsset(url: audioURL, options: headerOptions(userAgent: audio.userAgent.isEmpty ? info.userAgent : audio.userAgent))
+        guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw TrapTubeModError.unplayable("the adaptive streams had no usable tracks")
+        }
+        // Round 6 defensive composition: insert ranges come from
+        // each track's OWN loaded timeRange, clamped to the shorter
+        // track - never from the assets' reported durations, which
+        // can exceed a track's real range and make AVFoundation
+        // raise (crash) instead of throwing.
+        let videoRange = try await videoTrack.load(.timeRange)
+        let audioRange = try await audioTrack.load(.timeRange)
+        let target = CMTimeMinimum(videoRange.duration, audioRange.duration)
+        guard videoRange.isValid, audioRange.isValid,
+              target.isValid, target.isNumeric, target.seconds > 0 else {
+            throw TrapTubeModError.unplayable("the adaptive streams reported no usable timeline")
+        }
+        let composition = AVMutableComposition()
+        guard let compositionVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw TrapTubeModError.unplayable("could not build the playback composition")
+        }
+        do {
+            try compositionVideo.insertTimeRange(CMTimeRange(start: videoRange.start, duration: target), of: videoTrack, at: .zero)
+            try compositionAudio.insertTimeRange(CMTimeRange(start: audioRange.start, duration: target), of: audioTrack, at: .zero)
+        } catch {
+            throw TrapTubeModError.unplayable("could not assemble the video and audio streams (\(error.localizedDescription))")
+        }
+        if let transform = try? await videoTrack.load(.preferredTransform) {
+            compositionVideo.preferredTransform = transform
+        }
+        return AVPlayerItem(asset: composition)
+    }
+
+    private static func headerOptions(userAgent: String) -> [String: Any] {
+        ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": userAgent, "Referer": "https://www.youtube.com/"]]
+    }
+}
+
+final class TrapTubePlayerContainerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        playerLayer.videoGravity = .resizeAspect
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+struct TrapTubePlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+    let onLayer: (AVPlayerLayer) -> Void
+
+    func makeUIView(context: Context) -> TrapTubePlayerContainerView {
+        let view = TrapTubePlayerContainerView()
+        view.playerLayer.player = player
+        onLayer(view.playerLayer)
+        return view
+    }
+
+    func updateUIView(_ uiView: TrapTubePlayerContainerView, context: Context) {
+        if uiView.playerLayer.player !== player { uiView.playerLayer.player = player }
+        onLayer(uiView.playerLayer)
+    }
+}
+
+/// Fullscreen via AVPlayerViewController on the same AVPlayer -
+/// the same surface SwiftUI's VideoPlayer used in Rounds 5/6, so
+/// its native chrome (including its own PiP button) is unchanged.
+enum TrapTubeFullscreenPresenter {
+    static func present(player: AVPlayer) {
+        guard let top = topViewController() else { return }
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.allowsPictureInPicturePlayback = true
+        controller.modalPresentationStyle = .fullScreen
+        top.present(controller, animated: true)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        let window = scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        return top
+    }
+}
+
+struct TrapTubeRoutePicker: UIViewRepresentable {
+    let tint: Color
+
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.backgroundColor = .clear
+        view.tintColor = .white
+        view.activeTintColor = UIColor(tint)
+        view.prioritizesVideoDevices = true
+        return view
+    }
+
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {
+        uiView.activeTintColor = UIColor(tint)
+    }
+}
+
+/// The thin seek line from the reference: gray track, accent fill,
+/// drag and tap both seek.
+struct TrapTubeSeekBar: View {
+    let progress: Double
+    let tint: Color
+    let onSeek: (Double) -> Void
+    @State private var dragFraction: Double?
+
+    private var shownFraction: Double { min(max(dragFraction ?? progress, 0), 1) }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(geo.size.width, 1)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.22)).frame(height: 3)
+                Capsule().fill(tint).frame(width: width * CGFloat(shownFraction), height: 3)
+                Circle().fill(tint).frame(width: 11, height: 11)
+                    .offset(x: width * CGFloat(shownFraction) - 5.5)
+            }
+            .frame(height: 18)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    dragFraction = min(max(Double(value.location.x / width), 0), 1)
+                }
+                .onEnded { value in
+                    let fraction = min(max(Double(value.location.x / width), 0), 1)
+                    dragFraction = nil
+                    onSeek(fraction)
+                })
+        }
+        .frame(height: 18)
+    }
+}
+
+/// Title that scrolls horizontally (marquee) when it overflows,
+/// like the reference; static when it fits.
+struct TrapTubeMarqueeText: View {
+    let text: String
+    let font: Font
+    let uiFont: UIFont
+    @State private var offset: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geo in
+            let textWidth = (text as NSString).size(withAttributes: [.font: uiFont]).width
+            let overflows = textWidth > geo.size.width + 1
+            ZStack(alignment: .leading) {
+                HStack(spacing: 48) {
+                    Text(text).font(font).foregroundStyle(.white).lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    if overflows {
+                        Text(text).font(font).foregroundStyle(.white).lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .offset(x: offset)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+            .onAppear { restart(textWidth: textWidth, containerWidth: geo.size.width) }
+            .onChange(of: text) { _, _ in restart(textWidth: textWidth, containerWidth: geo.size.width) }
+        }
+    }
+
+    private func restart(textWidth: CGFloat, containerWidth: CGFloat) {
+        offset = 0
+        guard textWidth > containerWidth + 1 else { return }
+        let distance = textWidth + 48
+        withAnimation(.linear(duration: Double(distance) / 42).delay(1.4).repeatForever(autoreverses: false)) {
+            offset = -distance
+        }
+    }
+}
+
+struct TrapTubeNativeStreamPlayer: View {
+    let request: TrapTubeNativePlayRequest
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audio: AudioEngineManager
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var session = TrapTubeNativeSession.shared
+    @State private var showEqualizer = false
+    @State private var showQueue = false
+    @State private var showDownload = false
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                videoArea
+                seekRow
+                titleBlock
+                transportRow
+                volumeRow
+                actionRow
+                statusRow
+                Spacer(minLength: 0)
+            }
+        }
+        .background(.black)
+        .task { session.begin(request: request) }
+        .onChange(of: audio.eqGains) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.bassBoost) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .onChange(of: audio.masterGain) { _, _ in TrapTubeTapEQ.shared.update(gains: audio.eqGains, bass: audio.bassBoost, master: audio.masterGain) }
+        .sheet(isPresented: $showEqualizer) {
+            TrapTubePlayerEQSheet()
+                .environmentObject(audio).environmentObject(theme)
+                .presentationDetents([.large])
+                .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showQueue) {
+            TrapTubeQueueView()
+                .environmentObject(theme)
+                .presentationDetents([.large])
+                .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showDownload) {
+            TrapTubeModDownloadSheet(videoID: session.currentEntry?.videoID ?? request.videoID, preloaded: session.currentInfo)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            Button { collapse() } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+            }
+            .accessibilityLabel("Collapse player")
+            Spacer()
+            VStack(spacing: 1) {
+                Text("PLAYING FROM")
+                    .font(.system(size: 9, weight: .bold)).tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.5))
+                Text(session.contextName)
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            }
+            Spacer()
+            Button { showQueue = true } label: {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+            }
+            .accessibilityLabel("Show queue")
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+    }
+
+    private func collapse() {
+        // Collapsing keeps playback alive in the session (the mini
+        // bar takes over) - except for a failed item, which is
+        // torn down instead of haunting the bar.
+        if session.failureMessage != nil { session.stop() }
+        dismiss()
+    }
+
+    private var videoArea: some View {
+        TrapTubePlayerLayerView(player: session.player) { layer in
+            session.pipHolder.attach(layer: layer)
+        }
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .background(.black)
+        .overlay(alignment: .topTrailing) {
+            if session.pipHolder.isSupported {
+                Button {
+                    session.pipHolder.toggle()
+                } label: {
+                    Image(systemName: "pip.enter")
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
+                }
+                .padding(10)
+                .accessibilityLabel("Picture in picture")
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            Button {
+                TrapTubeFullscreenPresenter.present(player: session.player)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(.black.opacity(0.55), in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
+            }
+            .padding(10)
+            .accessibilityLabel("Fullscreen")
+        }
+        .overlay {
+            if session.isResolving {
+                ZStack {
+                    Color.black.opacity(0.35)
+                    VStack(spacing: 12) {
+                        ProgressView().tint(.white)
+                        Text("Resolving stream…")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                    }
+                }
+            }
+        }
+        .overlay {
+            if let message = session.failureMessage {
+                ZStack {
+                    Color.black.opacity(0.72)
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.title2).foregroundStyle(Color(hex: "FF7A84"))
+                        Text(message)
+                            .font(.subheadline).foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Button("Retry") { session.retry() }
+                                .font(.subheadline.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 16).padding(.vertical, 9)
+                                .background(theme.accent, in: Capsule())
+                            Button("Close") { session.stop(); dismiss() }
+                                .font(.subheadline.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 16).padding(.vertical, 9)
+                                .background(.white.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    .padding(24)
+                }
+            }
+        }
+    }
+
+    private var seekRow: some View {
+        VStack(spacing: 3) {
+            TrapTubeSeekBar(progress: session.duration > 0 ? session.currentTime / session.duration : 0,
+                            tint: theme.accent) { fraction in
+                session.seek(toFraction: fraction)
+            }
+            .padding(.horizontal, 16)
+            HStack {
+                Text(TrapTubeNativeSession.timeLabel(session.currentTime))
+                Spacer()
+                Text(session.remainingLabel)
+            }
+            .font(.system(size: 11, weight: .medium).monospacedDigit())
+            .foregroundStyle(.white.opacity(0.55))
+            .padding(.horizontal, 16)
+        }
+        .padding(.top, -4)
+    }
+
+    private var titleBlock: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                TrapTubeMarqueeText(text: session.currentEntry?.title ?? request.title,
+                                    font: .system(size: 20, weight: .bold),
+                                    uiFont: .systemFont(ofSize: 20, weight: .bold))
+                    .frame(height: 26)
+                Text(session.currentEntry?.channel ?? "")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Button {
+                session.toggleFavorite()
+            } label: {
+                Image(systemName: session.isFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(session.isFavorite ? theme.accent : .white.opacity(0.85))
+                    .frame(width: 40, height: 40)
+            }
+            .accessibilityLabel(session.isFavorite ? "Remove from favorites" : "Add to favorites")
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+    }
+
+    private var transportRow: some View {
+        HStack(alignment: .center) {
+            Spacer()
+            transportButton(systemName: "shuffle", active: session.isShuffled, disabled: session.queue.count < 2) {
+                session.isShuffled.toggle()
+            }
+            Spacer()
+            transportButton(systemName: "backward.end.fill", active: false, disabled: false) {
+                session.playPrevious()
+            }
+            Spacer()
+            Button {
+                session.togglePlay()
+            } label: {
+                Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 27, weight: .bold))
+                    .foregroundStyle(.white)
+                    .offset(x: session.isPlaying ? 0 : 2)
+                    .frame(width: 66, height: 66)
+                    .background(theme.accent, in: Circle())
+                    .shadow(color: theme.accent.opacity(0.55), radius: 16, y: 4)
+            }
+            .accessibilityLabel(session.isPlaying ? "Pause" : "Play")
+            Spacer()
+            transportButton(systemName: "forward.end.fill", active: false, disabled: !session.hasNext) {
+                session.playNext()
+            }
+            Spacer()
+            transportButton(systemName: session.repeatMode == .one ? "repeat.1" : "repeat",
+                            active: session.repeatMode != .off, disabled: false) {
+                session.cycleRepeatMode()
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 26)
+        .padding(.top, 18)
+    }
+
+    private func transportButton(systemName: String, active: Bool, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(active ? theme.accent : .white.opacity(0.9))
+                .frame(width: 44, height: 44)
+        }
+        .disabled(disabled)
+        .opacity(disabled ? 0.3 : 1)
+    }
+
+    private var volumeRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "speaker.fill")
+                .font(.system(size: 13)).foregroundStyle(.white.opacity(0.55))
+            Slider(value: Binding(get: { Double(session.volume) }, set: { session.setVolume(Float($0)) }), in: 0...1)
+                .tint(theme.accent)
+            Image(systemName: "speaker.waveform.3.fill")
+                .font(.system(size: 15)).foregroundStyle(.white.opacity(0.55))
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 16)
+    }
+
+    private var actionRow: some View {
+        HStack {
+            Spacer()
+            actionButton(systemName: "plus", label: "Download this video") { showDownload = true }
+            Spacer()
+            actionButton(systemName: "slider.vertical.3", label: "Equalizer",
+                         tint: session.eqAudiblyActive ? theme.accent : .white) { showEqualizer = true }
+            Spacer()
+            TrapTubeRoutePicker(tint: theme.accent)
+                .frame(width: 40, height: 40)
+            Spacer()
+            actionButton(systemName: "list.bullet", label: "Queue") { showQueue = true }
+            Spacer()
+            ShareLink(item: shareURL) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+            }
+            .accessibilityLabel("Share")
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+    }
+
+    private var shareURL: URL {
+        URL(string: "https://www.youtube.com/watch?v=\(session.currentEntry?.videoID ?? request.videoID)")!
+    }
+
+    private func actionButton(systemName: String, label: String, tint: Color = .white, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 40, height: 40)
+        }
+        .accessibilityLabel(label)
+    }
+
+    private var statusRow: some View {
+        Text(session.statusText)
+            .font(.system(size: 10, weight: .bold))
+            .tracking(1.2)
+            .foregroundStyle(session.eqAudiblyActive ? theme.accent : .white.opacity(0.45))
+            .padding(.top, 12)
+    }
+}
+
+struct TrapTubeQueueView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var session = TrapTubeNativeSession.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Up Next").font(.headline.bold()).foregroundStyle(.white)
+                    Text(session.contextName).font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.headline.bold()).foregroundStyle(.white)
+                        .frame(width: 38, height: 38).background(.white.opacity(0.12), in: Circle())
+                }
+                .accessibilityLabel("Close queue")
+            }
+            .padding(18)
+
+            if session.queue.count <= 1 {
+                VStack(spacing: 10) {
+                    Image(systemName: "list.bullet").font(.system(size: 30)).foregroundStyle(Color(hex: "A6A4A6"))
+                    Text("Just this video for now").font(.headline.bold()).foregroundStyle(.white)
+                    Text("When YouTube offers a Mix for this video, the queue fills with its recommendations and playback auto-advances through it.")
+                        .font(.caption).foregroundStyle(Color(hex: "A6A4A6"))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(28)
+                Spacer()
+            } else {
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(spacing: 8) {
+                        ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, entry in
+                            Button {
+                                session.playQueueItem(at: index)
+                                dismiss()
+                            } label: {
+                                HStack(spacing: 11) {
+                                    AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(entry.videoID)/hqdefault.jpg")) { image in
+                                        image.resizable().scaledToFill()
+                                    } placeholder: {
+                                        Color.white.opacity(0.07)
+                                    }
+                                    .frame(width: 84, height: 52)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(entry.title)
+                                            .font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2)
+                                        Text(entry.channel)
+                                            .font(.caption).foregroundStyle(Color(hex: "A6A4A6")).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 4)
+                                    if index == session.queueIndex {
+                                        Image(systemName: "waveform").foregroundStyle(theme.accent)
+                                    }
+                                }
+                                .padding(10)
+                                .background(index == session.queueIndex ? theme.accent.opacity(0.13) : .white.opacity(0.045),
+                                            in: RoundedRectangle(cornerRadius: 12))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
+                }
+            }
+        }
+        .background(Color(hex: "141315").ignoresSafeArea())
+    }
+}
+
+/// Musi's "Settings" sheet for the native player: crossfade,
+/// playback speed, the Enable Equalizer bypass toggle, ten vertical
+/// band sliders, and Presets / Reset / Save As….
+struct TrapTubePlayerEQSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var audio: AudioEngineManager
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var session = TrapTubeNativeSession.shared
+    @AppStorage("TrapTube.PlayerEQ.Preset") private var activePresetName = "Flat"
+    @State private var showPresets = false
+    @State private var showSavePrompt = false
+    @State private var newPresetName = ""
+    @State private var customs: [TrapTubeEQPreset] = TrapTubeEQPresetLib.customPresets()
+
+    private let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
+    var body: some View {
+        ZStack {
+            Color(hex: "141315").ignoresSafeArea()
+            if showPresets {
+                presetsPage.transition(.move(edge: .trailing))
+            } else {
+                settingsPage.transition(.move(edge: .leading))
+            }
+        }
+        .preferredColorScheme(.dark)
+        .alert("Save Preset", isPresented: $showSavePrompt) {
+            TextField("Preset name", text: $newPresetName)
+            Button("Save") { saveCustomPreset() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saves the current slider positions as your own preset.")
+        }
+    }
+
+    private var settingsPage: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text("Settings").font(.headline.bold()).foregroundStyle(.white)
+                HStack {
+                    Button("Close") { dismiss() }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(spacing: 9) {
+                        HStack {
+                            Text("Crossfade").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Spacer()
+                            Text(session.crossfadeSeconds <= 0 ? "Off" : "\(Int(session.crossfadeSeconds))s")
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(theme.accent)
+                        }
+                        Slider(value: Binding(get: { session.crossfadeSeconds }, set: { session.setCrossfade($0) }),
+                               in: 0...12, step: 1)
+                            .tint(theme.accent)
+                        Text("Fades the end of a track out and the next queue entry in.")
+                            .font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+                    }
+
+                    VStack(spacing: 9) {
+                        HStack {
+                            Text("Audio Path").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Spacer()
+                            Text(session.usingFallbackTap ? "Tap (fallback)" : (session.audioPath == .ghost ? "Ghost" : "Tap"))
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(theme.accent)
+                        }
+                        Picker("Audio Path", selection: Binding(
+                            get: { session.audioPath },
+                            set: { session.setAudioPath($0) })) {
+                            Text("Ghost").tag(TrapTubeNativeSession.AudioPath.ghost)
+                            Text("Tap").tag(TrapTubeNativeSession.AudioPath.tap)
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Ghost (default) renders the audio through TrapTube's own engine and EQ while the video plays muted. Tap is the legacy in-stream processing. Switching restarts the current track at the same position.")
+                            .font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Menu {
+                        ForEach(rates, id: \.self) { rate in
+                            Button {
+                                session.setRate(rate)
+                            } label: {
+                                if rate == session.rate {
+                                    Label(Self.rateText(rate), systemImage: "checkmark")
+                                } else {
+                                    Text(Self.rateText(rate))
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text("Playback Speed").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Spacer()
+                            Text(Self.rateText(session.rate))
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(theme.accent)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2.bold()).foregroundStyle(Color(hex: "A6A4A6"))
+                        }
+                        .contentShape(Rectangle())
+                    }
+
+                    Rectangle().fill(.white.opacity(0.1)).frame(height: 1)
+
+                    HStack {
+                        Text("Enable Equalizer").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                        Spacer()
+                        Toggle("", isOn: Binding(get: { session.eqEnabled }, set: { session.setEQEnabled($0) }))
+                            .labelsHidden()
+                            .tint(theme.accent)
+                    }
+
+                    HStack(alignment: .top, spacing: 0) {
+                        ForEach(0..<10, id: \.self) { position in
+                            let modelIndex = TrapTubeEQPresetLib.displayIndices[position]
+                            TrapTubeVerticalBand(
+                                label: TrapTubeEQPresetLib.displayLabels[position],
+                                gain: bandGain(at: position, modelIndex: modelIndex),
+                                enabled: session.eqEnabled,
+                                tint: theme.accent
+                            ) { newGain in
+                                setBand(position: position, modelIndex: modelIndex, gain: newGain)
+                                activePresetName = "Custom"
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    HStack {
+                        Button("Presets") { withAnimation(.easeInOut(duration: 0.22)) { showPresets = true } }
+                        Spacer()
+                        Button("Reset") { apply(TrapTubeEQPresetLib.flat) }
+                        Spacer()
+                        Button("Save As…") { newPresetName = ""; showSavePrompt = true }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(theme.accent)
+                    .buttonStyle(.plain)
+
+                    Text("The 10 bands shown are the Musi layout (32 Hz – 16 kHz). On the Ghost path they drive the player's own EQ unit directly; on the Tap path they are exact members of the app's 16-band engine. While the equalizer is off, audio passes through untouched and the sliders keep their positions.")
+                        .font(.caption2).foregroundStyle(Color(hex: "A6A4A6"))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    private var presetsPage: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text("Choose Preset").font(.headline.bold()).foregroundStyle(.white)
+                HStack {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.22)) { showPresets = false }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left").font(.system(size: 13, weight: .bold))
+                            Text("Settings").font(.subheadline.weight(.semibold))
+                        }
+                        .foregroundStyle(theme.accent)
+                    }
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            List {
+                Section {
+                    ForEach(TrapTubeEQPresetLib.builtins) { preset in presetRow(preset) }
+                }
+                if !customs.isEmpty {
+                    Section("Your Presets") {
+                        ForEach(customs) { preset in presetRow(preset) }
+                            .onDelete { offsets in
+                                TrapTubeEQPresetLib.deleteCustoms(at: offsets)
+                                customs = TrapTubeEQPresetLib.customPresets()
+                            }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+    }
+
+    private func presetRow(_ preset: TrapTubeEQPreset) -> some View {
+        Button {
+            apply(preset)
+            withAnimation(.easeInOut(duration: 0.22)) { showPresets = false }
+        } label: {
+            HStack {
+                Text(preset.name).foregroundStyle(.white)
+                Spacer()
+                if activePresetName == preset.name {
+                    Image(systemName: "checkmark")
+                        .font(.subheadline.bold()).foregroundStyle(theme.accent)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.white.opacity(0.045))
+        .listRowSeparatorTint(.white.opacity(0.08))
+    }
+
+    /// While the ghost feed is live, the sliders and presets
+    /// bind straight to its AVAudioUnitEQ (the 10 anchors ARE the
+    /// unit's bands). Otherwise they drive the app's 16-band
+    /// engine model, expanded by log-frequency interpolation.
+    private var ghostLive: Bool { session.ghostFeed != .none }
+
+    private func bandGain(at position: Int, modelIndex: Int) -> Float {
+        ghostLive ? session.ghost.bandGain(position) : audio.eqGains[modelIndex]
+    }
+
+    private func setBand(position: Int, modelIndex: Int, gain: Float) {
+        if ghostLive {
+            session.ghost.setBand(position, gain: gain)
+        } else {
+            audio.setBand(modelIndex, gain: gain)
+        }
+    }
+
+    private func apply(_ preset: TrapTubeEQPreset) {
+        if ghostLive {
+            session.ghost.applyCurve(preset.anchors)
+        } else {
+            let gains = TrapTubeEQPresetLib.expand(preset.anchors)
+            for index in 0..<16 { audio.setBand(index, gain: gains[index]) }
+            audio.setBassBoost(preset.bass)
+        }
+        activePresetName = preset.name
+    }
+
+    private func saveCustomPreset() {
+        let name = newPresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let anchors = ghostLive
+            ? (0..<10).map { session.ghost.bandGain($0) }
+            : TrapTubeEQPresetLib.displayIndices.map { audio.eqGains[$0] }
+        let preset = TrapTubeEQPreset(name: name, anchors: anchors, bass: audio.bassBoost)
+        TrapTubeEQPresetLib.saveCustom(preset)
+        customs = TrapTubeEQPresetLib.customPresets()
+        activePresetName = name
+    }
+
+    static func rateText(_ rate: Float) -> String {
+        if rate == 1 { return "1x" }
+        return String(format: "%gx", Double(rate))
+    }
+}
+
+private struct TrapTubeVerticalBand: View {
+    let label: String
+    let gain: Float
+    let enabled: Bool
+    let tint: Color
+    let onChange: (Float) -> Void
+
+    var body: some View {
+        VStack(spacing: 7) {
+            GeometryReader { geo in
+                let height = geo.size.height
+                let width = geo.size.width
+                let clamped = min(max(gain, -12), 12)
+                let fraction = CGFloat((clamped + 12) / 24)
+                let knobY = height * (1 - fraction)
+                let fillHeight = max(height * fraction, 3)
+                ZStack {
+                    Capsule().fill(.white.opacity(0.13))
+                        .frame(width: 5, height: height)
+                        .position(x: width / 2, y: height / 2)
+                    Capsule().fill(tint)
+                        .frame(width: 5, height: fillHeight)
+                        .position(x: width / 2, y: height - fillHeight / 2)
+                    Rectangle().fill(.white.opacity(0.4))
+                        .frame(width: 12, height: 1)
+                        .position(x: width / 2, y: height / 2)
+                    Circle().fill(.white)
+                        .frame(width: 15, height: 15)
+                        .shadow(color: .black.opacity(0.35), radius: 3)
+                        .position(x: width / 2, y: knobY)
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+                    let f = min(max(1 - gesture.location.y / max(height, 1), 0), 1)
+                    onChange(Float(f * 24 - 12))
+                })
+            }
+            .frame(width: 26, height: 168)
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .frame(maxWidth: .infinity)
+        .opacity(enabled ? 1 : 0.35)
+        .allowsHitTesting(enabled)
+        .accessibilityElement()
+        .accessibilityLabel("\(label) hertz equalizer band")
+        .accessibilityValue("\(Int(gain)) decibels")
+    }
+}
+
+/// The native mini bar in RootView's bottom inset: shown while
+/// the session has content and the full player is collapsed.
+struct TrapTubeNativeMiniBar: View {
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var session = TrapTubeNativeSession.shared
+
+    var body: some View {
+        if let entry = session.currentEntry {
+            HStack(spacing: 10) {
+                Button {
+                    TrapTubeNativePlayCenter.shared.reopenSession()
+                } label: {
+                    HStack(spacing: 10) {
+                        AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(entry.videoID)/hqdefault.jpg")) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: {
+                            Color.white.opacity(0.07)
+                        }
+                        .frame(width: 54, height: 34)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title)
+                                .font(.caption.bold()).foregroundStyle(.white).lineLimit(1)
+                            Text(miniStatusText(entry: entry))
+                                .font(.caption2).foregroundStyle(Color(hex: "A6A4A6")).lineLimit(1)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 4)
+
+                if session.hasNext {
+                    Button { session.playNext() } label: {
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                    }
+                    .accessibilityLabel("Next")
+                }
+                Button { session.togglePlay() } label: {
+                    Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(theme.accent, in: Circle())
+                }
+                .accessibilityLabel(session.isPlaying ? "Pause" : "Play")
+                Button { session.stop() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 30, height: 30)
+                }
+                .accessibilityLabel("Stop playback")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+        }
+    }
+
+    private func miniStatusText(entry: TrapTubeQueueItem) -> String {
+        if session.failureMessage != nil { return "Playback failed — tap play to retry" }
+        if session.isResolving { return "Resolving…" }
+        return entry.channel.isEmpty ? session.contextName : entry.channel
+    }
+}
+'''
+if "Round 7 native stream player" not in s:
+    r7_marker = "\n// MARK: - Round 6 native stream player"
+    if r7_marker not in s:
+        raise SystemExit("round7 native player anchor missing")
+    s = s[:s.index(r7_marker)] + ROUND7_NATIVE_PLAYER_SWIFT + "\n"
+p.write_text(s)
 print("Build II hybrid navigation applied.")
