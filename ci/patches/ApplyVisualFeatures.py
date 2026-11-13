@@ -255,6 +255,7 @@ end = yt_source.index(end_marker, start)
 replacement = r'''struct YouTubeView: View {
     @EnvironmentObject private var theme: ThemeManager
     @State private var webView: WKWebView?
+    @State private var pendingURL: URL?
     @State private var searchText = ""
     @State private var selectedCategory = "All"
     @State private var isLoading = true
@@ -278,7 +279,7 @@ replacement = r'''struct YouTubeView: View {
                 ZStack(alignment: .top) {
                     YouTubeHomeWebView(
                         url: homeURL,
-                        onCreated: { webView = $0 },
+                        onCreated: { created($0) },
                         onLoading: { isLoading = $0 }
                     )
                     .background(Color.black)
@@ -439,7 +440,21 @@ replacement = r'''struct YouTubeView: View {
 
     private func load(_ url: URL) {
         guard url.host == "www.youtube.com" || url.host == "m.youtube.com" else { return }
-        webView?.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        // If the web view has not been created yet (early tap on Sign in or a
+        // category), queue the navigation instead of silently dropping it.
+        if let webView {
+            webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        } else {
+            pendingURL = url
+        }
+    }
+
+    private func created(_ view: WKWebView) {
+        webView = view
+        if let pendingURL {
+            self.pendingURL = nil
+            view.load(URLRequest(url: pendingURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        }
     }
 }
 
@@ -456,10 +471,13 @@ private struct YouTubeHomeWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
         let view = WKWebView(frame: .zero, configuration: configuration)
+        // Present as mobile Safari: Google refuses to run its sign-in flow
+        // for the default WKWebView user agent ("browser may not be secure").
+        view.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
         view.isOpaque = false
         view.backgroundColor = .black
         view.scrollView.backgroundColor = .black
-        view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.scrollView.contentInsetAdjustmentBehavior = .automatic
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
